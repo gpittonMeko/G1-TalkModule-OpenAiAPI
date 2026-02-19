@@ -1,0 +1,17 @@
+G1 TALK - AVVIO
+===============
+
+DA WINDOWS (PowerShell):
+
+  cd c:\Users\user\G1-TalkModule-OpenAiAPI
+  .\avvia.ps1
+
+  Tieni aperta la finestra.
+  Apri: http://localhost:8081/client
+
+  Con deploy: .\avvia.ps1 -deploy
+
+===============
+
+Elaborazione: AI Accelerator (Whisper, GPT, TTS).
+Mic e cuffie: tuo PC.

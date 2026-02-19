@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prova audio - Questo PC</title>
+  <style>
+    body { font-family: system-ui; padding: 24px; background: #0f0f12; color: #e4e4e7; max-width: 400px; margin: 0 auto; }
+    h1 { font-size: 1.2rem; }
+    .step { background: #18181b; padding: 16px; border-radius: 12px; margin: 12px 0; }
+    label { display: block; font-size: 12px; color: #a1a1aa; margin-bottom: 6px; }
+    select { width: 100%; padding: 12px; border-radius: 8px; background: #27272a; color: #fff; }
+    button { padding: 14px 24px; background: #22c55e; color: #0f0f12; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; margin: 8px 4px 8px 0; }
+    button.secondary { background: #3b82f6; color: white; }
+    .hint { font-size: 12px; color: #71717a; margin-top: 8px; }
+    .ok { color: #22c55e; }
+    .warn { color: #f59e0b; }
+  </style>
+</head>
+<body>
+  <h1>Prova audio - Questo PC</h1>
+  <p class="hint">Test cuffie sul tuo PC. Da terminale nella cartella del progetto: <code>python -m http.server 8765</code> poi apri <a href="http://localhost:8765/prova_audio_locale.html" style="color:#3b82f6">localhost:8765/prova_audio_locale.html</a></p>
+
+  <div class="step">
+    <button type="button" class="secondary" id="btnLoad">Carica dispositivi</button>
+    <p class="hint" id="status">Clicca per consentire l'accesso e vedere la lista.</p>
+  </div>
+  <div class="step">
+    <label>Altoparlante / Cuffie</label>
+    <select id="speaker"><option value="">-- Carica prima --</option></select>
+  </div>
+  <div class="step">
+    <button type="button" id="btnTest">Prova audio (beep)</button>
+    <p class="hint" id="result"></p>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const spkSel = document.getElementById('speaker');
+    const resultEl = document.getElementById('result');
+
+    document.getElementById('btnLoad').onclick = async function() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());
+      } catch (e) {
+        statusEl.textContent = 'Consenti il microfono quando il browser lo chiede.';
+        statusEl.className = 'hint warn';
+      }
+      try {
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const spks = devs.filter(d => d.kind === 'audiooutput');
+        spkSel.innerHTML = spks.map((s, i) => 
+          '<option value="'+s.deviceId+'">'+(s.label || 'Altoparlante '+(i+1))+'</option>'
+        ).join('');
+        statusEl.textContent = spks.length + ' altoparlante/i trovati.';
+        statusEl.className = 'hint ok';
+      } catch (e) {
+        statusEl.textContent = 'Errore: ' + e.message;
+        statusEl.className = 'hint warn';
+      }
+    };
+
+    document.getElementById('btnTest').onclick = async function() {
+      const sinkId = spkSel.value;
+      resultEl.textContent = '';
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        if (sinkId && ctx.setSinkId) {
+          await ctx.setSinkId(sinkId).catch(() => {});
+        }
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = 440;
+        gain.gain.value = 0.3;
+        osc.start();
+        osc.stop(ctx.currentTime + 0.4);
+        resultEl.textContent = 'Beep inviato. Se non senti nulla: volume, cuffie selezionate, non mute.';
+        resultEl.className = 'hint ok';
+      } catch (e) {
+        resultEl.textContent = 'Errore: ' + e.message;
+        resultEl.className = 'hint warn';
+      }
+    };
+  </script>
+</body>
+</html>

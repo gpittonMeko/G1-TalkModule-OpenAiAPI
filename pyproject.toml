@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "g1-talk-module"
+version = "1.0.0"
+description = "Voice-controlled Talk Module for robot with OpenAI STT/LLM/TTS"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "MekoAiAccelerator"}]
+keywords = ["openai", "voice", "stt", "tts", "llm", "robot"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "openai>=1.0.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24.0",
+    "python-dotenv>=1.0.0",
+    "pydub>=0.25.0",
+    "soundfile>=0.12.0",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+api = ["uvicorn>=0.24.0", "fastapi>=0.104.0"]
+dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0"]
+
+[project.scripts]
+talk-module = "talk_module.cli:main"
