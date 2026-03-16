@@ -36,6 +36,7 @@ from talk_module.network_discovery import (
 # Config file per scelte utente
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "audio_devices.json"
 KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "config" / "knowledge.json"
+SOUNDBOARD_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard.json"
 CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Knowledge base: pattern -> risposta. Controllo prima dell'LLM per risposte veloci.
@@ -369,6 +370,60 @@ if HAS_FASTAPI:
         """Ricarica knowledge da file dopo modifica."""
         reload_knowledge()
         return {"ok": True, "entries": len(load_knowledge())}
+
+    @app.post("/api/knowledge/save")
+    def api_save_knowledge(data: dict = Body(...)):
+        """Salva knowledge su config/knowledge.json."""
+        entries = data.get("entries") or {}
+        clean = {str(k).strip(): str(v).strip() for k, v in entries.items() if k and str(k).strip() and v is not None}
+        try:
+            KNOWLEDGE_PATH.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
+            reload_knowledge()
+            return {"ok": True, "entries": len(clean)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _load_soundboard() -> list[dict]:
+        """Carica soundboard da config/soundboard.json. 10 slot: {icon, text, audio_base64}."""
+        if not SOUNDBOARD_PATH.exists():
+            return [{"icon": "🎤", "text": f"Comando {i+1}", "audio_base64": ""} for i in range(10)]
+        try:
+            data = json.loads(SOUNDBOARD_PATH.read_text(encoding="utf-8"))
+            slots = data.get("slots") or []
+            while len(slots) < 10:
+                slots.append({"icon": "🎤", "text": f"Comando {len(slots)+1}", "audio_base64": "", "format": "webm"})
+            for i in range(len(slots)):
+                s = slots[i]
+                s.setdefault("icon", "🎤")
+                s.setdefault("text", f"Comando {i+1}")
+                s.setdefault("audio_base64", "")
+                s.setdefault("format", "webm")
+            return slots[:10]
+        except Exception:
+            return [{"icon": "🎤", "text": f"Comando {i+1}", "audio_base64": ""} for i in range(10)]
+
+    @app.get("/api/soundboard")
+    def api_get_soundboard():
+        return {"slots": _load_soundboard()}
+
+    @app.post("/api/soundboard")
+    def api_save_soundboard(data: dict = Body(...)):
+        """Salva slot soundboard. Body: {slot: 0-9, icon, text, audio_base64}."""
+        slot = int(data.get("slot", 0))
+        if slot < 0 or slot > 9:
+            return {"ok": False, "error": "slot 0-9"}
+        slots = _load_soundboard()
+        slots[slot] = {
+            "icon": str(data.get("icon", "🎤"))[:4],
+            "text": str(data.get("text", ""))[:30] or f"Comando {slot+1}",
+            "audio_base64": str(data.get("audio_base64", "")),
+            "format": str(data.get("format", "webm")),
+        }
+        try:
+            SOUNDBOARD_PATH.write_text(json.dumps({"slots": slots}, indent=2), encoding="utf-8")
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     @app.get("/api/robot-actions")
     def api_get_robot_actions():
@@ -993,10 +1048,21 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <p id="deviceStatus">Clicca il pulsante per consentire l&apos;accesso e caricare microfoni e altoparlanti.</p>
   </div>
   <details id="knowledgeWrap" class="step" style="margin-bottom:12px;">
-    <summary style="cursor:pointer;color:#a1a1aa;">Knowledge (risposte veloci)</summary>
-    <p class="hint" style="margin-top:8px;">Modifica config/knowledge.json sul server. Pattern -&gt; risposta. Se la domanda contiene il pattern, risposta immediata (senza LLM).</p>
-    <pre id="knowledgeList" style="font-size:11px;color:#71717a;max-height:120px;overflow:auto;margin-top:6px;">Caricamento...</pre>
+    <summary style="cursor:pointer;color:#a1a1aa;">Knowledge (risposte veloci) - Modifica</summary>
+    <p class="hint" style="margin-top:8px;">Pattern -&gt; risposta. Se la domanda contiene il pattern, risposta immediata.</p>
+    <div id="knowledgeList" style="margin-top:8px;"></div>
+    <div style="margin-top:8px;">
+      <input type="text" id="knowledgePattern" placeholder="Pattern" style="width:45%;padding:8px;margin-right:4px;" />
+      <input type="text" id="knowledgeResponse" placeholder="Risposta" style="width:45%;padding:8px;margin-right:4px;" />
+      <button type="button" id="knowledgeAdd" style="padding:8px 12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-size:12px;">Aggiungi</button>
+    </div>
+    <button type="button" id="knowledgeSave" style="margin-top:8px;padding:8px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border:1px solid rgba(255,255,255,0.2);border-radius:8px;cursor:pointer;font-size:12px;">Salva su server</button>
   </details>
+  <div class="step" style="margin-bottom:16px;">
+    <p style="margin:0 0 10px;color:#9ca3af;font-size:13px;font-weight:500;">Soundboard</p>
+    <div id="soundboardGrid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;"></div>
+    <p class="hint" style="margin-top:8px;font-size:11px;">Clicca per riprodurre. Modifica: tasto destro o icona matita.</p>
+  </div>
   <details id="devicesWrap" class="step" style="margin-bottom:16px;">
     <summary style="cursor:pointer;color:#a1a1aa;">Dispositivi (mic/cuffie)</summary>
     <label style="margin-top:12px;">Microfono</label>
@@ -1139,13 +1205,63 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       requestAndLoadDevices();
     }
 
-    fetch('/api/knowledge').then(r=>r.json()).then(d=>{
+    let knowledgeEntries = {};
+    function renderKnowledge(){
       const el = document.getElementById('knowledgeList');
-      if (el && d.entries) {
-        const lines = Object.entries(d.entries).map(([k,v])=>'"'+k+'" -> "'+v.substring(0,50)+(v.length>50?'...':'')+'"');
-        el.textContent = lines.length ? lines.join("\\n") : "(vuoto)";
+      if (!el) return;
+      el.innerHTML = Object.entries(knowledgeEntries).map(([k,v])=>'<div style="display:flex;align-items:center;gap:6px;margin:4px 0;font-size:12px;"><span style="color:#9ca3af;min-width:120px;">'+k.replace(/</g,'&lt;').replace(/&/g,'&amp;')+'</span><span style="color:#e8eaed;">'+(v.substring(0,40)+(v.length>40?'...':'')).replace(/</g,'&lt;').replace(/&/g,'&amp;')+'</span><button type="button" data-key="'+encodeURIComponent(k)+'" class="knowledgeDel" style="margin-left:auto;padding:2px 8px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:4px;cursor:pointer;font-size:11px;">Elimina</button></div>').join('') || '<span style="color:#71717a;">(vuoto)</span>';
+      el.querySelectorAll('.knowledgeDel').forEach(btn=>{ btn.onclick=()=>{ delete knowledgeEntries[decodeURIComponent(btn.dataset.key||'')]; renderKnowledge(); }; });
+    }
+    fetch('/api/knowledge').then(r=>r.json()).then(d=>{ knowledgeEntries = d.entries || {}; renderKnowledge(); }).catch(()=>{});
+    document.getElementById('knowledgeAdd').onclick = ()=>{
+      const p = (document.getElementById('knowledgePattern').value||'').trim();
+      const r = (document.getElementById('knowledgeResponse').value||'').trim();
+      if (p && r) { knowledgeEntries[p] = r; document.getElementById('knowledgePattern').value=''; document.getElementById('knowledgeResponse').value=''; renderKnowledge(); }
+    };
+    document.getElementById('knowledgeSave').onclick = ()=>{
+      fetch('/api/knowledge/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({entries:knowledgeEntries})})
+        .then(r=>r.json()).then(d=>{ if(d.ok) document.getElementById('knowledgeSave').textContent='Salvato!'; else alert(d.error||'Errore'); })
+        .catch(e=>alert('Errore: '+e.message));
+    };
+
+    let soundboardSlots = [];
+    function renderSoundboard(){
+      const grid = document.getElementById('soundboardGrid');
+      if (!grid) return;
+      const icons = ['🎤','🔊','📢','🎵','🎶','🎧','🎭','🚀','⭐','💡'];
+      grid.innerHTML = soundboardSlots.map((s,i)=>'<div id="sb'+i+'" style="display:flex;flex-direction:column;align-items:center;padding:10px;background:rgba(255,255,255,0.05);border-radius:10px;cursor:pointer;border:1px solid rgba(255,255,255,0.08);min-height:70px;"><span style="font-size:24px;margin-bottom:4px;">'+(s.icon||icons[i])+'</span><span style="font-size:11px;color:#9ca3af;text-align:center;overflow:hidden;text-overflow:ellipsis;max-width:100%;">'+(s.text||'Comando '+(i+1))+'</span><button type="button" onclick="event.stopPropagation();editSoundboard('+i+')" style="margin-top:4px;padding:2px 6px;font-size:10px;background:rgba(255,255,255,0.1);color:#9ca3af;border:none;border-radius:4px;cursor:pointer;">✏️</button></div>').join('');
+      soundboardSlots.forEach((s,i)=>{
+        const el = document.getElementById('sb'+i);
+        if (el) el.onclick = (e)=> { if (!e.target.closest('button') && s.audio_base64) { const fmt = s.format || 'webm'; const a=new Audio('data:audio/'+fmt+';base64,'+s.audio_base64); a.play(); } };
+      });
+    }
+    function editSoundboard(idx){
+      const s = soundboardSlots[idx] || {};
+      const icon = prompt('Icona (emoji):', s.icon || '🎤') || s.icon || '🎤';
+      const text = prompt('Testo pulsante:', s.text || 'Comando '+(idx+1)) || s.text || 'Comando '+(idx+1);
+      const rec = confirm('Registrare nuovo audio? (OK=registra 3 sec, Annulla=solo icona/testo)');
+      if (rec && navigator.mediaDevices) {
+        navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
+          const mr = new MediaRecorder(stream, {mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm'});
+          const chunks = [];
+          mr.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
+          mr.onstop = ()=>{
+            stream.getTracks().forEach(t=>t.stop());
+            const blob = new Blob(chunks, {type: mr.mimeType});
+            const fr = new FileReader();
+            fr.onload = ()=>{
+              const b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(fr.result)));
+              fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:idx, icon, text, audio_base64: b64, format: 'webm'})}).then(r=>r.json()).then(()=>{ fetch('/api/soundboard').then(r=>r.json()).then(d=>{ soundboardSlots=d.slots||[]; renderSoundboard(); }); });
+            };
+            fr.readAsArrayBuffer(blob);
+          };
+          mr.start(); alert('Registrando 3 secondi...'); setTimeout(()=>mr.stop(), 3000);
+        }).catch(()=>alert('Microfono non disponibile'));
+      } else {
+        fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:idx, icon, text, audio_base64: s.audio_base64||''})}).then(r=>r.json()).then(()=>{ fetch('/api/soundboard').then(r=>r.json()).then(d=>{ soundboardSlots=d.slots||[]; renderSoundboard(); }); });
       }
-    }).catch(()=>{ const el=document.getElementById('knowledgeList'); if(el) el.textContent='(errore)'; });
+    }
+    fetch('/api/soundboard').then(r=>r.json()).then(d=>{ soundboardSlots=d.slots||[]; renderSoundboard(); }).catch(()=>{});
 
     document.getElementById('btnTest').onclick = async () => {
       const btn = document.getElementById('btnTest');

@@ -1,0 +1,14 @@
+{
+  "slots": [
+    {"icon": "🎤", "text": "Comando 1", "audio_base64": "", "format": "webm"},
+    {"icon": "🔊", "text": "Comando 2", "audio_base64": "", "format": "webm"},
+    {"icon": "📢", "text": "Comando 3", "audio_base64": "", "format": "webm"},
+    {"icon": "🎵", "text": "Comando 4", "audio_base64": "", "format": "webm"},
+    {"icon": "🎶", "text": "Comando 5", "audio_base64": "", "format": "webm"},
+    {"icon": "🎧", "text": "Comando 6", "audio_base64": "", "format": "webm"},
+    {"icon": "🎭", "text": "Comando 7", "audio_base64": "", "format": "webm"},
+    {"icon": "🚀", "text": "Comando 8", "audio_base64": "", "format": "webm"},
+    {"icon": "⭐", "text": "Comando 9", "audio_base64": "", "format": "webm"},
+    {"icon": "💡", "text": "Comando 10", "audio_base64": "", "format": "webm"}
+  ]
+}

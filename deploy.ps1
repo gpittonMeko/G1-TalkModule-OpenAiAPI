@@ -26,6 +26,7 @@ scp -o ConnectTimeout=10 `
     "$root\config\knowledge.json" `
     "$root\config\robot_actions.json" `
     "$root\config\stt_config.json" `
+    "$root\config\soundboard.json" `
     "$root\config\italian_vocabulary.txt" `
     "${sshHost}:${remote}/config/" 2>$null
 Write-Host " OK" -ForegroundColor Green
