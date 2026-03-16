@@ -1,23 +1,50 @@
-# Deploy modifiche sull'AI Accelerator e riavvia il server
+# Deploy modifiche sull'AI Accelerator
 # Uso: .\deploy.ps1
 
 $sshHost = "lab@192.168.10.191"
-$localFile = Join-Path $PSScriptRoot "talk_module\web_app.py"
-$remotePath = "/home/lab/G1-TalkModule-OpenAiAPI/talk_module/web_app.py"
+$root = $PSScriptRoot
+$remote = "/home/lab/G1-TalkModule-OpenAiAPI"
 
-Write-Host "Copia web_app.py su $sshHost ..." -ForegroundColor Yellow
-scp -o ConnectTimeout=10 $localFile "${sshHost}:${remotePath}"
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Copia fallita." -ForegroundColor Red
-    exit 1
-}
+Write-Host "Deploy G1 Talk Module su $sshHost" -ForegroundColor Cyan
+Write-Host ""
 
-Write-Host "Riavvio server..." -ForegroundColor Yellow
-$cmd = 'cd /home/lab/G1-TalkModule-OpenAiAPI && (pkill -f talk_module.web_app 2>/dev/null || true) && sleep 2 && (nohup .venv/bin/python3 -m talk_module.web_app --host 0.0.0.0 --port 8081 --no-audio-check > /tmp/talk.log 2>&1 &) && sleep 3 && tail -8 /tmp/talk.log'
-ssh -o ConnectTimeout=15 $sshHost $cmd
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nModifiche caricate. Apri: http://192.168.10.191:8081/client" -ForegroundColor Green
-    Write-Host "Ricarica con Ctrl+F5 per evitare cache." -ForegroundColor Cyan
+# Copia file Python
+Write-Host "  [1] talk_module..." -NoNewline
+scp -o ConnectTimeout=10 `
+    "$root\talk_module\web_app.py" `
+    "$root\talk_module\config.py" `
+    "$root\talk_module\quick_lookup.py" `
+    "$root\talk_module\robot_actions.py" `
+    "$root\talk_module\llm\openai_client.py" `
+    "${sshHost}:${remote}/talk_module/" 2>$null
+scp -o ConnectTimeout=10 "$root\talk_module\stt\fuzzy_correct.py" "${sshHost}:${remote}/talk_module/stt/" 2>$null
+Write-Host " OK" -ForegroundColor Green
+
+# Copia config
+Write-Host "  [2] config..." -NoNewline
+scp -o ConnectTimeout=10 `
+    "$root\config\knowledge.json" `
+    "$root\config\robot_actions.json" `
+    "$root\config\stt_config.json" `
+    "$root\config\italian_vocabulary.txt" `
+    "${sshHost}:${remote}/config/" 2>$null
+Write-Host " OK" -ForegroundColor Green
+
+# Installa dipendenze (duckduckgo-search per quick_lookup)
+Write-Host "  [3] Dipendenze..." -NoNewline
+ssh -o ConnectTimeout=15 $sshHost "cd $remote && .venv/bin/pip install -q ddgs" 2>$null
+Write-Host " OK" -ForegroundColor Green
+
+# Riavvia server
+Write-Host "  [4] Restart server..." -NoNewline
+$r = ssh -o ConnectTimeout=15 $sshHost "cd $remote && bash scripts/restart_server.sh" 2>&1
+if ($r -match "OK:200") {
+    Write-Host " OK" -ForegroundColor Green
 } else {
-    Write-Host "Riavvio fallito." -ForegroundColor Red
+    Write-Host " (check log)" -ForegroundColor Yellow
 }
+
+Write-Host ""
+Write-Host "  Apri: http://localhost:8081/client (con tunnel attivo)" -ForegroundColor Green
+Write-Host "  Ctrl+F5 per evitare cache" -ForegroundColor Gray
+Write-Host ""

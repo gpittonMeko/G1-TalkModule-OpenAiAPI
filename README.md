@@ -1,96 +1,118 @@
-# G1 Talk Module - OpenAI API
+# G1 Talk Module
 
-Add-on vocale: **microfono → STT (Whisper) → LLM (GPT) → TTS → speaker**.  
-Gira **solo sull'AI Accelerator** (192.168.10.191). Il robot ha un altro IP.
+Assistente vocale per robot **Unitree G1**: parli → STT → GPT → TTS → risposta.
 
----
-
-## Architettura
-
-- **AI Accelerator**: macchina dove installi e fai girare il modulo (192.168.10.191)
-- **Setup wizard**: alla prima apertura, selezioni microfono e altoparlante nella rete
-- **Dispositivi locali**: microfoni/altoparlanti collegati alla macchina
-- **Dispositivi web nella rete**: telefono o altro device che apre la pagina `/client` e diventa mic+speaker
+- **Wake word**: "Hey G1" (o "Hey Markone")
+- **Azioni robot**: "Dare la mano", "Saluta" → Unitree SDK
+- **Ricerca veloce**: ora, meteo, domande base (senza LLM)
+- **STT**: Whisper, Groq o Deepgram
 
 ---
 
-## Installazione sull'AI Accelerator
+## Guida completa
 
-```bash
-ssh lab@192.168.10.191
-cd ~/G1-TalkModule-OpenAiAPI   # o path dove cloni
+**Leggi [GUIDA.md](GUIDA.md)** per:
 
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-cp .env.example .env
-# Modifica .env e inserisci OPENAI_API_KEY
-```
-
-### Dipendenze sistema (su ARM/Linux)
-
-```bash
-sudo apt install -y portaudio19-dev libsndfile1 ffmpeg
-```
+- Come connetterti (bridge o WiFi diretto al G1)
+- Installazione veloce con pacchetto
+- Configurazione .env e chiavi API
 
 ---
 
-## Avvio
+## Configurazione
 
-```bash
-./avvia_ai_accelerator.sh
-# oppure
-python -m talk_module.web_app --host 0.0.0.0 --port 8081
-```
+### .env (obbligatorio)
 
-Poi apri nel browser: **http://192.168.10.191:8081**
+| Variabile | Descrizione |
+|-----------|-------------|
+| `OPENAI_API_KEY` | **Obbligatorio** – chiave OpenAI |
+| `TTS_LANGUAGE` | it, en, ... (default: it) |
+| `LLM_MODEL` | gpt-4o-mini, gpt-4o (default: gpt-4o-mini) |
+| `TTS_VOICE` | shimmer, nova, alloy... (default: shimmer) |
 
----
+### STT (Speech-to-Text)
 
-## Flusso utente
+| Variabile | Descrizione |
+|-----------|-------------|
+| `STT_PROVIDER` | whisper, groq, deepgram |
+| `GROQ_API_KEY` | Per Groq (veloce, gratuito) |
+| `DEEPGRAM_API_KEY` | Per Deepgram |
 
-1. **Setup** (`/`): Seleziona microfono e altoparlante
-   - Se scegli dispositivi **locali**: microfoni/speaker collegati alla macchina
-   - Se scegli **Dispositivo web nella rete**: apri `/client` sul telefono
+### Robot G1 (azioni vocali)
 
-2. **Salva e avvia**: la scelta viene salvata in `config/audio_devices.json`
-
-3. **Uso**:
-   - **Locale** (`/local`): clic su "Parla", registra 8 sec, elabora, riproduce localmente
-   - **Web** (`/client`): apri sul telefono, tieni premuto per registrare, risposta via speaker del telefono
-
----
-
-## Configurazione (.env)
-
-| Variabile | Descrizione | Default |
-|-----------|-------------|---------|
-| `OPENAI_API_KEY` | **Obbligatorio** | - |
-| `TTS_LANGUAGE` | Lingua (it, en...) | it |
-| `LLM_MODEL` | gpt-4o-mini, gpt-4o | gpt-4o-mini |
-| `TTS_VOICE` | alloy, echo, shimmer... | shimmer |
+| Variabile | Descrizione |
+|-----------|-------------|
+| `UNITREE_ROBOT_IP` | IP del robot per "dare la mano", "saluta" |
 
 ---
 
-## Struttura
+## Struttura progetto
 
 ```
 G1-TalkModule-OpenAiAPI/
 ├── talk_module/
-│   ├── web_app.py      # App principale (setup + controllo)
-│   ├── audio/          # Recorder, Player
-│   ├── stt/, llm/, tts/
-│   └── config.py
+│   ├── web_app.py          # App principale
+│   ├── robot_actions.py    # Routing azioni G1 (dare la mano, saluta)
+│   ├── config.py
+│   ├── stt/                # Whisper, Groq, Deepgram + fuzzy correct
+│   ├── llm/                # OpenAI Chat
+│   ├── tts/                # OpenAI TTS
+│   └── audio/              # Recorder, Player
 ├── config/
-│   └── audio_devices.json   # Scelte mic/speaker (creato al primo save)
-├── avvia_ai_accelerator.sh
+│   ├── knowledge.json      # Risposte veloci (pattern → risposta)
+│   ├── robot_actions.json  # Comandi vocali → azioni SDK
+│   ├── stt_config.json     # Fuzzy STT, extra_phrases
+│   └── italian_vocabulary.txt
+├── scripts/
+│   ├── restart_server.sh
+│   └── robot_action.sh     # (opzionale) script azioni custom
+├── docs/                   # Documentazione
+├── avvia.ps1               # Avvio da Windows
+├── avvia_ai_accelerator.sh  # Avvio server
 ├── requirements.txt
 └── .env.example
 ```
 
 ---
 
+## Modalità d'uso
+
+| Pagina | Descrizione |
+|--------|-------------|
+| `/` | Setup: seleziona microfono e altoparlante |
+| `/client` | **Principale** – mic/cuffie del browser, tieni premuto per parlare |
+| `/local` | Push-to-talk locale (mic/speaker sull'AI Accelerator) |
+| `/listen` | Ascolto continuo: "Hey G1" + domanda |
+
+---
+
+## Deploy (aggiornare il server)
+
+Dopo modifiche al codice:
+
+```powershell
+# Copia file modificati
+scp talk_module\web_app.py talk_module\config.py config\*.json lab@192.168.10.191:~/G1-TalkModule-OpenAiAPI/
+
+# Riavvia
+ssh lab@192.168.10.191 "cd ~/G1-TalkModule-OpenAiAPI && bash scripts/restart_server.sh"
+```
+
+Oppure usa `.\deploy.ps1` se configurato.
+
+---
+
+## Documentazione
+
+- **[GUIDA.md](GUIDA.md)** - Guida rapida: connessione, installazione, pacchetto
+- [docs/INSTALLAZIONE.md](docs/INSTALLAZIONE.md) - Guida installazione dettagliata
+- [docs/STT.md](docs/STT.md) - Provider STT e correzioni fuzzy
+- [docs/ROBOT_ACTIONS.md](docs/ROBOT_ACTIONS.md) - Azioni vocali G1
+- [docs/AUDIO.md](docs/AUDIO.md) - PortAudio e dispositivi
+
+---
+
 ## Note sicurezza
 
-- Non committare mai `.env` o chiavi API
+- Non committare `.env` o chiavi API
+- Il tunnel SSH è necessario per usare il microfono da browser (localhost)

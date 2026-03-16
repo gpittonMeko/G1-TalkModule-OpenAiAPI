@@ -10,6 +10,7 @@ import json
 import queue
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ _executor = ThreadPoolExecutor(max_workers=2)
 # FastAPI + WebSocket
 try:
     from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body
-    from fastapi.responses import HTMLResponse, RedirectResponse
+    from fastapi.responses import HTMLResponse, RedirectResponse, Response
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False
@@ -34,7 +35,52 @@ from talk_module.network_discovery import (
 
 # Config file per scelte utente
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "audio_devices.json"
+KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "config" / "knowledge.json"
 CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Knowledge base: pattern -> risposta. Controllo prima dell'LLM per risposte veloci.
+_knowledge_cache: dict[str, str] | None = None
+
+
+def load_knowledge() -> dict[str, str]:
+    """Carica knowledge da config/knowledge.json. Pattern (minuscolo) -> risposta."""
+    global _knowledge_cache
+    if _knowledge_cache is not None:
+        return _knowledge_cache
+    if not KNOWLEDGE_PATH.exists():
+        _knowledge_cache = {}
+        return _knowledge_cache
+    try:
+        data = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+        _knowledge_cache = {str(k).strip().lower(): str(v).strip() for k, v in (data or {}).items() if k and v}
+        return _knowledge_cache
+    except Exception:
+        _knowledge_cache = {}
+        return _knowledge_cache
+
+
+def reload_knowledge() -> None:
+    """Svuota cache per ricaricare da file (dopo modifica a config/knowledge.json)."""
+    global _knowledge_cache
+    _knowledge_cache = None
+
+
+def check_knowledge(user_input: str) -> str | None:
+    """Se user_input contiene un pattern della knowledge, ritorna la risposta. Altrimenti None."""
+    if not user_input or not user_input.strip():
+        return None
+    txt = user_input.strip().lower()
+    # Ordina per lunghezza decrescente: match più specifici prima (es. "che ore sono" prima di "ore")
+    for pattern, response in sorted(load_knowledge().items(), key=lambda x: -len(x[0])):
+        if pattern and pattern in txt:
+            return response
+    return None
+
+
+def _apply_stt_fuzzy_correction(text: str) -> str:
+    """Corregge trascrizione STT con fuzzy matching su vocabolario (knowledge + stt_config)."""
+    from talk_module.stt.fuzzy_correct import apply_fuzzy_correction
+    return apply_fuzzy_correction(text or "", load_knowledge())
 
 
 def load_device_config() -> dict:
@@ -66,6 +112,18 @@ def _save_debug_audio(audio_bytes: bytes) -> str | None:
         return None
 
 
+def _save_sample_audio(audio_bytes: bytes) -> Path | None:
+    """Salva ultimo campione vocale per riuso (es. 'pronto pronto pronto'). Sovrascrive."""
+    try:
+        settings.ensure_dirs()
+        out = settings.audio_dir / "last_sample.webm"
+        out.write_bytes(audio_bytes)
+        return out
+    except Exception as e:
+        print(f"[Debug] Salvataggio campione fallito: {e}")
+        return None
+
+
 # WebSocket clients: {client_id: ws}
 _ws_clients: dict = {}
 
@@ -93,10 +151,18 @@ if HAS_FASTAPI:
     def get_services():
         global _stt, _llm, _tts, _player, _recorder
         if _stt is None:
-            from talk_module.stt import WhisperClient
             from talk_module.llm import LLMClient
             from talk_module.tts import TTSClient
-            _stt = WhisperClient()
+            prov = settings.stt_provider
+            if (prov == "deepgram" or settings.deepgram_api_key) and settings.deepgram_api_key:
+                from talk_module.stt.deepgram_client import DeepgramClient
+                _stt = DeepgramClient()
+            elif (prov == "groq" or settings.groq_api_key) and settings.groq_api_key:
+                from talk_module.stt.groq_client import GroqWhisperClient
+                _stt = GroqWhisperClient()
+            else:
+                from talk_module.stt import WhisperClient
+                _stt = WhisperClient()
             _llm = LLMClient()
             _tts = TTSClient()
             _player = _recorder = None
@@ -118,6 +184,10 @@ if HAS_FASTAPI:
     def index():
         return RedirectResponse(url="/client", status_code=302)
 
+    @app.get("/favicon.ico")
+    def favicon():
+        return Response(status_code=204)
+
     @app.get("/client", response_class=HTMLResponse)
     def client_page():
         return CLIENT_TEMPLATE
@@ -136,6 +206,71 @@ if HAS_FASTAPI:
     @app.get("/api/version")
     def api_version():
         return {"version": "2", "deploy": "ok"}
+
+    @app.get("/api/stt-info")
+    def api_stt_info():
+        """Info sul provider STT attivo e alternative."""
+        prov = settings.stt_provider
+        return {
+            "provider": prov,
+            "alternatives": [
+                {"id": "whisper", "name": "OpenAI Whisper", "env": "STT_PROVIDER=whisper"},
+                {"id": "deepgram", "name": "Deepgram Nova", "env": "STT_PROVIDER=deepgram, DEEPGRAM_API_KEY=..."},
+                {"id": "groq", "name": "Groq Whisper", "env": "STT_PROVIDER=groq, GROQ_API_KEY=..."},
+            ],
+        }
+
+    @app.get("/api/test-pipeline")
+    def api_test_pipeline():
+        """Test pipeline con audio generato: TTS('prova prova prova') -> STT -> LLM -> TTS. Verifica che tutto funzioni."""
+        errs = settings.validate()
+        if errs:
+            return {"ok": False, "error": "; ".join(errs)}
+        t0 = time.perf_counter()
+        try:
+            stt, llm, tts, _, _ = get_services()
+            test_phrase = "prova prova prova"
+            audio_bytes = tts.synthesize(test_phrase, format="mp3")
+            if not audio_bytes or len(audio_bytes) < 100:
+                return {"ok": False, "error": "TTS non ha generato audio"}
+            text = _apply_stt_fuzzy_correction(stt.transcribe(audio_bytes, format_hint="mp3", language="it") or "")
+            if not text or not text.strip():
+                return {"ok": False, "error": "STT non ha trascritto", "audio_size": len(audio_bytes)}
+            resp = check_knowledge(text.strip()) or llm.chat(text.strip())
+            if not resp:
+                return {"ok": False, "error": "LLM non ha risposto", "transcribed": text}
+            audio_out = tts.synthesize(resp, format="mp3")
+            stt_used = "groq" if "GroqWhisperClient" in type(stt).__name__ else ("deepgram" if "Deepgram" in type(stt).__name__ else "whisper")
+            return {
+                "ok": True,
+                "test_phrase": test_phrase,
+                "transcribed": text.strip(),
+                "llm_response": resp,
+                "audio_base64": base64.b64encode(audio_out).decode() if audio_out else "",
+                "stt_provider": stt_used,
+                "llm_model": settings.llm_model,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e), "duration_ms": int((time.perf_counter() - t0) * 1000)}
+
+    @app.get("/api/test-with-sample")
+    def api_test_with_sample():
+        """Test pipeline con ultimo campione vocale salvato (es. pronto pronto pronto)."""
+        errs = settings.validate()
+        if errs:
+            return {"ok": False, "error": "; ".join(errs)}
+        sample_path = settings.audio_dir / "last_sample.webm"
+        if not sample_path.exists():
+            return {"ok": False, "error": "Nessun campione salvato. Registra prima con 'Tieni premuto'."}
+        try:
+            audio_bytes = sample_path.read_bytes()
+            if len(audio_bytes) < 500:
+                return {"ok": False, "error": "Campione troppo corto"}
+            result = _process_audio(audio_bytes, skip_wake_word=True, format_hint="webm")
+            return {"ok": True, "duration_ms": result.get("duration_ms"), **result}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     @app.get("/api/debug-audio")
     def api_debug_audio():
@@ -224,6 +359,26 @@ if HAS_FASTAPI:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    @app.get("/api/knowledge")
+    def api_get_knowledge():
+        """Lista pattern -> risposta dalla knowledge base."""
+        return {"path": str(KNOWLEDGE_PATH), "entries": load_knowledge()}
+
+    @app.post("/api/knowledge/reload")
+    def api_reload_knowledge():
+        """Ricarica knowledge da file dopo modifica."""
+        reload_knowledge()
+        return {"ok": True, "entries": len(load_knowledge())}
+
+    @app.get("/api/robot-actions")
+    def api_get_robot_actions():
+        """Lista azioni robot (config/robot_actions.json)."""
+        try:
+            from talk_module.robot_actions import _load_robot_actions, ROBOT_ACTIONS_PATH
+            return {"path": str(ROBOT_ACTIONS_PATH), "entries": _load_robot_actions()}
+        except Exception as e:
+            return {"path": "", "entries": {}, "error": str(e)}
+
     @app.get("/api/config")
     def api_get_config():
         return load_device_config()
@@ -233,45 +388,115 @@ if HAS_FASTAPI:
         save_device_config(data)
         return {"ok": True}
 
-    WAKE_WORDS = ("hey markone", "hey mark one", "ehi markone", "ehi mark one")
+    WAKE_WORDS = ("hey g1", "hey g 1", "ehi g1", "ehi g 1", "hey markone", "hey mark one", "ehi markone", "ehi mark one")
     WAKE_WORD_REQUIRED = os.getenv("WAKE_WORD_REQUIRED", "true").lower() in ("1", "true", "yes")
 
     def _extract_prompt(text: str, skip_wake_word: bool = False, audio_size: int = 0):
         """Ritorna (prompt, message). Se wake word trovata: (resto, ""). Altrimenti: (None, msg)."""
         if not text or not text.strip():
             debug = f" ({audio_size} byte inviati)" if audio_size else ""
-            return None, f"Nessun testo riconosciuto{debug}. Parla piu a lungo (1-2 sec) e vicino al microfono."
+            return None, f"Nessun testo riconosciuto{debug}. Parla piu a lungo (1-2 sec), vicino al microfono. Prova STT_PROVIDER=deepgram o groq in .env se persiste."
         t = text.strip()
         if any(h in t.lower() for h in ("sottotitoli", "amara.org", "amara ", "qtss", "subtitle", "created by", "a cura di")):
             return None, "Audio non chiaro. Riprova a parlare piu vicino al microfono."
         if skip_wake_word or not WAKE_WORD_REQUIRED:
             return t, ""
         # Match "hey/ehi" + "markone/mark one" all'inizio (flessibile su punteggiatura)
-        m = re.match(r"^(?:hey|ehi)\s*[,.\s]*\s*(?:mark\s*one|markone)\s*[,.\s]*\s*(.*)$", t, re.IGNORECASE)
+        m = re.match(r"^(?:hey|ehi)\s*[,.\s]*\s*(?:g\s*1|g1|mark\s*one|markone)\s*[,.\s]*\s*(.*)$", t, re.IGNORECASE)
         if m:
             rest = m.group(1).strip()
             if not rest:
-                return None, "Di 'Hey Markone' seguito dalla domanda. Es: Hey Markone, che ore sono?"
+                return None, "Di 'Hey G1' seguito dalla domanda. Es: Hey G1, che ore sono?"
             return rest, ""
-        return None, "Di 'Hey Markone' seguito dalla tua domanda per attivarmi."
+        return None, "Di 'Hey G1' seguito dalla tua domanda per attivarmi."
 
     def _process_audio(audio_bytes: bytes, skip_wake_word: bool = False, format_hint: str = "webm") -> dict:
         """Pipeline: audio -> STT -> LLM -> TTS. skip_wake_word=True per pulsante Parla."""
+        t0 = time.perf_counter()
         try:
+            _save_sample_audio(audio_bytes)  # Salva ultimo campione per riuso (Test con campione)
             stt, llm, tts, _, _ = get_services()
-            text = stt.transcribe(audio_bytes, format_hint=format_hint)
+            text = stt.transcribe(audio_bytes, format_hint=format_hint, language="it")
+            text = _apply_stt_fuzzy_correction(text or "")
+            # Debug: salva audio quando trascrizione fallisce (per analisi)
+            if not text or not text.strip():
+                saved = _save_debug_audio(audio_bytes)
+                if saved:
+                    print(f"[Debug] Audio non trascritto salvato: {saved}")
             prompt, msg = _extract_prompt(text or "", skip_wake_word=skip_wake_word, audio_size=len(audio_bytes))
             if msg:
-                return {"text": text or "", "response": "", "audio_base64": "", "message": msg}
-            resp = llm.chat(prompt)
+                return {"text": text or "", "response": "", "audio_base64": "", "message": msg, "duration_ms": int((time.perf_counter() - t0) * 1000)}
+            # Routing azioni robot (dare la mano, saluta, teaching)
+            robot_match = None
+            try:
+                from talk_module.robot_actions import check_robot_action, execute_robot_action
+                robot_match = check_robot_action(prompt)
+            except Exception:
+                pass
+            if robot_match:
+                resp_text, action_id = robot_match
+                execute_robot_action(action_id)  # esegue se possibile, ignora errore nella risposta
+                resp = resp_text
+            else:
+                resp = check_knowledge(prompt)
+                if not resp:
+                    from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup
+                    if is_quick_lookup_question(prompt):
+                        resp = quick_lookup(prompt)
+                if not resp:
+                    resp = llm.chat(prompt)
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             return {
                 "text": text,
                 "response": resp or "",
                 "audio_base64": base64.b64encode(audio_out).decode() if audio_out else "",
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
             }
         except Exception as e:
-            return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}"}
+            return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": int((time.perf_counter() - t0) * 1000)}
+
+    def _process_text(prompt: str) -> dict:
+        """Pipeline: testo -> LLM -> TTS. Per domande scritte."""
+        t0 = time.perf_counter()
+        try:
+            if not prompt or not prompt.strip():
+                return {"text": "", "response": "", "audio_base64": "", "message": "Scrivi qualcosa.", "duration_ms": 0}
+            stt, llm, tts, _, _ = get_services()
+            robot_match = None
+            try:
+                from talk_module.robot_actions import check_robot_action, execute_robot_action
+                robot_match = check_robot_action(prompt.strip())
+            except Exception:
+                pass
+            if robot_match:
+                resp_text, action_id = robot_match
+                execute_robot_action(action_id)  # esegue se possibile, ignora errore nella risposta
+                resp = resp_text
+            else:
+                resp = check_knowledge(prompt)
+                if not resp:
+                    from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup
+                    if is_quick_lookup_question(prompt.strip()):
+                        resp = quick_lookup(prompt.strip())
+                if not resp:
+                    resp = llm.chat(prompt.strip())
+            audio_out = tts.synthesize(resp, format="mp3") if resp else b""
+            return {
+                "text": prompt.strip(),
+                "response": resp or "",
+                "audio_base64": base64.b64encode(audio_out).decode() if audio_out else "",
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+            }
+        except Exception as e:
+            return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": int((time.perf_counter() - t0) * 1000)}
+
+    @app.post("/api/text-chat")
+    def api_text_chat(text: str = Body(..., embed=True)):
+        """Pipeline: testo -> LLM -> TTS. Domande scritte senza microfono."""
+        errs = settings.validate()
+        if errs:
+            raise HTTPException(400, "; ".join(errs))
+        return _process_text(text)
 
     @app.post("/api/voice-chat")
     async def api_voice_chat(audio_b64: str = None):
@@ -308,6 +533,9 @@ if HAS_FASTAPI:
                     if audio_b64:
                         try:
                             audio_bytes = base64.b64decode(audio_b64)
+                            if len(audio_bytes) < 2000:
+                                await ws.send_text(json.dumps({"type": "response", "data": {"text": "", "response": "", "audio_base64": "", "message": "Audio troppo corto. Tieni premuto 1-2 secondi mentre parli."}}))
+                                continue
                             result = _process_audio(audio_bytes, skip_wake_word=True, format_hint="webm")
                             if play_on == "server" and out_device_id is not None and result.get("audio_base64"):
                                 try:
@@ -327,7 +555,7 @@ if HAS_FASTAPI:
 
     @app.websocket("/ws/listen")
     async def websocket_listen(ws: WebSocket):
-        """Ascolto continuo: Hey Markone attiva, 10 sec silenzio = stop. Solo mic/speaker locali."""
+        """Ascolto continuo: Hey G1 attiva, 10 sec silenzio = stop. Solo mic/speaker locali."""
         await ws.accept()
         cfg = load_device_config()
         if not cfg.get("microphone") or cfg.get("microphone", {}).get("type") != "local":
@@ -366,7 +594,7 @@ if HAS_FASTAPI:
         rec_thread.start()
 
         try:
-            await ws.send_text(json.dumps({"type": "status", "data": "In ascolto. Di 'Hey Markone'..."}))
+            await ws.send_text(json.dumps({"type": "status", "data": "In ascolto. Di 'Hey G1'..."}))
             loop = asyncio.get_running_loop()
             _, _, _, player, _ = get_services()
             while True:
@@ -514,15 +742,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>G1 Talk - Setup</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 24px; background: #0f0f12; color: #e4e4e7; max-width: 620px; margin: 0 auto; }
+    body { font-family: 'Outfit', system-ui, sans-serif; margin: 0; padding: 24px; background: linear-gradient(160deg, #0c0e14 0%, #141922 50%, #0d0f14 100%); color: #e8eaed; min-height: 100vh; max-width: 560px; margin: 0 auto; }
     h1 { font-size: 1.5rem; margin-bottom: 8px; }
-    .step { background: #18181b; border-radius: 12px; padding: 20px; margin-bottom: 16px; border: 1px solid #27272a; }
-    .step h2 { font-size: 1rem; margin: 0 0 12px; color: #a1a1aa; font-weight: 600; }
+    .step { background: rgba(255,255,255,0.03); border-radius: 14px; padding: 20px; margin-bottom: 16px; border: 1px solid rgba(255,255,255,0.06); }
+    .step h2 { font-size: 0.95rem; margin: 0 0 12px; color: #9ca3af; font-weight: 600; }
     .step .device-label { font-size: 12px; color: #71717a; margin-bottom: 6px; }
     select { width: 100%; padding: 14px 16px; border-radius: 8px; border: 2px solid #3f3f46; background: #27272a; color: #fff; font-size: 15px; min-height: 48px; cursor: pointer; }
-    select:focus { outline: none; border-color: #3b82f6; }
+    select:focus { outline: none; border-color: #14b8a6; }
     select option { padding: 8px; background: #1e1e22; color: #fff; }
     button { padding: 12px 24px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; font-size: 14px; margin-right: 8px; margin-bottom: 8px; }
     .btn-primary { background: #3b82f6; color: white; }
@@ -575,9 +804,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <button class="btn-primary" onclick="saveConfig()">Salva configurazione</button>
   <div style="margin-top:24px;padding-top:20px;border-top:1px solid #3f3f46;">
     <p style="color:#a1a1aa;font-size:13px;margin-bottom:12px;">Modalità (usa dopo aver salvato):</p>
-    <p style="margin:8px 0;"><a href="/local" style="display:inline-block;padding:12px 20px;background:#3b82f6;color:white;border-radius:8px;text-decoration:none;font-weight:600;">Parla</a> <span class="hint">— Tieni premuto, parla, rilascia. Mic e cuffie sull’AI Accelerator.</span></p>
-    <p style="margin:8px 0;"><a href="/listen" style="display:inline-block;padding:12px 20px;background:#3b82f6;color:white;border-radius:8px;text-decoration:none;font-weight:600;">Ascolto</a> <span class="hint">— Di’ «Hey Markone» + domanda. Mic e cuffie sull’AI Accelerator.</span></p>
-    <p style="margin:8px 0;"><a href="/client" style="display:inline-block;padding:12px 20px;background:#3f3f46;color:white;border-radius:8px;text-decoration:none;font-weight:600;">Client rete</a> <span class="hint">— Apri su telefono/tablet: userai mic e cuffie di quel dispositivo.</span></p>
+    <p style="margin:8px 0;"><a href="/local" style="display:inline-block;padding:12px 20px;background:#14b8a6;color:#0c0e14;border-radius:8px;text-decoration:none;font-weight:600;">Parla</a> <span class="hint">— Tieni premuto, parla, rilascia. Mic e cuffie sull’AI Accelerator.</span></p>
+    <p style="margin:8px 0;"><a href="/listen" style="display:inline-block;padding:12px 20px;background:#14b8a6;color:#0c0e14;border-radius:8px;text-decoration:none;font-weight:600;">Ascolto</a> <span class="hint">— Di’ «Hey G1» + domanda. Mic e cuffie sull’AI Accelerator.</span></p>
+    <p style="margin:8px 0;"><a href="/client" style="display:inline-block;padding:12px 20px;background:rgba(255,255,255,0.1);color:#e8eaed;border-radius:8px;text-decoration:none;font-weight:600;">Client rete</a> <span class="hint">— Apri su telefono/tablet: userai mic e cuffie di quel dispositivo.</span></p>
   </div>
 
   <script>
@@ -646,43 +875,128 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>G1 Talk - Parla (questo PC)</title>
+  <title>G1 Talk - Parla</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #0f0f12; color: #e4e4e7; max-width: 460px; margin: 0 auto; }
-    h1 { font-size: 1.25rem; }
-    .step { background: #18181b; border-radius: 12px; padding: 16px; margin: 12px 0; border: 1px solid #27272a; }
-    .step label { display: block; font-size: 12px; color: #a1a1aa; margin-bottom: 6px; }
-    select { width: 100%; padding: 12px; border-radius: 8px; border: 2px solid #3f3f46; background: #27272a; color: #fff; font-size: 14px; }
-    .btn { width: 120px; height: 120px; border-radius: 50%; border: 4px solid #3b82f6; background: #1e1e22; color: #fff; font-size: 16px; cursor: pointer; margin: 20px auto; display: block; }
-    .btn:active, .btn.recording { background: #dc2626; border-color: #dc2626; }
-    .btn-allow { padding: 12px 24px; background: #22c55e; color: #0f0f12; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; margin-bottom: 12px; }
-    .result { background: #18181b; padding: 16px; border-radius: 12px; margin-top: 16px; font-size: 14px; }
+    body {
+      font-family: 'Outfit', system-ui, sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: linear-gradient(160deg, #0c0e14 0%, #141922 50%, #0d0f14 100%);
+      color: #e8eaed;
+      min-height: 100vh;
+      max-width: 420px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 4px; }
+    .step {
+      background: rgba(255,255,255,0.03);
+      border-radius: 16px;
+      padding: 18px;
+      margin: 12px 0;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .step label { display: block; font-size: 12px; color: #9ca3af; margin-bottom: 6px; font-weight: 500; }
+    select {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(0,0,0,0.3);
+      color: #fff;
+      font-size: 14px;
+      font-family: inherit;
+    }
+    select:focus { outline: none; border-color: #14b8a6; }
+    .btn {
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      border: 3px solid #14b8a6;
+      background: linear-gradient(145deg, rgba(20,184,166,0.15) 0%, rgba(20,184,166,0.05) 100%);
+      color: #fff;
+      font-size: 17px;
+      font-weight: 600;
+      cursor: pointer;
+      margin: 24px auto;
+      display: block;
+      transition: all 0.2s ease;
+      font-family: inherit;
+      box-shadow: 0 0 0 0 rgba(20,184,166,0.3);
+    }
+    .btn:hover { transform: scale(1.02); box-shadow: 0 0 24px rgba(20,184,166,0.25); }
+    .btn:active, .btn.recording {
+      background: linear-gradient(145deg, #dc2626 0%, #b91c1c 100%);
+      border-color: #ef4444;
+      transform: scale(0.98);
+      box-shadow: 0 0 32px rgba(220,38,38,0.4);
+    }
+    .btn-allow {
+      padding: 14px 24px;
+      background: linear-gradient(135deg, #14b8a6 0%, #0d9488 100%);
+      color: #0c0e14;
+      border: none;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 14px;
+      transition: transform 0.15s;
+    }
+    .btn-allow:hover { transform: translateY(-1px); }
+    .result {
+      background: rgba(255,255,255,0.03);
+      padding: 18px;
+      border-radius: 14px;
+      margin-top: 16px;
+      font-size: 14px;
+      line-height: 1.5;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
     .result div { margin: 8px 0; }
-    .ok { color: #22c55e; }
-    .warn { color: #f59e0b; }
-    .hint { color: #71717a; font-size: 12px; margin-top: 8px; }
-    #deviceStatus { font-size: 12px; color: #a1a1aa; margin-top: 8px; }
+    .ok { color: #34d399; }
+    .warn { color: #fbbf24; }
+    .hint { color: #9ca3af; font-size: 13px; margin-top: 8px; }
+    #deviceStatus { font-size: 12px; color: #9ca3af; margin-top: 8px; }
+    summary { font-weight: 500; }
+    input[type="text"] {
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(0,0,0,0.3);
+      color: #fff;
+      font-size: 14px;
+      font-family: inherit;
+    }
+    input[type="text"]:focus { outline: none; border-color: #14b8a6; }
+    input::placeholder { color: #6b7280; }
   </style>
 </head>
 <body>
-  <h1>G1 Parla</h1>
-  <p class="hint" style="margin-bottom:16px;">Mic e cuffie: tuo PC. Elaborazione: AI Accelerator.</p>
-  <div id="secureContextWarn" class="step" style="display:none;border-color:#dc2626;background:#450a0a;padding:24px;">
-    <strong style="color:#fca5a5;font-size:16px;">Per usare microfono e cuffie: apri via localhost</strong>
-    <p style="margin:16px 0;color:#e4e4e7;">Stai usando l'indirizzo IP. Il microfono richiede localhost. Fai cosi:</p>
-    <p style="margin:8px 0;font-size:13px;"><b>1.</b> Sul PC Windows apri PowerShell e lancia:</p>
-    <code style="display:block;margin:8px 0 16px;padding:14px;background:#1e1e22;border-radius:8px;font-size:13px;">ssh -L 8081:localhost:8081 lab@192.168.10.191 -N</code>
-    <p style="margin:8px 0;font-size:13px;"><b>2.</b> Tieni aperta quella finestra, poi clicca:</p>
-    <a href="http://localhost:8081/client" style="display:inline-block;margin:12px 0;padding:16px 28px;background:#22c55e;color:#0f0f12;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;">Apri http://localhost:8081/client</a>
-    <p style="margin:12px 0 0;font-size:12px;color:#a1a1aa;">Oppure da Windows: cd G1-TalkModule-OpenAiAPI poi .\avvia.ps1</p>
+  <h1>G1 Talk</h1>
+  <p class="hint" style="margin-bottom:20px;">Tieni premuto e parla. Mic e cuffie: questo dispositivo.</p>
+  <div id="secureContextWarn" class="step" style="display:none;border-color:rgba(239,68,68,0.5);background:rgba(185,28,28,0.2);padding:24px;">
+    <strong style="color:#fca5a5;font-size:15px;">Microfono richiede localhost</strong>
+    <p style="margin:14px 0;color:#e8eaed;font-size:14px;">Stai usando l'IP. Per mic/cuffie del browser:</p>
+    <p style="margin:8px 0;font-size:13px;"><b>1.</b> PowerShell: <code style="padding:6px 10px;background:rgba(0,0,0,0.4);border-radius:6px;font-size:12px;">ssh -L 8081:localhost:8081 lab@192.168.10.191 -N</code></p>
+    <p style="margin:8px 0;font-size:13px;"><b>2.</b> Poi apri:</p>
+    <a href="http://localhost:8081/client" style="display:inline-block;margin:12px 0;padding:14px 24px;background:#14b8a6;color:#0c0e14;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;">localhost:8081/client</a>
+    <p style="margin:12px 0 0;font-size:12px;color:#9ca3af;">Oppure: .\avvia.ps1</p>
   </div>
-  <p class="hint" id="hintAccess">Consenti l&apos;accesso al microfono per vedere la lista dispositivi.</p>
+  <p class="hint" id="hintAccess">Per vedere microfoni e cuffie: clicca sotto e consenti quando il browser lo chiede.</p>
 
-  <div id="allowWrap" class="step" style="display:none;">
+  <div id="allowWrap" class="step" style="display:block;">
     <button type="button" class="btn-allow" id="btnAllow">Consenti microfono e aggiorna dispositivi</button>
     <p id="deviceStatus">Clicca il pulsante per consentire l&apos;accesso e caricare microfoni e altoparlanti.</p>
   </div>
+  <details id="knowledgeWrap" class="step" style="margin-bottom:12px;">
+    <summary style="cursor:pointer;color:#a1a1aa;">Knowledge (risposte veloci)</summary>
+    <p class="hint" style="margin-top:8px;">Modifica config/knowledge.json sul server. Pattern -&gt; risposta. Se la domanda contiene il pattern, risposta immediata (senza LLM).</p>
+    <pre id="knowledgeList" style="font-size:11px;color:#71717a;max-height:120px;overflow:auto;margin-top:6px;">Caricamento...</pre>
+  </details>
   <details id="devicesWrap" class="step" style="margin-bottom:16px;">
     <summary style="cursor:pointer;color:#a1a1aa;">Dispositivi (mic/cuffie)</summary>
     <label style="margin-top:12px;">Microfono</label>
@@ -690,7 +1004,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <label style="margin-top:8px;">Altoparlante</label>
     <select id="speaker"><option value="">Caricamento...</option></select>
   </details>
-  <button class="btn" id="btn">Tieni premuto</button>
+  <button class="btn" id="btn">Tieni premuto e parla</button>
   <div id="recStatus" style="margin:12px 0;min-height:50px;">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
       <div style="width:120px;height:8px;background:#27272a;border-radius:4px;overflow:hidden;">
@@ -701,21 +1015,40 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <p class="hint" id="recDebug" style="font-size:11px;color:#71717a;min-height:18px;margin:0;"></p>
   </div>
   <div class="result" id="result"></div>
+  <div class="step" style="margin-top:16px;">
+    <label style="display:block;margin-bottom:6px;color:#a1a1aa;font-size:13px;">Scrivi una domanda (senza microfono)</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <input type="text" id="textInput" placeholder="Es: Che ore sono?" style="flex:1;min-width:180px;padding:10px 14px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:14px;" />
+      <button type="button" id="btnText" style="padding:12px 22px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Invia</button>
+    </div>
+    <p class="hint" id="textStatus" style="margin-top:6px;min-height:18px;"></p>
+  </div>
+  <p class="hint" style="margin-top:12px;">
+    <button type="button" id="btnTest" style="padding:8px 14px;background:rgba(255,255,255,0.06);color:#9ca3af;border:1px solid rgba(255,255,255,0.08);border-radius:8px;cursor:pointer;font-size:12px;">Test pipeline</button>
+    <button type="button" id="btnSample" style="padding:8px 14px;background:rgba(255,255,255,0.06);color:#9ca3af;border:1px solid rgba(255,255,255,0.08);border-radius:8px;cursor:pointer;font-size:12px;margin-left:8px;">Test campione</button>
+    <span id="testStatus"></span>
+  </p>
 
   <script>
     const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
     const MAX_REC_SEC = 20;
-    const MIN_REC_MS = 600;
+    const MIN_REC_MS = 1000;
     let ws = null, mediaRecorder = null, chunks = [], recTimeout = null, lastPlayOn = 'browser', lastSinkId = null;
     let recStartTime = 0, recDurationInterval = null, levelInterval = null, analyserNode = null, audioCtx = null;
     let isRecording = false, pendingStop = false, currentStream = null;
 
+    const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    if (!isLocalhost) {
+      document.getElementById('secureContextWarn').style.display = 'block';
+      document.getElementById('hintAccess').style.display = 'none';
+      document.getElementById('allowWrap').style.display = 'none';
+      document.getElementById('devicesWrap').style.display = 'none';
+    }
     if (!navigator.mediaDevices) {
       document.getElementById('secureContextWarn').style.display = 'block';
       document.getElementById('hintAccess').style.display = 'none';
       document.getElementById('allowWrap').style.display = 'none';
       document.getElementById('devicesWrap').style.display = 'none';
-      document.querySelectorAll('.step').forEach(el => { if(el.querySelector('select')) el.style.display = 'none'; });
       document.getElementById('btn').disabled = true;
       document.getElementById('recStatus').style.display = 'none';
       document.getElementById('result').innerHTML = '';
@@ -738,7 +1071,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           document.getElementById('recDebug').textContent = r.text ? '' : (r.message || '');
           document.getElementById('recDebug').style.color = r.message ? '#f59e0b' : '#71717a';
           const msg = r.message ? '<div class="warn">'+r.message+'</div>' : '';
-          document.getElementById('result').innerHTML = msg + '<div><b>Hai detto:</b> '+(r.text||'')+'</div><div><b>Risposta:</b> '+(r.response||'')+'</div>';
+          const dur = r.duration_ms ? ' <span style="color:#71717a;font-size:12px;">('+r.duration_ms+' ms)</span>' : '';
+          document.getElementById('result').innerHTML = msg + '<div><b>Hai detto:</b> '+(r.text||'')+'</div><div><b>Risposta:</b> '+(r.response||'')+dur+'</div>';
           if(lastPlayOn === 'browser' && r.audio_base64){
             const audio = new Audio('data:audio/mpeg;base64,'+r.audio_base64);
             if(lastSinkId && audio.setSinkId){ try { audio.setSinkId(lastSinkId); } catch(_){} }
@@ -760,17 +1094,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (!navigator.mediaDevices) return;
       const statusEl = document.getElementById('deviceStatus');
       const allowWrap = document.getElementById('allowWrap');
+      statusEl.textContent = 'Richiesta permesso...';
       try {
         const stream = await navigator.mediaDevices.getUserMedia({audio: true});
         stream.getTracks().forEach(t => t.stop());
+        allowWrap.style.display = 'none';
+        await loadDevices();
       } catch(e) {
         allowWrap.style.display = 'block';
-        statusEl.textContent = 'Accesso al microfono negato o non disponibile. Clicca il pulsante e consenti quando il browser lo chiede.';
+        statusEl.textContent = "Accesso negato. Clicca il pulsante sopra e scegli Consenti. Se hai bloccato: apri impostazioni sito (lucchetto) e resetta permessi microfono.";
         loadDevices();
-        return;
       }
-      allowWrap.style.display = 'none';
-      await loadDevices();
     }
 
     async function loadDevices(){
@@ -791,7 +1125,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         spks.forEach((s,i) => spkSel.appendChild(new Option(s.label || ('Output '+(i+1)), 'browser_'+s.deviceId)));
         if(spks.length === 0) spkSel.appendChild(new Option('Predefinito', 'browser_default'));
 
-        statusEl.textContent = '';
+        statusEl.textContent = mics.length === 0 && spks.length === 0 ? "Nessun dispositivo audio trovato. Collega microfono/cuffie e ricarica." : "";
       } catch(e) {
         micSel.innerHTML = '<option value="">Errore: '+e.message+'</option>';
         spkSel.innerHTML = '<option value="browser_default">Riproduci qui</option>';
@@ -800,7 +1134,120 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
 
     document.getElementById('btnAllow').onclick = () => { requestAndLoadDevices(); };
-    if (navigator.mediaDevices) requestAndLoadDevices();
+    if (navigator.mediaDevices && isLocalhost) {
+      loadDevices();
+      requestAndLoadDevices();
+    }
+
+    fetch('/api/knowledge').then(r=>r.json()).then(d=>{
+      const el = document.getElementById('knowledgeList');
+      if (el && d.entries) {
+        const lines = Object.entries(d.entries).map(([k,v])=>'"'+k+'" -> "'+v.substring(0,50)+(v.length>50?'...':'')+'"');
+        el.textContent = lines.length ? lines.join("\\n") : "(vuoto)";
+      }
+    }).catch(()=>{ const el=document.getElementById('knowledgeList'); if(el) el.textContent='(errore)'; });
+
+    document.getElementById('btnTest').onclick = async () => {
+      const btn = document.getElementById('btnTest');
+      const status = document.getElementById('testStatus');
+      btn.disabled = true;
+      status.textContent = ' Test in corso (attendi 5-10 sec)...';
+      status.style.color = '#a1a1aa';
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 60000);
+      try {
+        const r = await fetch('/api/test-pipeline', { signal: ctrl.signal });
+        clearTimeout(t);
+        const d = await r.json();
+        if (d.ok) {
+          const dur = d.duration_ms ? ' ('+d.duration_ms+' ms)' : '';
+          status.textContent = ' OK: trascritto "'+d.transcribed+'", risposta: "'+(d.llm_response||'').substring(0,50)+'..."'+dur;
+          status.style.color = '#22c55e';
+          if (d.audio_base64) {
+            const a = new Audio('data:audio/mpeg;base64,'+d.audio_base64);
+            a.play();
+          }
+        } else {
+          status.textContent = ' Errore: '+(d.error||'');
+          status.style.color = '#dc2626';
+        }
+      } catch (e) {
+        clearTimeout(t);
+        if (e.name === 'AbortError') {
+          status.textContent = ' Timeout (60s). Il server e lento o non raggiungibile.';
+        } else {
+          status.textContent = ' Errore: '+(e.message || String(e));
+        }
+        status.style.color = '#dc2626';
+      }
+      btn.disabled = false;
+    };
+
+    document.getElementById('btnText').onclick = async () => {
+      const input = document.getElementById('textInput');
+      const status = document.getElementById('textStatus');
+      const txt = (input.value || '').trim();
+      if (!txt) { status.textContent = 'Scrivi qualcosa.'; status.style.color = '#f59e0b'; return; }
+      document.getElementById('btnText').disabled = true;
+      status.textContent = ' Elaborazione...';
+      status.style.color = '#a1a1aa';
+      try {
+        const r = await fetch('/api/text-chat', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: txt}) });
+        const d = await r.json().catch(function(){ return {}; });
+        if (!r.ok) {
+          status.textContent = ' Errore: ' + (d.detail || d.error || r.status);
+          status.style.color = '#dc2626';
+        } else if (d.message && !d.response) {
+          status.textContent = ' ' + d.message;
+          status.style.color = '#f59e0b';
+        } else {
+          const dur = d.duration_ms ? d.duration_ms + ' ms' : '';
+          status.textContent = dur ? ' Tempo: ' + dur : ' OK';
+          status.style.color = '#22c55e';
+          document.getElementById('result').innerHTML = '<div><b>Hai scritto:</b> '+(d.text||'')+'</div><div><b>Risposta:</b> '+(d.response||'')+' <span style="color:#71717a;font-size:12px;">('+(d.duration_ms||0)+' ms)</span></div>';
+          if (d.audio_base64) {
+            const a = new Audio('data:audio/mpeg;base64,'+d.audio_base64);
+            if(lastSinkId && a.setSinkId){ try { a.setSinkId(lastSinkId); } catch(_){} }
+            a.play();
+          }
+        }
+      } catch (e) {
+        status.textContent = ' Errore: ' + (e.message || String(e));
+        status.style.color = '#dc2626';
+      }
+      document.getElementById('btnText').disabled = false;
+    };
+    document.getElementById('textInput').onkeydown = (e) => { if (e.key === 'Enter') document.getElementById('btnText').click(); };
+
+    document.getElementById('btnSample').onclick = async () => {
+      const btn = document.getElementById('btnSample');
+      const status = document.getElementById('testStatus');
+      btn.disabled = true;
+      status.textContent = ' Test con ultimo campione...';
+      status.style.color = '#a1a1aa';
+      try {
+        const r = await fetch('/api/test-with-sample');
+        const d = await r.json();
+        if (d.ok) {
+          const dur = d.duration_ms ? ' ('+d.duration_ms+' ms)' : '';
+          status.textContent = ' OK: "'+(d.text||'').substring(0,40)+'" -> "'+(d.response||'').substring(0,30)+'..."'+dur;
+          status.style.color = '#22c55e';
+          document.getElementById('result').innerHTML = '<div><b>Hai detto:</b> '+(d.text||'')+'</div><div><b>Risposta:</b> '+(d.response||'')+'</div>';
+          if (d.audio_base64) {
+            const a = new Audio('data:audio/mpeg;base64,'+d.audio_base64);
+            if(lastSinkId && a.setSinkId){ try { a.setSinkId(lastSinkId); } catch(_){} }
+            a.play();
+          }
+        } else {
+          status.textContent = ' '+(d.error||'');
+          status.style.color = '#dc2626';
+        }
+      } catch (e) {
+        status.textContent = ' Errore: '+(e.message || String(e));
+        status.style.color = '#dc2626';
+      }
+      btn.disabled = false;
+    };
 
     const btn = document.getElementById('btn');
     function onRecStart(e){ e.preventDefault(); if(!isRecording) startRec(); }
@@ -820,27 +1267,35 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       lastSinkId = (spkVal && spkVal.startsWith('browser_') && spkVal !== 'browser_default') ? spkVal.replace('browser_','') : null;
       const deviceId = null;
       try {
-        const constraints = { audio: micId ? { deviceId: micId.length > 5 ? { exact: micId } : true } : true };
+        const constraints = {
+          audio: Object.assign(
+            { echoCancellation: true, noiseSuppression: true },
+            micId && micId.length > 5 ? { deviceId: { exact: micId } } : {}
+          )
+        };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         if(pendingStop){ stream.getTracks().forEach(t=>t.stop()); isRecording=false; return; }
         currentStream = stream;
-        mediaRecorder = new MediaRecorder(stream);
+        await new Promise(r => setTimeout(r, 150));
+        if(pendingStop){ stream.getTracks().forEach(t=>t.stop()); isRecording=false; return; }
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+        mediaRecorder = new MediaRecorder(stream, { mimeType: mimeType, audioBitsPerSecond: 128000 });
         chunks = [];
-        mediaRecorder.ondataavailable = e => { if(e.data && e.data.size) chunks.push(e.data); };
+        mediaRecorder.ondataavailable = e => { if(e.data && e.data.size > 0) chunks.push(e.data); };
         mediaRecorder.onstop = () => {
-          if(currentStream){ currentStream.getTracks().forEach(t=>t.stop()); currentStream=null; }
           clearAllIntervals();
           document.getElementById('levelBar').style.width = '0%';
           document.getElementById('levelLabel').textContent = 'Livello: --';
           btn.classList.remove('recording');
           isRecording = false;
+          if(currentStream){ currentStream.getTracks().forEach(t=>t.stop()); currentStream=null; }
           const dur = Date.now() - recStartTime;
           if(dur < MIN_REC_MS){
             document.getElementById('recDebug').textContent = 'Troppo breve ('+Math.round(dur/100)+' decimi sec). Tieni premuto 1-2 secondi.';
             document.getElementById('recDebug').style.color = '#f59e0b';
             return;
           }
-          sendAudio(lastPlayOn, deviceId);
+          setTimeout(() => sendAudio(lastPlayOn, deviceId), 80);
         };
         mediaRecorder.onerror = (e) => {
           clearAllIntervals();
@@ -849,7 +1304,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           document.getElementById('recDebug').textContent = 'Errore registrazione: '+e.error;
           document.getElementById('recDebug').style.color = '#dc2626';
         };
-        mediaRecorder.start(250);
+        mediaRecorder.start(500);
         recStartTime = Date.now();
         recDurationInterval = setInterval(() => {
           const s = ((Date.now()-recStartTime)/1000).toFixed(1);
@@ -895,7 +1350,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       clearAllIntervals();
       btn.classList.remove('recording');
       if(mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused')){
-        try { mediaRecorder.stop(); } catch(_){}
+        try { mediaRecorder.requestData(); mediaRecorder.stop(); } catch(_){}
       } else if(currentStream){
         currentStream.getTracks().forEach(t=>t.stop());
         currentStream = null;
@@ -911,7 +1366,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         document.getElementById('recDebug').style.color = '#dc2626';
         return;
       }
-      const blob = new Blob(chunks, {type: 'audio/webm'});
+      const recMime = mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : 'audio/webm';
+      const blob = new Blob(chunks, {type: recMime});
+      if(blob.size < 2000){
+        document.getElementById('recDebug').textContent = 'Audio troppo corto ('+(blob.size/1024).toFixed(1)+' KB). Tieni premuto 1-2 secondi.';
+        document.getElementById('recDebug').style.color = '#f59e0b';
+        btn.disabled = false;
+        return;
+      }
       const sizeKb = (blob.size/1024).toFixed(1);
       document.getElementById('recDebug').textContent = 'Invio '+sizeKb+' KB...';
       document.getElementById('recDebug').style.color = '#3b82f6';
@@ -1074,7 +1536,7 @@ LOCAL_FETCH_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
-# Listen page - ascolto continuo: Hey Markone attiva, 10 sec silenzio = stop
+# Listen page - ascolto continuo: Hey G1 attiva, 10 sec silenzio = stop
 LISTEN_TEMPLATE = """<!DOCTYPE html>
 <html lang="it">
 <head>
@@ -1094,13 +1556,13 @@ LISTEN_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <h1>Ascolto continuo</h1>
-  <p style="color:#71717a;">Di "Hey Markone" + domanda. Dopo 6 sec di silenzio risponde. Non toccare nulla.</p>
+  <p style="color:#71717a;">Di "Hey G1" + domanda. Dopo 6 sec di silenzio risponde. Non toccare nulla.</p>
   <div class="status" id="status">Connessione...</div>
   <div class="status" id="result" style="display:none"></div>
   <p style="margin-top:24px;"><a href="/" style="color:#3b82f6;">Setup</a> | <a href="/local" style="color:#3b82f6;">Parla (push)</a></p>
   <script>
     const ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/listen');
-    ws.onopen = () => document.getElementById('status').innerHTML = '<span class="ok pulse">In ascolto...</span> Di "Hey Markone" seguito dalla domanda.';
+    ws.onopen = () => document.getElementById('status').innerHTML = '<span class="ok pulse">In ascolto...</span> Di "Hey G1" seguito dalla domanda.';
     ws.onclose = () => document.getElementById('status').innerHTML = '<span class="warn">Disconnesso. Ricarica la pagina.</span>';
     ws.onmessage = (e) => {
       const d = JSON.parse(e.data);
@@ -1137,7 +1599,7 @@ def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False)
     import uvicorn
     print(f"G1 Talk Module - http://{host}:{port}")
     print("  Setup: /")
-    print("  Ascolto Hey Markone: /listen")
+    print("  Ascolto Hey G1: /listen")
     print("  Parla (push): /local")
     print("  Client rete: /client")
     uvicorn.run(app, host=host, port=port)

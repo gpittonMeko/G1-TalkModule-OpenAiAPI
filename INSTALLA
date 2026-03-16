@@ -1,0 +1,6 @@
+#!/bin/bash
+# G1 Talk Module - Installazione rapida
+# Uso: bash INSTALLA [--no-audio]
+#   --no-audio  Salta PortAudio (solo modalità rete/web)
+
+exec bash "$(dirname "$0")/install.sh" "$@"

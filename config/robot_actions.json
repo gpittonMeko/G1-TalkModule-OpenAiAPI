@@ -1,0 +1,27 @@
+{
+  "dare la mano": {
+    "action": "shake_hand",
+    "response": "Ecco la mano!"
+  },
+  "dammi la mano": {
+    "action": "shake_hand",
+    "response": "Ecco la mano!"
+  },
+  "dai la mano": {
+    "action": "shake_hand",
+    "response": "Ecco la mano!"
+  },
+  "stringi la mano": {
+    "action": "shake_hand",
+    "response": "Ecco la mano!"
+  },
+  "saluta": {
+    "action": "wave_hand",
+    "response": "Ciao!"
+  },
+  "fai ciao": {
+    "action": "wave_hand",
+    "response": "Ciao!"
+  },
+  "_comment_teaching": "Per azioni teaching: usa action 'teaching_X' dove X è l'ID dalla app Unitree (Demo Teaching). Es: teaching_1, teaching_2"
+}

@@ -20,17 +20,22 @@ class TTSClient:
         """
         Converte testo in audio.
         Ritorna bytes MP3 (o formato richiesto).
+        gpt-4o-mini-tts: più affidabile per italiano (tts-1-hd spesso sbaglia).
         """
         if not text or not text.strip():
             return b""
         try:
-            resp = self.client.audio.speech.create(
-                model="tts-1",
-                voice=self.voice,
-                input=text.strip(),
-                response_format=format,
-                speed=1.5,
-            )
+            kwargs = {
+                "model": settings.tts_model,
+                "voice": self.voice,
+                "input": text.strip(),
+                "response_format": format,
+                "speed": 1.0,
+            }
+            # instructions solo per gpt-4o-mini-tts: migliora output italiano
+            if "gpt-4o-mini-tts" in settings.tts_model:
+                kwargs["instructions"] = "Parla in italiano. Pronuncia correttamente ogni parola."
+            resp = self.client.audio.speech.create(**kwargs)
             return resp.content
         except Exception as e:
             print(f"[TTS] Errore: {e}")

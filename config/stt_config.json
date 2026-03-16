@@ -1,0 +1,6 @@
+{
+  "extra_phrases": ["prova prova prova", "hey g1", "hey markone"],
+  "threshold": 0.72,
+  "min_word_length": 3,
+  "use_italian_vocabulary": true
+}

@@ -1,0 +1,76 @@
+================================================================================
+  G1 TALK MODULE - Installazione
+  Assistente vocale per robot Unitree G1
+================================================================================
+
+INSTALLAZIONE (5 passi)
+----------------------
+
+1. Estrai il pacchetto
+   unzip G1-TalkModule-OpenAiAPI.zip
+   cd G1-TalkModule-OpenAiAPI
+
+2. Installa
+   bash install.sh
+
+3. Configurazione
+   Il pacchetto include .env con le chiavi API gia configurate.
+   Se serve modificare: nano .env
+
+4. Avvia il server
+   bash scripts/restart_server.sh
+
+5. Apri nel browser
+   http://<IP-DI-QUESTA-MACCHINA>:8081/client
+
+   Esempio: se l'IP è 192.168.1.100 → http://192.168.1.100:8081/client
+
+
+COME USARE
+----------
+
+- Tieni premuto il pulsante e parla, rilascia per inviare
+- Oppure scrivi nella casella di testo
+- Domande tipo "che ore sono", "che tempo fa", "dammi la mano" funzionano subito
+
+
+CONNESSIONE
+-----------
+
+Opzione A - Stesso WiFi del server
+  Collega telefono/tablet/PC allo stesso WiFi dove gira il server.
+  Apri http://<IP-SERVER>:8081/client
+
+Opzione B - Da un altro PC (tunnel SSH)
+  ssh -L 8081:localhost:8081 utente@IP-SERVER -N
+  Poi apri http://localhost:8081/client
+
+
+REQUISITI
+---------
+
+- Linux (Ubuntu, Debian, Jetson, Raspberry Pi)
+- Python 3.9+
+- Chiave API OpenAI (platform.openai.com)
+
+Per mic/speaker locali sul server: PortAudio (install.sh lo installa).
+Solo modalità web: bash install.sh --no-audio
+
+
+DOCUMENTAZIONE
+-------------
+
+- LEGGIMI.txt (questo file) - guida rapida
+- GUIDA.md - connessione, pacchetto, comandi
+- docs/INSTALLAZIONE.md - installazione dettagliata
+- docs/STT.md - provider STT (Whisper, Groq, Deepgram)
+- docs/ROBOT_ACTIONS.md - azioni vocali (dare la mano, saluta)
+- docs/AUDIO.md - PortAudio, dispositivi
+- docs/ARM_SETUP.md - setup Jetson/Raspberry
+
+
+PROBLEMI?
+---------
+
+- Server non parte: verifica OPENAI_API_KEY in .env
+- Mic non funziona da browser: usa localhost (tunnel SSH) o HTTPS
