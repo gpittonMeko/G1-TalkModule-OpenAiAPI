@@ -41,7 +41,24 @@ Hai **due modi** per usare il Talk Module:
 
 ---
 
-## Installazione veloce (pacchetto)
+## Pacchetto completo (G1 + audio + APK)
+
+Su Windows, per generare **un solo zip** con server Linux, file audio soundboard e cartella APK:
+
+```powershell
+.\scripts\prepara_pacchetto_completo_g1.ps1
+```
+
+Si creano `dist/G1_Pacchetto_Installazione_Completa.zip` e la cartella omonima:
+- `01_Server_UnitreeG1/` — `G1-TalkModule-OpenAiAPI.zip` (installa sul G1 con `install.sh`)
+- `02_Soundboard_Audio/` — `.wav` + `testi_soundboard.txt`
+- `03_APK_Android/` — APK se la build Gradle riesce; altrimenti `LEGGIMI_APK.txt` e istruzioni
+
+Solo server (senza assemblaggio): `.\scripts\crea_pacchetto.ps1` → `dist/G1-TalkModule-OpenAiAPI.zip`.
+
+---
+
+## Installazione veloce (pacchetto server)
 
 ### 1. Ottieni il pacchetto
 

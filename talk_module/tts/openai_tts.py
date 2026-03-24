@@ -32,10 +32,14 @@ class TTSClient:
                 "response_format": format,
                 "speed": 1.0,
             }
-            # instructions solo per gpt-4o-mini-tts: migliora output italiano
+            # instructions solo se supportato dallo SDK / endpoint
             if "gpt-4o-mini-tts" in settings.tts_model:
                 kwargs["instructions"] = "Parla in italiano. Pronuncia correttamente ogni parola."
-            resp = self.client.audio.speech.create(**kwargs)
+            try:
+                resp = self.client.audio.speech.create(**kwargs)
+            except TypeError:
+                kwargs.pop("instructions", None)
+                resp = self.client.audio.speech.create(**kwargs)
             return resp.content
         except Exception as e:
             print(f"[TTS] Errore: {e}")

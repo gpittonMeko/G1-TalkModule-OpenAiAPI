@@ -26,6 +26,9 @@ tmp/
 *.wav
 *.mp3
 
+# JS (Capacitor / tooling)
+node_modules/
+
 # OS
 .DS_Store
 Thumbs.db

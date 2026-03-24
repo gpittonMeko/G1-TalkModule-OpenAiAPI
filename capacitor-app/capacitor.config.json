@@ -1,0 +1,12 @@
+{
+  "appId": "com.g1talk.app",
+  "appName": "G1 Talk",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https",
+    "allowNavigation": ["*"]
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

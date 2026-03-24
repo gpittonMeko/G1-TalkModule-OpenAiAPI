@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+
+<html lang="it">
+
+<head>
+
+  <meta charset="UTF-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
+  <meta name="theme-color" content="#14b8a6">
+
+  <meta name="apple-mobile-web-app-capable" content="yes">
+
+  <title>G1 Talk - Connetti</title>
+
+  <style>
+
+    * { box-sizing: border-box; }
+
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: linear-gradient(160deg, #0c0e14 0%, #141922 100%); color: #e8eaed; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+
+    h1 { font-size: 1.5rem; margin-bottom: 8px; }
+
+    .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 24px; max-width: 360px; width: 100%; }
+
+    label { display: block; font-size: 13px; color: #9ca3af; margin-bottom: 6px; }
+
+    input[type="text"] { width: 100%; padding: 14px 16px; border-radius: 10px; border: 2px solid #3f3f46; background: #27272a; color: #fff; font-size: 16px; margin-bottom: 16px; }
+
+    input:focus { outline: none; border-color: #14b8a6; }
+
+    .presets { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+
+    .preset { padding: 10px 16px; background: rgba(20,184,166,0.15); color: #14b8a6; border: 1px solid rgba(20,184,166,0.3); border-radius: 8px; cursor: pointer; font-size: 13px; }
+
+    .preset:hover, .preset:active { background: rgba(20,184,166,0.25); }
+
+    .btn { width: 100%; padding: 16px; background: #14b8a6; color: #0c0e14; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; }
+
+    .btn:hover, .btn:active { background: #0d9488; }
+
+    .hint { font-size: 12px; color: #71717a; margin-top: 16px; line-height: 1.5; text-align: left; max-width: 360px; }
+
+    .chk { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+
+    .chk input { width: auto; margin: 0; }
+
+    details.hint summary { cursor: pointer; color: #14b8a6; font-weight: 600; list-style: none; }
+
+    details.hint summary::-webkit-details-marker { display: none; }
+
+    .guide { background: rgba(20,184,166,0.08); border: 1px solid rgba(20,184,166,0.22); border-radius: 12px; padding: 12px 14px; margin-bottom: 20px; max-width: 360px; font-size: 12px; line-height: 1.45; color: #a1a1aa; }
+
+    .guide strong { color: #e4e4e7; }
+
+  </style>
+
+</head>
+
+<body>
+
+  <h1>G1 Talk</h1>
+
+  <p style="color:#9ca3af;font-size:14px;margin-bottom:12px;">Launcher → stessa app del browser</p>
+
+  <div class="guide">
+
+    <strong>Prima</strong> il modulo deve girare sul robot: <code>bash scripts/restart_server.sh</code> sul G1.<br><br>
+
+    Questa app inserisce solo l’IP e apre <strong>/client</strong> (soundboard, parla, tempi…). Voce e IA = server sul G1.<br><br>
+
+    <strong>Cassa Bluetooth:</strong> Impostazioni Android → associa l’altoparlante; l’audio del sistema va sulla cassa.
+
+  </div>
+
+  <div class="card">
+
+    <label>IP del server</label>
+
+    <input type="text" id="ip" placeholder="192.168.123.161" />
+
+    <div class="presets">
+
+      <button type="button" class="preset" onclick="setIp('192.168.123.161')">Robot G1</button>
+
+      <button type="button" class="preset" onclick="setIp('192.168.10.191')">AI Accelerator</button>
+
+    </div>
+
+    <div class="chk">
+
+      <input type="checkbox" id="https" checked />
+
+      <label for="https" style="margin:0;">Usa HTTPS (serve per microfono)</label>
+
+    </div>
+
+    <button type="button" class="btn" onclick="connect()">Connetti</button>
+
+  </div>
+
+  <p class="hint" style="margin-top:14px;">
+
+    WiFi del robot o stessa rete del server → IP (es. <code>ip a</code> sul G1) → Connetti.
+
+  </p>
+
+  <script>
+
+    (function(){ var s = localStorage.getItem('g1_last_ip'); if(s) document.getElementById('ip').value = s; else document.getElementById('ip').value = '192.168.123.161'; })();
+
+    function setIp(ip){ document.getElementById('ip').value = ip; }
+
+    function connect(){
+
+      var ip = document.getElementById('ip').value.trim().replace(/^https?:\/\//,'').split('/')[0].split(':')[0];
+
+      if(!ip){ alert('Inserisci l\'IP'); return; }
+
+      var useHttps = document.getElementById('https').checked;
+
+      var proto = useHttps ? 'https' : 'http';
+
+      var url = proto + '://' + ip + ':8081/client';
+
+      localStorage.setItem('g1_last_ip', ip);
+
+      window.location.href = url;
+
+    }
+
+  </script>
+
+</body>
+
+</html>
+
+

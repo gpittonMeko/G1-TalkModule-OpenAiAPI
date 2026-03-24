@@ -1,10 +1,12 @@
 """
-Ricerca veloce per domande base: ora, meteo, domande fattuali.
-Prima di chiamare l'LLM, tenta una lookup online rapida.
-Se non trova nulla: "Non ho trovato."
+Ricerca veloce online per domande base: ora, meteo, domande fattuali.
+Scraping leggero con timeout breve. Se non trova: "Non ho trovato."
 """
 
+import json
 import re
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -12,6 +14,7 @@ from typing import Optional
 from talk_module.config import settings
 
 NOT_FOUND = "Non ho trovato."
+_TIMEOUT = getattr(settings, "quick_lookup_timeout", 4) or 4
 
 # Pattern per domande "base" (ora, meteo, fattuali)
 _TIME_PATTERNS = (
@@ -30,8 +33,8 @@ _METEO_PATTERNS = (
     r"fa\s+caldo",
 )
 _FACTUAL_PATTERNS = (
-    r"^chi\s+è\b",
-    r"^cos['']?\s*è\b",
+    r"^chi\s+[eè]\s*",
+    r"^cos['']?\s*[eè]\s*",
     r"^quando\s+",
     r"^dove\s+",
 )
@@ -51,15 +54,33 @@ def is_quick_lookup_question(text: str) -> bool:
     return bool(_TIME_RE.search(txt) or _METEO_RE.search(txt) or _FACTUAL_RE.search(txt))
 
 
+def _fetch(url: str) -> Optional[str]:
+    """GET veloce con timeout."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "G1-Talk/1.0"})
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+            return r.read().decode("utf-8")
+    except Exception:
+        return None
+
+
 def _lookup_time() -> str:
-    """Ora attuale in Italia (Europe/Rome). Nessuna chiamata web."""
+    """Ora attuale da timeapi.io (Europe/Rome). Fallback: orologio server."""
+    raw = _fetch("https://www.timeapi.io/api/Time/current/zone?timeZone=Europe/Rome")
+    if raw:
+        try:
+            d = json.loads(raw)
+            h, m = d.get("hour", 0), d.get("minute", 0)
+            return f"Sono le {h:02d}:{m:02d}."
+        except Exception:
+            pass
     try:
         tz = ZoneInfo("Europe/Rome")
         now = datetime.now(tz)
-        h, m = now.hour, now.minute
-        return f"Sono le {h}:{m:02d}."
+        return f"Sono le {now.hour:02d}:{now.minute:02d}."
     except Exception:
-        return NOT_FOUND
+        pass
+    return NOT_FOUND
 
 
 def _extract_city(text: str) -> str:
@@ -82,37 +103,47 @@ def _extract_city(text: str) -> str:
             "palermo": "Palermo",
         }
         return city_map.get(city, city.capitalize())
-    return getattr(settings, "default_weather_city", "Rome")
+    return "Roma"
 
 
 def _lookup_weather(text: str) -> str:
-    """Meteo via wttr.in."""
+    """Meteo via wttr.in (scraping veloce). format=3: 'Roma: +18°C Sereno'."""
+    city = _extract_city(text)
     try:
         import requests
-
-        city = _extract_city(text)
-        url = f"https://wttr.in/{city}?format=3"
-        timeout = getattr(settings, "quick_lookup_timeout", 3)
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "curl/7.68.0"})
+        url = f"https://wttr.in/{urllib.parse.quote(city)}?format=3"
+        r = requests.get(url, timeout=_TIMEOUT, headers={"User-Agent": "curl/7.68.0"})
         if r.status_code == 200 and r.text.strip():
-            return r.text.strip()
+            txt = r.text.strip()
+            if len(txt) < 100 and "error" not in txt.lower():
+                return txt
     except Exception:
         pass
+    raw = _fetch(f"https://wttr.in/{urllib.parse.quote(city)}?format=%l:+%C+%t&lang=it")
+    if raw and len(raw) < 150 and "error" not in raw.lower():
+        return raw.strip()
     return NOT_FOUND
 
 
 def _lookup_duckduckgo(text: str) -> str:
-    """Ricerca DuckDuckGo per domande fattuali."""
+    """Risposta rapida: DuckDuckGo Instant Answer API (no key) o ddgs."""
+    url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(text)}&format=json"
+    raw = _fetch(url)
+    if raw:
+        try:
+            d = json.loads(raw)
+            for key in ("AbstractText", "Answer"):
+                val = (d.get(key) or "").strip()
+                if val and 10 < len(val) < 250:
+                    return val[:120] + ("..." if len(val) > 120 else "")
+        except Exception:
+            pass
     try:
         from ddgs import DDGS
-
         results = list(DDGS().text(text, max_results=1))
         if results and results[0].get("body"):
-            body = results[0]["body"].strip()
-            # Tronca se troppo lunga (max 80 caratteri per risposta breve)
-            if len(body) > 80:
-                body = body[:77] + "..."
-            return body
+            body = results[0]["body"].strip()[:120]
+            return body + ("..." if len(results[0]["body"]) > 120 else "")
     except Exception:
         pass
     return NOT_FOUND

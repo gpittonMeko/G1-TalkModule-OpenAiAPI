@@ -36,18 +36,22 @@ class Settings:
     # OpenAI
     api_key: str = _str(os.getenv("OPENAI_API_KEY", ""))
     llm_model: str = _str(os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    # Limite token risposta (max_completion_tokens / max_tokens a seconda del modello)
+    llm_max_completion_tokens: int = _int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "1024")) or 1024
 
-    # STT provider: whisper | deepgram | groq (auto groq se GROQ_API_KEY presente)
-    _stt_default = "groq" if _str(os.getenv("GROQ_API_KEY")) else "whisper"
-    stt_provider: str = _str(os.getenv("STT_PROVIDER", _stt_default)).lower()
+    # STT: whisper = OpenAI Whisper API (stessa chiave OPENAI_API_KEY). groq/deepgram solo se imposti STT_PROVIDER.
+    stt_provider: str = _str(os.getenv("STT_PROVIDER", "whisper")).lower()
     deepgram_api_key: str = _str(os.getenv("DEEPGRAM_API_KEY", ""))
     groq_api_key: str = _str(os.getenv("GROQ_API_KEY", ""))
     tts_voice: str = _str(os.getenv("TTS_VOICE", "nova"))
+    tts_voice_robot: str = _str(os.getenv("TTS_VOICE_ROBOT", "echo"))  # voce più metallica per traccia robot
     tts_model: str = _str(os.getenv("TTS_MODEL", "gpt-4o-mini-tts"))  # gpt-4o-mini-tts più affidabile per italiano
+    robot_effect_preset: str = _str(os.getenv("ROBOT_EFFECT_PRESET", "robot_full"))  # telephone|ring_mod|bitcrush|robot_full
     tts_language: str = _str(os.getenv("TTS_LANGUAGE", "it"))
     whisper_prompt: str = _str(
         os.getenv("WHISPER_PROMPT"),
-        "Lingua italiana. Esempi: prova prova prova, che ore sono, hey g1. Trascrivi solo le parole pronunciate.",
+        "Italiano. L'utente può usare frasi lunghe: trascrivi tutto ciò che dici, senza tagliare a metà periodo. "
+        "Esempi: hey g1, buonasera, McKinsey, centenario. Solo parole effettivamente pronunciate.",
     )
     # STT fuzzy: threshold e min_word_length in config/stt_config.json (opzionale override via .env)
     stt_fuzzy_threshold: float = float(os.getenv("STT_FUZZY_THRESHOLD", "0.72"))
@@ -57,6 +61,12 @@ class Settings:
     quick_lookup_enabled: bool = os.getenv("QUICK_LOOKUP_ENABLED", "true").lower() in ("1", "true", "yes")
     quick_lookup_timeout: int = _int(os.getenv("QUICK_LOOKUP_TIMEOUT", "3")) or 3
     default_weather_city: str = _str(os.getenv("DEFAULT_WEATHER_CITY", "Rome"))
+
+    # Wake word: risposta TTS quando l'utente dice solo "Hey G1" senza domanda
+    hey_g1_ack_text: str = _str(
+        os.getenv("HEY_G1_ACK_TEXT"),
+        "Sì, ti ascolto. Come posso aiutarti?",
+    )
 
     # Audio
     sample_rate: int = _int(os.getenv("SAMPLE_RATE", "16000")) or 16000

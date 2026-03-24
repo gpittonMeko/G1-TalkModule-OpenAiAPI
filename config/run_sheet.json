@@ -1,0 +1,47 @@
+{
+  "policy": "Autonomia robot: circa 2 ore operative, poi 15–20 minuti di downtime per ricarica.",
+  "rows": [
+    {
+      "fase": "WELCOME",
+      "attivita": "Accredito — saluto con audio",
+      "ora_inizio": "",
+      "durata_stimata": "",
+      "note": ""
+    },
+    {
+      "fase": "WELCOME",
+      "attivita": "Coffee — flussi ospiti",
+      "ora_inizio": "",
+      "durata_stimata": "",
+      "note": ""
+    },
+    {
+      "fase": "SALA_PRINCIPALE",
+      "attivita": "Interazioni / coreografie fondo palco",
+      "ora_inizio": "",
+      "durata_stimata": "",
+      "note": ""
+    },
+    {
+      "fase": "SALA_PRINCIPALE",
+      "attivita": "Messaggio posto / inizio evento",
+      "ora_inizio": "",
+      "durata_stimata": "",
+      "note": ""
+    },
+    {
+      "fase": "STAMPA_GREEN",
+      "attivita": "Sala stampa / green room (TBD)",
+      "ora_inizio": "",
+      "durata_stimata": "",
+      "note": ""
+    },
+    {
+      "fase": "DEFLUSSO",
+      "attivita": "Uscita accredito / gift / messaggio registrato",
+      "ora_inizio": "",
+      "durata_stimata": "",
+      "note": ""
+    }
+  ]
+}

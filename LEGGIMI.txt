@@ -3,6 +3,15 @@
   Assistente vocale per robot Unitree G1
 ================================================================================
 
+IN 30 SECONDI — COME FUNZIONA
+------------------------------
+• Sul G1 (Linux) installi lo ZIP e avvii il SERVER: install.sh → .env → restart_server.sh
+• Dal telefono: stesso WiFi del robot → browser su https://IP-DEL-G1:8081/client
+  (oppure app APK: stessa pagina; inserisci l'IP; cassa BT = accoppiamento Android)
+• Voce, GPT, TTS e soundboard girano SUL SERVER; il telefono è solo interfaccia.
+• Pacchetto "tutto in uno" (Windows, cartella dist): G1_Pacchetto_Installazione_Completa.zip
+
+
 INSTALLAZIONE (5 passi)
 ----------------------
 
@@ -37,11 +46,20 @@ COME USARE
 CONNESSIONE
 -----------
 
-Opzione A - Stesso WiFi del server
-  Collega telefono/tablet/PC allo stesso WiFi dove gira il server.
-  Apri http://<IP-SERVER>:8081/client
+Opzione A - Telefono, stesso WiFi (o WiFi del robot)
+  Collega il telefono al WiFi del robot o alla stessa rete del server.
+  Apri https://<IP>:8081/client (per microfono serve HTTPS)
+  Oppure http://<IP>:8080/client (redirect a HTTPS)
+  Launcher: http://<IP>:8081/launcher (inserisci IP e connetti)
 
-Opzione B - Da un altro PC (tunnel SSH)
+Opzione B - Add to Home Screen (PWA)
+  Da Chrome Android: menu → Aggiungi a schermata Home.
+  L'app si comporta come un'app nativa.
+
+Opzione C - APK Android
+  Vedi capacitor-app/README.md per build dell'APK.
+
+Opzione D - PC, tunnel SSH
   ssh -L 8081:localhost:8081 utente@IP-SERVER -N
   Poi apri http://localhost:8081/client
 

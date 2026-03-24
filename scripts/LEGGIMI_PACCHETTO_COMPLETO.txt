@@ -1,0 +1,49 @@
+================================================================================
+  G1 TALK MODULE – Pacchetto installazione (Unitree G1 + Android)
+================================================================================
+
+PACCHETTO PRONTO — COSA C’È DENTRO
+-----------------------------------
+  01_Server_UnitreeG1     → ZIP: da scompattare sul G1, bash install.sh
+  02_Soundboard_Audio     → file WAV + testi (solo ascolto / backup)
+  03_APK_Android          → G1-Talk-Launcher-debug.apk (o LEGGIMI_APK.txt se manca)
+  LEGGIMI_INSTALLAZIONE_COMPLETA.txt → questa guida
+
+Sull’interfaccia web (/client) trovi in alto il riquadro «Come funziona» e testi
+di aiuto in ogni sezione (Soundboard, Parla, Tempi, Knowledge, Dispositivi, Info).
+
+
+Due modalità d’uso. La logica vocale (STT, GPT, TTS, soundboard) gira SEMPRE
+sul SERVER Python installato sul G1 (o su PC/Jetson sulla stessa rete).
+
+  A) SERVER SUL G1 + BROWSER
+     - Copia 01_Server_UnitreeG1/G1-TalkModule-OpenAiAPI.zip sul G1 (o Linux onboard).
+     - unzip, cd G1-TalkModule-OpenAiAPI, bash install.sh
+     - Configura .env (OPENAI_API_KEY, ecc.), poi: bash scripts/restart_server.sh
+     - Collega telefono/PC al WiFi del robot. Apri il browser:
+
+         https://<IP_SERVER>:8081/client
+
+       Esempio IP: 192.168.123.161 — verifica sul G1 con: ip a   o   hostname -I
+       Per microfono da telefono serve HTTPS; al primo accesso accetta il certificato.
+
+     Funzionalità nel browser: soundboard (robot/naturale), chat vocale e testuale,
+     wake word, run sheet, impostazioni.
+
+  B) APK ANDROID + CASSA BLUETOOTH
+     - L’APK è un launcher: inserisci l’IP del server e apre la stessa interfaccia
+       /client nel WebView (equivalente al browser).
+     - Installa G1-Talk-Launcher.apk (cartella 03_APK_Android).
+     - Accoppia il telefono all’altoparlante Bluetooth nelle Impostazioni Android:
+       l’audio di sistema (TTS dal browser/app) va alla cassa.
+
+     Se l’APK non è nel pacchetto: su PC con Android Studio vedi capacitor-app/README.md
+     oppure esegui (come Amministratore se servono le licenze SDK):
+       .\\capacitor-app\\build_apk.ps1
+
+Contenuto cartelle:
+  01_Server_UnitreeG1     → zip installazione Linux sul robot
+  02_Soundboard_Audio     → .wav per ogni slot (robot + naturale) + testi_soundboard.txt
+  03_APK_Android          → APK debug o istruzioni di build
+
+Documentazione nel progetto: LEGGIMI.txt, GUIDA.md, docs/

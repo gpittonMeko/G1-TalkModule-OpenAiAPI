@@ -12,20 +12,22 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 _executor = ThreadPoolExecutor(max_workers=2)
 
 # FastAPI + WebSocket
 try:
-    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body
-    from fastapi.responses import HTMLResponse, RedirectResponse, Response
+    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body, Request
+    from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False
 
 from talk_module.config import settings
+from talk_module.audio_robot_effect import apply_robot_effect_base64
 import os
 from talk_module.network_discovery import (
     register_web_client,
@@ -37,7 +39,13 @@ from talk_module.network_discovery import (
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "audio_devices.json"
 KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "config" / "knowledge.json"
 SOUNDBOARD_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard.json"
+RUN_SHEET_PATH = Path(__file__).resolve().parent.parent / "config" / "run_sheet.json"
+SOUNDBOARD_SLOT_COUNT = 20
+SOUNDBOARD_TEXT_MAX_LEN = 280
 CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Sentinel: solo wake word, senza domanda (risposta = settings.hey_g1_ack_text)
+PROMPT_HEY_G1_ACK_ONLY = "__G1_HEY_ACK_ONLY__"
 
 # Knowledge base: pattern -> risposta. Controllo prima dell'LLM per risposte veloci.
 _knowledge_cache: dict[str, str] | None = None
@@ -125,6 +133,41 @@ def _save_sample_audio(audio_bytes: bytes) -> Path | None:
         return None
 
 
+def _find_wake_and_rest(t: str) -> tuple[Optional[str], str]:
+    """
+    Ascolto continuo: rileva wake (Hey G1, G1, G one, gi one, Mark one, …).
+    Ritorna (resto dopo wake, kind) con kind: miss | ack | ok.
+    rest None se miss; stringa vuota se solo wake; altrimenti testo comando.
+    """
+    if not t or not t.strip():
+        return None, "miss"
+    s = t.strip()
+    low = s.lower()
+    if any(h in low for h in ("sottotitoli", "amara.org", "amara ", "qtss", "subtitle", "created by", "a cura di")):
+        return None, "miss"
+    # Varianti STT: g1, g one, gi one, jee one, mark one (ordine: prefisso vocale prima)
+    wake_core = r"(?:g\s*1|\bg1\b|g\s*one|gi\s*one|mark\s*one|markone|jee\s*one)"
+    m = re.search(rf"(?:hey|ehi|ei)\s*[,.\s]*\s*{wake_core}\s*[,.\s]*", s, re.IGNORECASE)
+    if m:
+        rest = s[m.end() :].strip().lstrip(",.; ")
+        if not rest:
+            return "", "ack"
+        return rest, "ok"
+    m2 = re.match(rf"^\s*{wake_core}\s*[,.\s]*\s*(.*)$", s, re.IGNORECASE | re.DOTALL)
+    if m2:
+        rest = (m2.group(1) or "").strip()
+        if not rest:
+            return "", "ack"
+        return rest, "ok"
+    m3 = re.search(rf"(?:^|[\s,;])({wake_core})(?=[\s,;]|$)", s, re.IGNORECASE)
+    if m3:
+        rest = s[m3.end() :].strip().lstrip(",.; ")
+        if not rest:
+            return "", "ack"
+        return rest, "ok"
+    return None, "miss"
+
+
 # WebSocket clients: {client_id: ws}
 _ws_clients: dict = {}
 
@@ -155,13 +198,19 @@ if HAS_FASTAPI:
             from talk_module.llm import LLMClient
             from talk_module.tts import TTSClient
             prov = settings.stt_provider
-            if (prov == "deepgram" or settings.deepgram_api_key) and settings.deepgram_api_key:
+            # Solo se STT_PROVIDER è esplicitamente groq/deepgram E la chiave c'è (non basta avere GROQ_API_KEY nel .env con whisper)
+            if prov == "deepgram" and settings.deepgram_api_key:
                 from talk_module.stt.deepgram_client import DeepgramClient
                 _stt = DeepgramClient()
-            elif (prov == "groq" or settings.groq_api_key) and settings.groq_api_key:
+            elif prov == "groq" and settings.groq_api_key:
                 from talk_module.stt.groq_client import GroqWhisperClient
                 _stt = GroqWhisperClient()
             else:
+                if prov in ("groq", "deepgram"):
+                    print(
+                        f"[STT] STT_PROVIDER={prov} senza chiave valida: uso OpenAI Whisper (OPENAI_API_KEY).",
+                        flush=True,
+                    )
                 from talk_module.stt import WhisperClient
                 _stt = WhisperClient()
             _llm = LLMClient()
@@ -189,9 +238,41 @@ if HAS_FASTAPI:
     def favicon():
         return Response(status_code=204)
 
+    @app.get("/manifest.json")
+    def manifest(request: Request):
+        """PWA manifest per installazione su mobile (Add to Home Screen)."""
+        base = str(request.base_url).rstrip("/")
+        return JSONResponse({
+            "name": "G1 Talk",
+            "short_name": "G1 Talk",
+            "description": "Assistente vocale per robot Unitree G1",
+            "start_url": f"{base}/client",
+            "display": "standalone",
+            "background_color": "#0c0e14",
+            "theme_color": "#14b8a6",
+            "orientation": "portrait",
+            "icons": [],
+        })
+
+    @app.get("/sw.js")
+    def service_worker():
+        """Service worker minimale per PWA (abilita Add to Home Screen)."""
+        sw = """// G1 Talk - Service Worker minimal
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', () => self.clients.claim());
+"""
+        return Response(sw, media_type="application/javascript")
+
     @app.get("/client", response_class=HTMLResponse)
     def client_page():
         return CLIENT_TEMPLATE
+
+    @app.get("/launcher")
+    def launcher_page(request: Request):
+        """Pagina launcher: inserisci IP del server (robot o AI Accelerator) e connetti."""
+        base = str(request.base_url).rstrip("/")
+        host = request.url.hostname or "192.168.10.191"
+        return HTMLResponse(LAUNCHER_TEMPLATE.format(host=host, base=base))
 
     @app.get("/local")
     @app.get("/listen")
@@ -212,10 +293,18 @@ if HAS_FASTAPI:
     def api_stt_info():
         """Info sul provider STT attivo e alternative."""
         prov = settings.stt_provider
+        stt, _, _, _, _ = get_services()
+        eff = type(stt).__name__
+        effective = "whisper"
+        if "Groq" in eff:
+            effective = "groq"
+        elif "Deepgram" in eff:
+            effective = "deepgram"
         return {
             "provider": prov,
+            "effective": effective,
             "alternatives": [
-                {"id": "whisper", "name": "OpenAI Whisper", "env": "STT_PROVIDER=whisper"},
+                {"id": "whisper", "name": "OpenAI Whisper", "env": "STT_PROVIDER=whisper (default)"},
                 {"id": "deepgram", "name": "Deepgram Nova", "env": "STT_PROVIDER=deepgram, DEEPGRAM_API_KEY=..."},
                 {"id": "groq", "name": "Groq Whisper", "env": "STT_PROVIDER=groq, GROQ_API_KEY=..."},
             ],
@@ -384,44 +473,197 @@ if HAS_FASTAPI:
             return {"ok": False, "error": str(e)}
 
     def _load_soundboard() -> list[dict]:
-        """Carica soundboard da config/soundboard.json. 10 slot: {icon, text, audio_base64}."""
+        """Carica soundboard da config/soundboard.json. N slot: {icon, text, audio_base64}."""
+        n = SOUNDBOARD_SLOT_COUNT
         if not SOUNDBOARD_PATH.exists():
-            return [{"icon": "🎤", "text": f"Comando {i+1}", "audio_base64": ""} for i in range(10)]
+            return [
+                {
+                    "icon": "🎤",
+                    "text": f"Comando {i+1}",
+                    "audio_base64": "",
+                    "format": "webm",
+                    "audio_base64_clean": "",
+                    "format_clean": "mp3",
+                }
+                for i in range(n)
+            ]
         try:
             data = json.loads(SOUNDBOARD_PATH.read_text(encoding="utf-8"))
             slots = data.get("slots") or []
-            while len(slots) < 10:
-                slots.append({"icon": "🎤", "text": f"Comando {len(slots)+1}", "audio_base64": "", "format": "webm"})
+            while len(slots) < n:
+                slots.append(
+                    {
+                        "icon": "🎤",
+                        "text": f"Comando {len(slots)+1}",
+                        "audio_base64": "",
+                        "format": "webm",
+                        "audio_base64_clean": "",
+                        "format_clean": "mp3",
+                    }
+                )
             for i in range(len(slots)):
                 s = slots[i]
                 s.setdefault("icon", "🎤")
                 s.setdefault("text", f"Comando {i+1}")
                 s.setdefault("audio_base64", "")
                 s.setdefault("format", "webm")
-            return slots[:10]
+                s.setdefault("audio_base64_clean", "")
+                s.setdefault("format_clean", "mp3")
+            return slots[:n]
         except Exception:
-            return [{"icon": "🎤", "text": f"Comando {i+1}", "audio_base64": ""} for i in range(10)]
+            return [
+                {
+                    "icon": "🎤",
+                    "text": f"Comando {i+1}",
+                    "audio_base64": "",
+                    "format": "webm",
+                    "audio_base64_clean": "",
+                    "format_clean": "mp3",
+                }
+                for i in range(n)
+            ]
+
+    def _default_run_sheet() -> dict:
+        return {
+            "policy": "Autonomia robot: circa 2 ore operative, poi 15–20 minuti di downtime per ricarica.",
+            "rows": [
+                {"fase": "WELCOME", "attivita": "Accredito — saluto con audio", "ora_inizio": "", "durata_stimata": "", "note": ""},
+                {"fase": "WELCOME", "attivita": "Coffee — flussi ospiti", "ora_inizio": "", "durata_stimata": "", "note": ""},
+                {"fase": "SALA_PRINCIPALE", "attivita": "Interazioni / coreografie fondo palco", "ora_inizio": "", "durata_stimata": "", "note": ""},
+                {"fase": "SALA_PRINCIPALE", "attivita": "Messaggio posto / inizio evento", "ora_inizio": "", "durata_stimata": "", "note": ""},
+                {"fase": "STAMPA_GREEN", "attivita": "Sala stampa / green room (TBD)", "ora_inizio": "", "durata_stimata": "", "note": ""},
+                {"fase": "DEFLUSSO", "attivita": "Uscita accredito / gift / messaggio registrato", "ora_inizio": "", "durata_stimata": "", "note": ""},
+            ],
+        }
+
+    def _load_run_sheet() -> dict:
+        if not RUN_SHEET_PATH.exists():
+            return _default_run_sheet()
+        try:
+            data = json.loads(RUN_SHEET_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return _default_run_sheet()
+            data.setdefault("policy", _default_run_sheet()["policy"])
+            data.setdefault("rows", _default_run_sheet()["rows"])
+            return data
+        except Exception:
+            return _default_run_sheet()
 
     @app.get("/api/soundboard")
     def api_get_soundboard():
-        return {"slots": _load_soundboard()}
+        return {"slots": _load_soundboard(), "slot_count": SOUNDBOARD_SLOT_COUNT, "text_max_len": SOUNDBOARD_TEXT_MAX_LEN}
+
+    @app.get("/api/run-sheet")
+    def api_get_run_sheet():
+        return _load_run_sheet()
+
+    @app.post("/api/run-sheet")
+    def api_save_run_sheet(data: dict = Body(...)):
+        policy = str(data.get("policy", "") or "").strip() or _default_run_sheet()["policy"]
+        rows = data.get("rows")
+        if not isinstance(rows, list):
+            rows = _default_run_sheet()["rows"]
+        clean_rows = []
+        for r in rows[:40]:
+            if not isinstance(r, dict):
+                continue
+            clean_rows.append(
+                {
+                    "fase": str(r.get("fase", ""))[:80],
+                    "attivita": str(r.get("attivita", ""))[:240],
+                    "ora_inizio": str(r.get("ora_inizio", ""))[:40],
+                    "durata_stimata": str(r.get("durata_stimata", ""))[:40],
+                    "note": str(r.get("note", ""))[:400],
+                }
+            )
+        out = {"policy": policy[:500], "rows": clean_rows or _default_run_sheet()["rows"]}
+        try:
+            RUN_SHEET_PATH.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _apply_robot_effect(audio_b64: str, fmt: str = "webm") -> tuple[str, str]:
+        """Applica effetto vocale robotico (ring mod + bitcrush + bandpass). Ritorna (base64, format)."""
+        preset = getattr(settings, "robot_effect_preset", "robot_full") or "robot_full"
+        return apply_robot_effect_base64(audio_b64, fmt, preset=preset)
+
+    @app.post("/api/audio-to-robot-voice")
+    def api_audio_to_robot_voice(data: dict = Body(...)):
+        """Audio -> STT (trascrivi) -> TTS (risintetizza). Ritorna voce sintetica robotica."""
+        audio_b64 = str(data.get("audio_base64", ""))
+        fmt = str(data.get("format", "webm")) or "webm"
+        if not audio_b64 or len(audio_b64) < 100:
+            return {"ok": False, "error": "Audio mancante o troppo corto"}
+        try:
+            raw = base64.b64decode(audio_b64)
+            stt, _, tts, _, _ = get_services()
+            text = stt.transcribe(raw, format_hint=fmt, language="it")
+            text = _apply_stt_fuzzy_correction(text or "")
+            if not text or not text.strip():
+                return {"ok": False, "error": "Nessun testo riconosciuto nell'audio"}
+            audio_out = tts.synthesize(text.strip(), format="mp3")
+            if not audio_out:
+                return {"ok": False, "error": "TTS non ha generato audio"}
+            return {"ok": True, "audio_base64": base64.b64encode(audio_out).decode(), "format": "mp3", "text": text.strip()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     @app.post("/api/soundboard")
     def api_save_soundboard(data: dict = Body(...)):
-        """Salva slot soundboard. Body: {slot: 0-9, icon, text, audio_base64}."""
+        """Salva slot: audio_base64 = robot; audio_base64_clean = TTS/registrazione senza effetto server."""
         slot = int(data.get("slot", 0))
-        if slot < 0 or slot > 9:
-            return {"ok": False, "error": "slot 0-9"}
+        if slot < 0 or slot >= SOUNDBOARD_SLOT_COUNT:
+            return {"ok": False, "error": f"slot 0-{SOUNDBOARD_SLOT_COUNT - 1}"}
+        audio_b64 = str(data.get("audio_base64", ""))
+        fmt = str(data.get("format", "webm"))
+        if audio_b64 and fmt != "wav":
+            audio_b64, fmt = _apply_robot_effect(audio_b64, fmt)
+        clean_b64 = str(data.get("audio_base64_clean", "")) if "audio_base64_clean" in data else None
+        clean_fmt = str(data.get("format_clean", "mp3") or "mp3")
         slots = _load_soundboard()
+        if clean_b64 is None:
+            prev = slots[slot] if slot < len(slots) else {}
+            clean_b64 = str(prev.get("audio_base64_clean") or "")
+            clean_fmt = str(prev.get("format_clean") or "mp3")
+        txt = str(data.get("text", "")).strip()[:SOUNDBOARD_TEXT_MAX_LEN] or f"Comando {slot+1}"
         slots[slot] = {
             "icon": str(data.get("icon", "🎤"))[:4],
-            "text": str(data.get("text", ""))[:30] or f"Comando {slot+1}",
-            "audio_base64": str(data.get("audio_base64", "")),
-            "format": str(data.get("format", "webm")),
+            "text": txt,
+            "audio_base64": audio_b64,
+            "format": fmt,
+            "audio_base64_clean": clean_b64,
+            "format_clean": clean_fmt if clean_b64 else "mp3",
         }
         try:
             SOUNDBOARD_PATH.write_text(json.dumps({"slots": slots}, indent=2), encoding="utf-8")
             return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @app.post("/api/soundboard-synth")
+    def api_soundboard_synth(data: dict = Body(...)):
+        """TTS dal testo + effetto robotico, per popolare uno slot senza registrare."""
+        text = str(data.get("text", "")).strip()[:SOUNDBOARD_TEXT_MAX_LEN]
+        if not text:
+            return {"ok": False, "error": "Testo vuoto"}
+        errs = settings.validate()
+        if errs:
+            return {"ok": False, "error": "; ".join(errs)}
+        try:
+            _, _, tts, _, _ = get_services()
+            raw = tts.synthesize(text, format="wav")
+            if not raw:
+                return {"ok": False, "error": "TTS non ha prodotto audio"}
+            b64_clean = base64.b64encode(raw).decode()
+            b64_robot, fmt = _apply_robot_effect(b64_clean, "wav")
+            return {
+                "ok": True,
+                "audio_base64": b64_robot,
+                "format": fmt,
+                "audio_base64_clean": b64_clean,
+                "format_clean": "wav",
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -444,26 +686,19 @@ if HAS_FASTAPI:
         return {"ok": True}
 
     WAKE_WORDS = ("hey g1", "hey g 1", "ehi g1", "ehi g 1", "hey markone", "hey mark one", "ehi markone", "ehi mark one")
-    WAKE_WORD_REQUIRED = os.getenv("WAKE_WORD_REQUIRED", "true").lower() in ("1", "true", "yes")
+    # Default false: push-to-talk risponde sempre senza «Hey G1». La wake word resta attiva solo per
+    # ascolto continuo (client invia skip_wake: false) o se imposti WAKE_WORD_REQUIRED=true.
+    WAKE_WORD_REQUIRED = os.getenv("WAKE_WORD_REQUIRED", "false").lower() in ("1", "true", "yes")
 
     def _extract_prompt(text: str, skip_wake_word: bool = False, audio_size: int = 0):
-        """Ritorna (prompt, message). Se wake word trovata: (resto, ""). Altrimenti: (None, msg)."""
+        """Solo push-to-talk / test (skip_wake_word=True): (prompt, messaggio errore)."""
         if not text or not text.strip():
             debug = f" ({audio_size} byte inviati)" if audio_size else ""
             return None, f"Nessun testo riconosciuto{debug}. Parla piu a lungo (1-2 sec), vicino al microfono. Prova STT_PROVIDER=deepgram o groq in .env se persiste."
         t = text.strip()
         if any(h in t.lower() for h in ("sottotitoli", "amara.org", "amara ", "qtss", "subtitle", "created by", "a cura di")):
             return None, "Audio non chiaro. Riprova a parlare piu vicino al microfono."
-        if skip_wake_word or not WAKE_WORD_REQUIRED:
-            return t, ""
-        # Match "hey/ehi" + "markone/mark one" all'inizio (flessibile su punteggiatura)
-        m = re.match(r"^(?:hey|ehi)\s*[,.\s]*\s*(?:g\s*1|g1|mark\s*one|markone)\s*[,.\s]*\s*(.*)$", t, re.IGNORECASE)
-        if m:
-            rest = m.group(1).strip()
-            if not rest:
-                return None, "Di 'Hey G1' seguito dalla domanda. Es: Hey G1, che ore sono?"
-            return rest, ""
-        return None, "Di 'Hey G1' seguito dalla tua domanda per attivarmi."
+        return t, ""
 
     def _process_audio(audio_bytes: bytes, skip_wake_word: bool = False, format_hint: str = "webm") -> dict:
         """Pipeline: audio -> STT -> LLM -> TTS. skip_wake_word=True per pulsante Parla."""
@@ -478,28 +713,66 @@ if HAS_FASTAPI:
                 saved = _save_debug_audio(audio_bytes)
                 if saved:
                     print(f"[Debug] Audio non trascritto salvato: {saved}")
-            prompt, msg = _extract_prompt(text or "", skip_wake_word=skip_wake_word, audio_size=len(audio_bytes))
-            if msg:
-                return {"text": text or "", "response": "", "audio_base64": "", "message": msg, "duration_ms": int((time.perf_counter() - t0) * 1000)}
-            # Routing azioni robot (dare la mano, saluta, teaching)
-            robot_match = None
-            try:
-                from talk_module.robot_actions import check_robot_action, execute_robot_action
-                robot_match = check_robot_action(prompt)
-            except Exception:
-                pass
-            if robot_match:
-                resp_text, action_id = robot_match
-                execute_robot_action(action_id)  # esegue se possibile, ignora errore nella risposta
-                resp = resp_text
+                if not skip_wake_word:
+                    return {
+                        "text": text or "",
+                        "response": "",
+                        "audio_base64": "",
+                        "message": "",
+                        "wake_miss": True,
+                        "duration_ms": int((time.perf_counter() - t0) * 1000),
+                    }
+                prompt, msg = _extract_prompt(text or "", skip_wake_word=True, audio_size=len(audio_bytes))
+                return {"text": text or "", "response": "", "audio_base64": "", "message": msg or "", "duration_ms": int((time.perf_counter() - t0) * 1000)}
+            if not skip_wake_word:
+                rest, wkind = _find_wake_and_rest(text)
+                if wkind == "miss":
+                    return {
+                        "text": text,
+                        "response": "",
+                        "audio_base64": "",
+                        "message": "",
+                        "wake_miss": True,
+                        "duration_ms": int((time.perf_counter() - t0) * 1000),
+                    }
+                if wkind == "ack":
+                    return {
+                        "text": text,
+                        "response": "",
+                        "audio_base64": "",
+                        "message": "",
+                        "wake_ack": True,
+                        "duration_ms": int((time.perf_counter() - t0) * 1000),
+                    }
+                prompt = rest
             else:
-                resp = check_knowledge(prompt)
-                if not resp:
-                    from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup
-                    if is_quick_lookup_question(prompt):
-                        resp = quick_lookup(prompt)
-                if not resp:
-                    resp = llm.chat(prompt)
+                prompt, msg = _extract_prompt(text or "", skip_wake_word=True, audio_size=len(audio_bytes))
+                if msg:
+                    return {"text": text or "", "response": "", "audio_base64": "", "message": msg, "duration_ms": int((time.perf_counter() - t0) * 1000)}
+            if prompt == PROMPT_HEY_G1_ACK_ONLY:
+                resp = (settings.hey_g1_ack_text or "").strip() or "Sì, ti ascolto. Come posso aiutarti?"
+            else:
+                # Routing azioni robot (dare la mano, saluta, teaching)
+                robot_match = None
+                try:
+                    from talk_module.robot_actions import check_robot_action, execute_robot_action
+                    robot_match = check_robot_action(prompt)
+                except Exception:
+                    pass
+                if robot_match:
+                    resp_text, action_id = robot_match
+                    execute_robot_action(action_id)  # esegue se possibile, ignora errore nella risposta
+                    resp = resp_text
+                else:
+                    resp = check_knowledge(prompt)
+                    if not resp:
+                        from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
+                        if is_quick_lookup_question(prompt):
+                            resp = quick_lookup(prompt)
+                            if resp == NOT_FOUND:
+                                resp = None  # fallback a LLM
+                    if not resp:
+                        resp = llm.chat(prompt)
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             return {
                 "text": text,
@@ -508,7 +781,32 @@ if HAS_FASTAPI:
                 "duration_ms": int((time.perf_counter() - t0) * 1000),
             }
         except Exception as e:
-            return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": int((time.perf_counter() - t0) * 1000)}
+            err = str(e)
+            el = err.lower()
+            # Non confondere con STT: OpenAI usa invalid_request_error anche per 401 / chiave scaduta
+            if (
+                "401" in err
+                or "expired_api_key" in el
+                or "invalid_api_key" in el
+                or "invalid api key" in el
+                or "incorrect api key" in el
+            ):
+                err = (
+                    "Chiave API OpenAI non valida o scaduta (Whisper STT, LLM e TTS usano OPENAI_API_KEY). "
+                    "Aggiorna OPENAI_API_KEY nel file .env sul server e riavvia il servizio. "
+                    "Nuova chiave: https://platform.openai.com/api-keys — Dettaglio: "
+                    + err
+                )
+            elif "invalid file format" in el or (
+                "supported formats" in el and ("flac" in el or "webm" in el or "mp3" in el)
+            ):
+                err = (
+                    "STT: formato audio rifiutato dall'API. "
+                    "Esegui nella cartella del progetto: pip install imageio-ffmpeg "
+                    "(conversione WebM→WAV per OpenAI Whisper). Dettaglio: "
+                    + err
+                )
+            return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {err}", "duration_ms": int((time.perf_counter() - t0) * 1000)}
 
     def _process_text(prompt: str) -> dict:
         """Pipeline: testo -> LLM -> TTS. Per domande scritte."""
@@ -530,9 +828,11 @@ if HAS_FASTAPI:
             else:
                 resp = check_knowledge(prompt)
                 if not resp:
-                    from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup
+                    from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
                     if is_quick_lookup_question(prompt.strip()):
                         resp = quick_lookup(prompt.strip())
+                        if resp == NOT_FOUND:
+                            resp = None  # fallback a LLM
                 if not resp:
                     resp = llm.chat(prompt.strip())
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
@@ -567,7 +867,7 @@ if HAS_FASTAPI:
             raise HTTPException(400, "audio base64 non valido")
         if len(audio_bytes) < 500:
             raise HTTPException(400, "Audio troppo corto")
-        return _process_audio(audio_bytes)
+        return _process_audio(audio_bytes, skip_wake_word=True)
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
@@ -591,7 +891,30 @@ if HAS_FASTAPI:
                             if len(audio_bytes) < 2000:
                                 await ws.send_text(json.dumps({"type": "response", "data": {"text": "", "response": "", "audio_base64": "", "message": "Audio troppo corto. Tieni premuto 1-2 secondi mentre parli."}}))
                                 continue
-                            result = _process_audio(audio_bytes, skip_wake_word=True, format_hint="webm")
+                            # MIME reale dal browser (webm vs mp4/Safari); STT usa magic bytes + conversione WAV
+                            audio_fmt = str(data.get("format") or "audio/webm")
+                            # skip_wake esplicito: true = push-to-talk senza «Hey G1»; false = solo wake (Alexa-style)
+                            sk = data.get("skip_wake")
+                            if sk is None:
+                                skip_w = not WAKE_WORD_REQUIRED
+                            else:
+                                skip_w = bool(sk)
+                            loop = asyncio.get_running_loop()
+                            # STT+LLM+TTS in thread: non blocca il loop (evita timeout e code client)
+                            result = await loop.run_in_executor(
+                                _executor,
+                                partial(_process_audio, audio_bytes, skip_w, audio_fmt),
+                            )
+                            try:
+                                tw = (result.get("text") or "")[:80].replace("\n", " ")
+                                print(
+                                    f"[ws/audio] skip_wake={skip_w} bytes={len(audio_bytes)} "
+                                    f"wake_miss={bool(result.get('wake_miss'))} wake_ack={bool(result.get('wake_ack'))} "
+                                    f"text={tw!r} resp_len={len(result.get('response') or '')} "
+                                    f"msg={bool(result.get('message'))} ms={result.get('duration_ms')}"
+                                )
+                            except Exception:
+                                pass
                             if play_on == "server" and out_device_id is not None and result.get("audio_base64"):
                                 try:
                                     from talk_module.audio import AudioPlayer
@@ -790,6 +1113,74 @@ if HAS_FASTAPI:
         return result
 
 
+# Launcher - Connetti a robot o AI Accelerator (per mobile/APK)
+LAUNCHER_TEMPLATE = """<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14b8a6">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>G1 Talk - Connetti</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: linear-gradient(160deg, #0c0e14 0%, #141922 100%); color: #e8eaed; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    h1 { font-size: 1.5rem; margin-bottom: 8px; }
+    .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 24px; max-width: 360px; width: 100%; }
+    label { display: block; font-size: 13px; color: #9ca3af; margin-bottom: 6px; }
+    input[type="text"] { width: 100%; padding: 14px 16px; border-radius: 10px; border: 2px solid #3f3f46; background: #27272a; color: #fff; font-size: 16px; margin-bottom: 16px; }
+    input:focus { outline: none; border-color: #14b8a6; }
+    .presets { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    .preset { padding: 10px 16px; background: rgba(20,184,166,0.15); color: #14b8a6; border: 1px solid rgba(20,184,166,0.3); border-radius: 8px; cursor: pointer; font-size: 13px; }
+    .preset:hover { background: rgba(20,184,166,0.25); }
+    .btn { width: 100%; padding: 16px; background: #14b8a6; color: #0c0e14; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; }
+    .btn:hover { background: #0d9488; }
+    .hint { font-size: 12px; color: #71717a; margin-top: 16px; line-height: 1.5; }
+    .chk { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+    .chk input { width: auto; margin: 0; }
+  </style>
+</head>
+<body>
+  <h1>G1 Talk</h1>
+  <p style="color:#9ca3af;font-size:14px;margin-bottom:24px;">Connetti al robot o all&apos;AI Accelerator</p>
+  <div class="card">
+    <label>IP del server</label>
+    <input type="text" id="ip" placeholder="192.168.123.161" value="{host}" />
+    <div class="presets">
+      <button type="button" class="preset" onclick="setIp('192.168.123.161')">Robot G1</button>
+      <button type="button" class="preset" onclick="setIp('192.168.10.191')">AI Accelerator</button>
+    </div>
+    <div class="chk">
+      <input type="checkbox" id="https" checked />
+      <label for="https" style="margin:0;">Usa HTTPS (serve per microfono)</label>
+    </div>
+    <button type="button" class="btn" onclick="connect()">Connetti</button>
+  </div>
+  <details class="hint" style="margin-top:12px;max-width:360px;text-align:left;">
+    <summary style="cursor:pointer;color:#14b8a6;font-weight:600;">Come funziona</summary>
+    <p style="margin:10px 0 0;">Il <strong>server</strong> (Python) deve essere già avviato sul G1: <code>bash scripts/restart_server.sh</code>. Questa pagina apre solo l&apos;interfaccia <strong>/client</strong> sul robot.</p>
+    <p style="margin:8px 0 0;">Stesso WiFi del robot → IP es. <code>192.168.123.161</code> (verifica con <code>hostname -I</code> sul G1). <strong>HTTPS</strong> attivo = microfono ok. <strong>Cassa Bluetooth:</strong> accoppia il telefono in Impostazioni.</p>
+  </details>
+  <p class="hint" style="margin-top:12px;">
+    Collega il telefono al WiFi del robot o alla stessa rete dell&apos;AI Accelerator, inserisci l&apos;IP e Connetti.
+  </p>
+  <script>
+    (function(){ var s = localStorage.getItem('g1_last_ip'); if(s) document.getElementById('ip').value = s; })();
+    function setIp(ip){ document.getElementById('ip').value = ip; }
+    function connect(){
+      var ip = document.getElementById('ip').value.trim().replace(/^https?:\\/\\//,'').split('/')[0].split(':')[0];
+      if(!ip){ alert('Inserisci l\\'IP'); return; }
+      var useHttps = document.getElementById('https').checked;
+      var proto = useHttps ? 'https' : 'http';
+      var url = proto + '://' + ip + ':8081/client';
+      localStorage.setItem('g1_last_ip', ip);
+      window.location.href = url;
+    }
+  </script>
+</body>
+</html>
+"""
+
 # HTML Template - Setup
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="it">
@@ -823,6 +1214,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <h1>G1 Talk Module</h1>
+  <p class="hint" style="margin:-4px 0 16px;font-size:13px;"><strong>Guida rapida:</strong> sul robot installa lo ZIP e avvia il server (<code>install.sh</code> → <code>restart_server.sh</code>). Da telefono apri <strong>/client</strong> (link verde sotto). Questa pagina <code>/</code> serve a scegliere mic/cuffie quando usi il PC connesso all’accelerator.</p>
   <div style="background:#14532d;border:2px solid #22c55e;border-radius:12px;padding:20px;margin-bottom:20px;font-size:15px;">
     <strong style="color:#86efac;">Mic e cuffie sul TUO PC, elaborazione sull'AI Accelerator</strong>
     <p style="margin:12px 0 0;color:#e4e4e7;">Usa il microfono e le cuffie del tuo PC. Whisper, GPT e TTS girano sull’AI Accelerator.</p>
@@ -929,7 +1321,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
 <html lang="it">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14b8a6">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
   <title>G1 Talk - Parla</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -939,13 +1335,82 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     body {
       font-family: 'Outfit', system-ui, sans-serif;
       margin: 0;
-      padding: 24px;
+      padding: 0;
       background: linear-gradient(160deg, #0c0e14 0%, #141922 50%, #0d0f14 100%);
       color: #e8eaed;
       min-height: 100vh;
       max-width: 420px;
       margin: 0 auto;
+      position: relative;
     }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 20px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      background: rgba(0,0,0,0.2);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .hamburger {
+      width: 40px;
+      height: 40px;
+      border: none;
+      background: rgba(255,255,255,0.06);
+      color: #e8eaed;
+      font-size: 22px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s;
+    }
+    .hamburger:hover { background: rgba(20,184,166,0.2); }
+    .header h1 { font-size: 1.25rem; font-weight: 600; margin: 0; flex: 1; }
+    .sidebar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 260px;
+      height: 100vh;
+      background: linear-gradient(180deg, #0f1117 0%, #141922 100%);
+      border-right: 1px solid rgba(255,255,255,0.08);
+      z-index: 100;
+      transform: translateX(-100%);
+      transition: transform 0.25s ease;
+      padding: 20px 0;
+      overflow-y: auto;
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar nav a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 20px;
+      color: #a1a1aa;
+      text-decoration: none;
+      font-size: 15px;
+      transition: color 0.15s, background 0.15s;
+      border-left: 3px solid transparent;
+    }
+    .sidebar nav a:hover, .sidebar nav a.active { color: #14b8a6; background: rgba(20,184,166,0.08); border-left-color: #14b8a6; }
+    .sidebar nav a .icon { font-size: 20px; }
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 99;
+      display: none;
+      opacity: 0;
+      transition: opacity 0.25s;
+    }
+    .overlay.visible { display: block; opacity: 1; }
+    .main-content { padding: 24px; position: relative; z-index: 2; }
+    .section { display: none; }
+    .section.active { display: block; }
     h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 4px; }
     .step {
       background: rgba(255,255,255,0.03);
@@ -1028,18 +1493,185 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     input[type="text"]:focus { outline: none; border-color: #14b8a6; }
     input::placeholder { color: #6b7280; }
+    @media (max-width: 480px) {
+      body { max-width: 100%; padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); padding-bottom: env(safe-area-inset-bottom); }
+      .header { padding: 12px 16px; padding-left: max(16px, env(safe-area-inset-left)); }
+      .hamburger { width: 44px; height: 44px; font-size: 24px; min-width: 44px; min-height: 44px; }
+      .sidebar { width: min(280px, 85vw); padding-top: max(20px, env(safe-area-inset-top)); }
+      .main-content { padding: 16px; padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+      .btn { width: 160px; height: 160px; font-size: 15px; margin: 20px auto; }
+      .btn-allow { padding: 16px 20px; min-height: 48px; font-size: 15px; }
+      input[type="text"] { font-size: 16px; min-height: 44px; }
+      .step { padding: 14px; margin: 10px 0; }
+      #soundboardGrid { grid-template-columns: repeat(4, 1fr) !important; gap: 10px !important; }
+      #sbModal > div { max-width: 100%; margin: env(safe-area-inset-top) 12px env(safe-area-inset-bottom); padding: 20px; }
+      #sbModal button, #sbModal label { min-height: 44px; padding: 12px 16px; display: inline-flex; align-items: center; justify-content: center; }
+      #sbModal input[type="range"] { min-height: 36px; }
+      #textInput, #btnText { min-height: 48px !important; }
+      .result { padding: 14px; font-size: 14px; }
+    }
+    @media (max-width: 360px) {
+      #soundboardGrid { grid-template-columns: repeat(3, 1fr) !important; }
+    }
+    * { -webkit-tap-highlight-color: transparent; }
+    html { touch-action: manipulation; }
+    button, a, [role="button"], .sidebar nav a, label, .hamburger, select { touch-action: manipulation; cursor: pointer; }
+    button, .btn, .btn-allow, .hamburger { -webkit-user-select: none; user-select: none; }
+    .header { position: relative; z-index: 11; }
+    #soundboardScroll { max-height: min(62vh, 520px); overflow-y: auto; -webkit-overflow-scrolling: touch; margin-bottom: 8px; }
+    .sb-slot-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.25; word-break: break-word; }
+    #sbModalText { width: 100%; min-height: 72px; padding: 10px; margin-top: 4px; background: #27272a; border: 1px solid #3f3f46; border-radius: 8px; color: #fff; font-family: inherit; font-size: 13px; resize: vertical; }
+    #runSheetTable { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+    #runSheetTable th, #runSheetTable td { border: 1px solid rgba(255,255,255,0.1); padding: 8px; text-align: left; vertical-align: top; }
+    #runSheetTable th { color: #9ca3af; font-weight: 600; }
+    #runSheetTable input { width: 100%; box-sizing: border-box; padding: 6px 8px; background: #27272a; border: 1px solid #3f3f46; border-radius: 6px; color: #e4e4e7; font-size: 12px; }
+    #runSheetPolicy { width: 100%; min-height: 56px; padding: 10px; background: #27272a; border: 1px solid #3f3f46; border-radius: 8px; color: #e4e4e7; font-size: 13px; font-family: inherit; }
+    .quick-guide {
+      background: rgba(20,184,166,0.09);
+      border: 1px solid rgba(20,184,166,0.28);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #b4b4bc;
+    }
+    .quick-guide strong { color: #f4f4f5; font-weight: 600; }
+    .quick-guide ul { margin: 6px 0 0; padding-left: 18px; }
+    .quick-guide li { margin: 4px 0; }
+    .quick-guide details { margin-top: 6px; }
+    .quick-guide summary { cursor: pointer; color: #2dd4bf; font-weight: 600; font-size: 13px; list-style: none; }
+    .quick-guide summary::-webkit-details-marker { display: none; }
   </style>
 </head>
 <body>
-  <h1>G1 Talk</h1>
-  <p class="hint" style="margin-bottom:20px;">Tieni premuto e parla. Mic e cuffie: questo dispositivo.</p>
-  <div id="secureContextWarn" class="step" style="display:none;border-color:rgba(239,68,68,0.5);background:rgba(185,28,28,0.2);padding:24px;">
-    <strong style="color:#fca5a5;font-size:15px;">Microfono richiede localhost</strong>
-    <p style="margin:14px 0;color:#e8eaed;font-size:14px;">Stai usando l'IP. Per mic/cuffie del browser:</p>
-    <p style="margin:8px 0;font-size:13px;"><b>1.</b> PowerShell: <code style="padding:6px 10px;background:rgba(0,0,0,0.4);border-radius:6px;font-size:12px;">ssh -L 8081:localhost:8081 lab@192.168.10.191 -N</code></p>
-    <p style="margin:8px 0;font-size:13px;"><b>2.</b> Poi apri:</p>
-    <a href="http://localhost:8081/client" style="display:inline-block;margin:12px 0;padding:14px 24px;background:#14b8a6;color:#0c0e14;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;">localhost:8081/client</a>
-    <p style="margin:12px 0 0;font-size:12px;color:#9ca3af;">Oppure: .\avvia.ps1</p>
+  <header class="header">
+    <button type="button" class="hamburger" id="hamburger" aria-label="Menu">&#9776;</button>
+    <h1>G1 Talk</h1>
+  </header>
+  <aside class="sidebar" id="sidebar">
+    <nav>
+      <a href="#" data-section="soundboard" class="active"><span class="icon">&#128266;</span> Soundboard</a>
+      <a href="#" data-section="runsheet"><span class="icon">&#128197;</span> Tempi evento</a>
+      <a href="#" data-section="parla"><span class="icon">&#127908;</span> Parla</a>
+      <a href="#" data-section="knowledge"><span class="icon">&#128214;</span> Knowledge</a>
+      <a href="#" data-section="devices"><span class="icon">&#128268;</span> Dispositivi</a>
+      <a href="#" data-section="info"><span class="icon">&#8505;</span> Info</a>
+    </nav>
+  </aside>
+  <div class="overlay" id="overlay"></div>
+  <main class="main-content">
+    <div class="quick-guide" id="quickGuide">
+      <details>
+        <summary>Come funziona (apri per la guida rapida)</summary>
+        <p style="margin:8px 0 4px;"><strong>Due modi, un solo server</strong> — voce e IA girano sul <strong>PC del G1</strong> (o Linux sulla stessa rete). Questa pagina è il <strong>telecomando</strong> dal telefono o dal PC.</p>
+        <ul>
+          <li><strong>Browser (consigliato):</strong> stesso WiFi del robot → apri questo indirizzo (<code id="guideUrl">/client</code>). Per il microfono serve HTTPS; al primo accesso «Avanzate → Procedi».</li>
+          <li><strong>APK Android:</strong> stessa schermata; inserisci l’IP del server nell’app launcher. Per la <strong>cassa Bluetooth</strong>: accoppia il telefono all’altoparlante in Impostazioni → l’audio esce lì.</li>
+          <li><strong>Prima volta sul robot:</strong> copia lo zip d’installazione, <code>bash install.sh</code>, configura <code>.env</code>, poi <code>bash scripts/restart_server.sh</code>. Pacchetto Windows: <code>dist/G1_Pacchetto_Installazione_Completa.zip</code>.</li>
+        </ul>
+        <p class="hint" style="margin:6px 0 0;font-size:11px;">Dettagli in menu <strong>Info</strong> · Leggi anche <code>LEGGIMI.txt</code> nel pacchetto.</p>
+      </details>
+    </div>
+    <section id="section-soundboard" class="section active">
+  <h2 style="font-size:1.2rem;margin:0 0 16px;">Soundboard</h2>
+  <p class="hint" style="margin-bottom:8px;"><strong>Uso:</strong> tocca uno slot per riprodurre. Il server invia l’audio; se usi una cassa BT, controlla il volume dal telefono. <strong>Voce</strong> Robot o Naturale dal menu sotto. Ogni slot può avere <b>due</b> tracce: <b>Robot</b> (effetto) e <b>Naturale</b> (TTS senza effetto).</p>
+  <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <label style="font-size:12px;color:#9ca3af;">Riproduci su:</label>
+    <select id="sbOutput" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;min-width:180px;">
+      <option value="default">Predefinito</option>
+    </select>
+    <label style="font-size:12px;color:#9ca3af;">Voce:</label>
+    <select id="sbPlayMode" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;min-width:140px;">
+      <option value="robot">Robot (effetto)</option>
+      <option value="clean">Naturale (TTS pulito)</option>
+    </select>
+    <button type="button" id="sbOutputRefresh" style="padding:6px 12px;font-size:12px;background:rgba(255,255,255,0.08);color:#9ca3af;border:1px solid rgba(255,255,255,0.1);border-radius:8px;cursor:pointer;">Aggiorna</button>
+  </div>
+  <div id="soundboardScroll">
+  <div id="soundboardGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;"></div>
+  </div>
+  <p class="hint" style="margin-top:8px;font-size:11px;">Modifica (✏️): registra, importa, <b>Genera TTS dal testo</b>, icona. Effetto robotico in automatico (tranne WAV già processato).</p>
+  <div id="sbModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:200;padding:20px;flex-direction:column;align-items:center;justify-content:center;overflow-y:auto;-webkit-overflow-scrolling:touch;">
+    <div style="background:#1a1d24;border-radius:16px;padding:24px;max-width:400px;width:100%;border:1px solid rgba(255,255,255,0.1);margin:auto;">
+      <h3 style="margin:0 0 16px;font-size:1.1rem;">Modifica slot <span id="sbModalSlot">0</span></h3>
+      <div style="margin-bottom:12px;">
+        <label style="font-size:12px;color:#9ca3af;">Icona</label>
+        <input type="text" id="sbModalIcon" placeholder="🎤" style="width:60px;padding:8px;margin-left:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#fff;font-size:18px;" />
+      </div>
+      <div style="margin-bottom:12px;">
+        <label style="font-size:12px;color:#9ca3af;">Testo (etichetta e per TTS)</label>
+        <textarea id="sbModalText" placeholder="Frase da sintetizzare" maxlength="1000"></textarea>
+        <p class="hint" style="margin:4px 0 0;font-size:11px;"><span id="sbModalCharCount">0</span> / <span id="sbModalCharMax">280</span></p>
+      </div>
+      <div style="margin-bottom:12px;padding:12px;background:rgba(255,255,255,0.04);border-radius:10px;border:1px solid rgba(255,255,255,0.06);">
+        <div id="sbModalAudioStatus" style="font-size:13px;color:#9ca3af;margin-bottom:8px;">Nessun audio</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" id="sbModalSynth" style="padding:10px 16px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Genera TTS dal testo</button>
+          <button type="button" id="sbModalRecord" style="padding:10px 16px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Registra 3 sec</button>
+          <label style="padding:10px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border-radius:8px;cursor:pointer;font-size:13px;">Importa file<input type="file" id="sbModalFile" accept="audio/*" style="display:none;" /></label>
+          <button type="button" id="sbModalTts" style="padding:10px 16px;background:#8b5cf6;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;" title="Riprocessa con TTS">Voce TTS da audio</button>
+          <button type="button" id="sbModalClear" style="padding:10px 16px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Rimuovi audio</button>
+        </div>
+        <details style="margin-top:12px;font-size:12px;color:#9ca3af;" open>
+          <summary style="cursor:pointer;color:#a1a1aa;">Effetto robotico (regola i valori)</summary>
+          <div style="margin-top:8px;">
+            <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">Ring modulator (Hz) <span id="sbRingVal">115</span></label>
+            <input type="range" id="sbRing" min="50" max="250" value="115" style="width:100%;accent-color:#14b8a6;" />
+            <label style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">Bitcrusher (bit) <span id="sbBitVal">8</span></label>
+            <input type="range" id="sbBit" min="3" max="16" value="8" style="width:100%;accent-color:#14b8a6;" />
+            <label style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">Distorsione (gain) <span id="sbDistVal">2.5</span></label>
+            <input type="range" id="sbDist" min="0.5" max="6" step="0.1" value="2.5" style="width:100%;accent-color:#14b8a6;" />
+            <button type="button" id="sbModalReapply" style="margin-top:8px;padding:8px 14px;background:rgba(20,184,166,0.2);color:#14b8a6;border:1px solid #14b8a6;border-radius:8px;cursor:pointer;font-size:12px;">Riapplica effetto</button>
+            <p class="hint" style="margin-top:6px;font-size:11px;">Regola i valori poi Registra/Importa, oppure Riapplica se hai appena caricato audio.</p>
+          </div>
+        </details>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button type="button" id="sbModalSave" style="flex:1;padding:12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Salva</button>
+        <button type="button" id="sbModalCancel" style="padding:12px 20px;background:rgba(255,255,255,0.1);color:#e8eaed;border:none;border-radius:10px;cursor:pointer;">Annulla</button>
+      </div>
+    </div>
+  </div>
+    </section>
+    <section id="section-runsheet" class="section">
+  <h2 style="font-size:1.2rem;margin:0 0 12px;">Run sheet / tempistica</h2>
+  <p class="hint" style="margin-bottom:10px;"><strong>Uso:</strong> tabella di supporto per l’evento. Inserisci orari e note quando l’organizzatore te li comunica; <strong>Salva tempi</strong> memorizza sul server. Consultala mentre usi la soundboard o Parla.</p>
+  <label style="font-size:12px;color:#9ca3af;display:block;margin-bottom:6px;">Policy autonomia robot</label>
+  <textarea id="runSheetPolicy" style="margin-bottom:14px;"></textarea>
+  <div style="overflow-x:auto;">
+    <table id="runSheetTable">
+      <thead><tr><th>Fase</th><th>Attività</th><th>Ora inizio</th><th>Durata stimata</th><th>Note</th></tr></thead>
+      <tbody id="runSheetBody"></tbody>
+    </table>
+  </div>
+  <button type="button" id="runSheetSave" style="margin-top:14px;padding:10px 20px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Salva tempi</button>
+  <span id="runSheetStatus" class="hint" style="margin-left:12px;"></span>
+    </section>
+    <section id="section-parla" class="section">
+  <h2 style="font-size:1.2rem;margin:0 0 8px;">Parla con G1</h2>
+  <p style="margin:0 0 10px;padding:10px 12px;background:rgba(20,184,166,0.12);border-left:3px solid #14b8a6;border-radius:6px;font-size:13px;line-height:1.45;color:#e4e4e7;"><strong style="color:#2dd4bf;">Nuovo flusso wake:</strong> con l’opzione sotto il microfono resta in ascolto per «Hey G1» / G1 / G one… → <strong>bip</strong> → poi chiedi senza ripetere la wake. Il <strong>pulsante tondo</strong> è sempre senza wake word.</p>
+  <p class="hint" style="margin-bottom:12px;"><strong>Uso:</strong> prima <strong>Consenti microfono</strong>. Opzionale: checkbox <strong>Ascolto continuo (wake word)</strong>. In alternativa <strong>scrivi</strong> sotto.</p>
+  <div class="step" style="margin-bottom:14px;padding:12px 14px;background:rgba(20,184,166,0.08);border-radius:10px;border:1px solid rgba(20,184,166,0.25);">
+    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;line-height:1.45;">
+      <input type="checkbox" id="wakeListenToggle" style="width:18px;height:18px;margin-top:2px;flex-shrink:0;" />
+      <span><strong>Ascolto continuo (wake word)</strong> — microfono sempre attivo: ascolto «Hey G1» / G1 / G one / Mark one; suono breve «pronto», poi parli la domanda <strong>senza</strong> ripetere la wake (chunk ~4,5 s). Il pulsante <strong>tieni premuto</strong> è sempre <strong>senza</strong> wake word.</span>
+    </label>
+    <p id="wakeListenStatus" class="hint" style="margin:8px 0 0 28px;font-size:12px;color:#71717a;">Disattivato</p>
+  </div>
+  <div id="secureContextWarn" class="step" style="display:none;border-color:rgba(251,191,36,0.4);background:rgba(251,191,36,0.08);padding:14px;">
+    <p style="margin:0;font-size:13px;color:#fcd34d;">Su HTTP il microfono non funziona. Usa HTTPS o &quot;Scrivi una domanda&quot;. <a href="#" id="secureWarnMore" style="color:#14b8a6;">Dettagli</a></p>
+    <details id="secureWarnDetails" style="display:none;margin-top:10px;font-size:12px;color:#9ca3af;">
+      <div id="secureWarnMobile" style="display:none;">
+        <p style="margin:0 0 6px;"><b>Da telefono:</b> <a href="http://192.168.10.191:8080/client" style="color:#14b8a6;">192.168.10.191:8080/client</a> (redirect a HTTPS)</p>
+        <p style="margin:0 0 6px;">Al primo accesso: Avanzate → Procedi (certificato).</p>
+        <p style="margin:0;">Da PC (rete diversa): tunnel SSH poi localhost:8081/client</p>
+      </div>
+      <div id="secureWarnDesktop" style="display:none;">
+        <p style="margin:0 0 6px;">Tunnel: <code>ssh -L 8081:localhost:8081 lab@192.168.10.191 -N</code></p>
+        <p style="margin:0;">Poi apri <a href="http://localhost:8081/client" style="color:#14b8a6;">localhost:8081/client</a></p>
+      </div>
+    </details>
   </div>
   <p class="hint" id="hintAccess">Per vedere microfoni e cuffie: clicca sotto e consenti quando il browser lo chiede.</p>
 
@@ -1047,29 +1679,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <button type="button" class="btn-allow" id="btnAllow">Consenti microfono e aggiorna dispositivi</button>
     <p id="deviceStatus">Clicca il pulsante per consentire l&apos;accesso e caricare microfoni e altoparlanti.</p>
   </div>
-  <details id="knowledgeWrap" class="step" style="margin-bottom:12px;">
-    <summary style="cursor:pointer;color:#a1a1aa;">Knowledge (risposte veloci) - Modifica</summary>
-    <p class="hint" style="margin-top:8px;">Pattern -&gt; risposta. Se la domanda contiene il pattern, risposta immediata.</p>
-    <div id="knowledgeList" style="margin-top:8px;"></div>
-    <div style="margin-top:8px;">
-      <input type="text" id="knowledgePattern" placeholder="Pattern" style="width:45%;padding:8px;margin-right:4px;" />
-      <input type="text" id="knowledgeResponse" placeholder="Risposta" style="width:45%;padding:8px;margin-right:4px;" />
-      <button type="button" id="knowledgeAdd" style="padding:8px 12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-size:12px;">Aggiungi</button>
-    </div>
-    <button type="button" id="knowledgeSave" style="margin-top:8px;padding:8px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border:1px solid rgba(255,255,255,0.2);border-radius:8px;cursor:pointer;font-size:12px;">Salva su server</button>
-  </details>
-  <div class="step" style="margin-bottom:16px;">
-    <p style="margin:0 0 10px;color:#9ca3af;font-size:13px;font-weight:500;">Soundboard</p>
-    <div id="soundboardGrid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;"></div>
-    <p class="hint" style="margin-top:8px;font-size:11px;">Clicca per riprodurre. Modifica: tasto destro o icona matita.</p>
-  </div>
-  <details id="devicesWrap" class="step" style="margin-bottom:16px;">
-    <summary style="cursor:pointer;color:#a1a1aa;">Dispositivi (mic/cuffie)</summary>
-    <label style="margin-top:12px;">Microfono</label>
-    <select id="mic"><option value="">Caricamento...</option></select>
-    <label style="margin-top:8px;">Altoparlante</label>
-    <select id="speaker"><option value="">Caricamento...</option></select>
-  </details>
   <button class="btn" id="btn">Tieni premuto e parla</button>
   <div id="recStatus" style="margin:12px 0;min-height:50px;">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
@@ -1094,21 +1703,527 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <button type="button" id="btnSample" style="padding:8px 14px;background:rgba(255,255,255,0.06);color:#9ca3af;border:1px solid rgba(255,255,255,0.08);border-radius:8px;cursor:pointer;font-size:12px;margin-left:8px;">Test campione</button>
     <span id="testStatus"></span>
   </p>
+    </section>
+    <section id="section-knowledge" class="section">
+  <h2 style="font-size:1.2rem;margin:0 0 16px;">Knowledge</h2>
+  <p class="hint" style="margin-bottom:10px;"><strong>Uso:</strong> frasi «chiave → risposta» per McKinsey host, curiosità, FAQ. Se l’utente (o tu in <strong>Parla</strong>) dice qualcosa che <strong>contiene</strong> il pattern, il robot risponde subito senza chiamare il modello GPT (più veloce e coerente col testo).</p>
+  <details id="knowledgeWrap" class="step" style="margin-bottom:12px;border:1px solid rgba(255,255,255,0.06);">
+    <summary style="cursor:pointer;color:#a1a1aa;">Pattern -&gt; risposta (modifica)</summary>
+    <p class="hint" style="margin-top:8px;">Aggiungi righe e <strong>Salva su server</strong>. La corrispondenza è per sottostringa nel testo riconosciuto.</p>
+    <div id="knowledgeList" style="margin-top:8px;"></div>
+    <div style="margin-top:8px;">
+      <input type="text" id="knowledgePattern" placeholder="Pattern" style="width:45%;padding:8px;margin-right:4px;" />
+      <input type="text" id="knowledgeResponse" placeholder="Risposta" style="width:45%;padding:8px;margin-right:4px;" />
+      <button type="button" id="knowledgeAdd" style="padding:8px 12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-size:12px;">Aggiungi</button>
+    </div>
+    <button type="button" id="knowledgeSave" style="margin-top:8px;padding:8px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border:1px solid rgba(255,255,255,0.2);border-radius:8px;cursor:pointer;font-size:12px;">Salva su server</button>
+  </details>
+    </section>
+    <section id="section-devices" class="section">
+  <h2 style="font-size:1.2rem;margin:0 0 16px;">Dispositivi</h2>
+  <p class="hint" style="margin-bottom:16px;"><strong>Uso:</strong> seleziona microfono e uscita audio per la sezione <strong>Parla</strong>. Vai prima in <strong>Parla</strong> e premi <strong>Consenti microfono</strong>: così il browser elenca anche cuffie e dispositivi Bluetooth associati al telefono.</p>
+  <div id="devicesWrap" class="step">
+    <label style="display:block;margin-bottom:6px;">Microfono</label>
+    <select id="mic"><option value="">Caricamento...</option></select>
+    <label style="display:block;margin-top:12px;margin-bottom:6px;">Altoparlante</label>
+    <select id="speaker"><option value="">Caricamento...</option></select>
+  </div>
+    </section>
+    <section id="section-info" class="section">
+  <h2 style="font-size:1.2rem;margin:0 0 16px;">Info</h2>
+  <div class="step">
+    <p style="margin:0 0 8px;"><strong>Pacchetti pronti (PC Windows, cartella <code>dist/</code>):</strong></p>
+    <ul class="hint" style="margin:0 0 14px;padding-left:18px;font-size:12px;line-height:1.5;">
+      <li><code>G1_Pacchetto_Installazione_Completa.zip</code> — server + audio soundboard + APK launcher + <code>LEGGIMI_INSTALLAZIONE_COMPLETA.txt</code></li>
+      <li><code>G1-TalkModule-OpenAiAPI.zip</code> — solo installazione Linux sul G1 (<code>install.sh</code>)</li>
+    </ul>
+    <p style="margin:0 0 8px;">G1 Talk Module — assistente vocale per Unitree G1.</p>
+    <p class="hint" style="margin:0 0 16px;">Menu: <strong>Soundboard</strong> (frasi pronte), <strong>Tempi evento</strong>, <strong>Parla</strong> (Hey G1 / testo), <strong>Knowledge</strong>, <strong>Dispositivi</strong>. La guida sintetica è in cima alla pagina (riquadro verde).</p>
+    <p style="margin:0 0 8px;font-size:14px;"><b>Da telefono (stessa rete WiFi del server):</b></p>
+    <p class="hint" style="margin:0 0 8px;">Nessun bridge. Apri (HTTPS per microfono):</p>
+    <a href="http://192.168.10.191:8080/client" style="display:inline-block;padding:12px 18px;background:#14b8a6;color:#0c0e14;border-radius:10px;text-decoration:none;font-weight:600;font-size:15px;margin-bottom:4px;">192.168.10.191:8080/client</a>
+    <p class="hint" style="margin:0 0 12px;font-size:11px;">Reindirizza a HTTPS. Al primo accesso: Avanzate → Procedi.</p>
+    <p style="margin:0 0 6px;font-size:13px;"><b>Da PC (rete diversa):</b></p>
+    <p class="hint" style="margin:0;font-size:12px;">Tunnel SSH poi localhost:8081/client</p>
+  </div>
+    </section>
+  </main>
 
   <script>
+    function audioBufferToWav(buffer){
+      const nc = buffer.numberOfChannels, sr = buffer.sampleRate, len = buffer.length;
+      const dataSize = len * nc * 2;
+      const arr = new ArrayBuffer(44 + dataSize);
+      const v = new DataView(arr);
+      let o = 0;
+      function w16(x){ v.setUint16(o, x, true); o+=2; }
+      function w32(x){ v.setUint32(o, x, true); o+=4; }
+      const s = (c)=>String.fromCharCode(c);
+      for(let i=0;i<4;i++) v.setUint8(o++, 'RIFF'.charCodeAt(i));
+      w32(36+dataSize);
+      for(let i=0;i<4;i++) v.setUint8(o++, 'WAVE'.charCodeAt(i));
+      for(let i=0;i<4;i++) v.setUint8(o++, 'fmt '.charCodeAt(i));
+      w32(16); w16(1); w16(nc); w32(sr); w32(sr*nc*2); w16(nc*2); w16(16);
+      for(let i=0;i<4;i++) v.setUint8(o++, 'data'.charCodeAt(i));
+      w32(dataSize);
+      const left = buffer.getChannelData(0);
+      const right = nc>1 ? buffer.getChannelData(1) : left;
+      for(let i=0;i<len;i++){
+        const L = Math.max(-1,Math.min(1,left[i]));
+        const R = nc>1 ? Math.max(-1,Math.min(1,right[i])) : L;
+        v.setInt16(o, L<0 ? L*0x8000 : L*0x7FFF, true); o+=2;
+        if(nc>1){ v.setInt16(o, R<0 ? R*0x8000 : R*0x7FFF, true); o+=2; }
+      }
+      return arr;
+    }
+    function getRobotParams(){ return { ring: parseInt(document.getElementById('sbRing').value)||115, bit: parseInt(document.getElementById('sbBit').value)||8, dist: parseFloat(document.getElementById('sbDist').value)||2.5 }; }
+    async function applyRobotEffect(arrayBuffer, mimeType, params){
+      params = params || getRobotParams();
+      try {
+        const ctx = new (window.AudioContext||window.webkitAudioContext)();
+        const buf = await ctx.decodeAudioData(arrayBuffer.slice(0));
+        const off = new OfflineAudioContext(buf.numberOfChannels, buf.length, buf.sampleRate);
+        const src = off.createBufferSource();
+        src.buffer = buf;
+        const lp = off.createBiquadFilter();
+        lp.type='lowpass'; lp.frequency.value=2800;
+        const hp = off.createBiquadFilter();
+        hp.type='highpass'; hp.frequency.value=200;
+        src.connect(lp); lp.connect(hp); hp.connect(off.destination);
+        src.start(0);
+        let out = await off.startRendering();
+        const sr = out.sampleRate;
+        const len = out.length;
+        const carrierFreq = params.ring;
+        const bitDepth = params.bit;
+        const gain = params.dist;
+        for (let ch = 0; ch < out.numberOfChannels; ch++) {
+          const d = out.getChannelData(ch);
+          for (let i = 0; i < len; i++) {
+            const t = i / sr;
+            const carrier = Math.sin(2 * Math.PI * carrierFreq * t);
+            let s = d[i] * carrier * gain;
+            s = Math.tanh(s);
+            const step = Math.pow(2, bitDepth);
+            s = Math.round(s * step) / step;
+            d[i] = Math.max(-1, Math.min(1, s));
+          }
+        }
+        return { base64: arrayBufferToBase64(audioBufferToWav(out)), format: 'wav' };
+      } catch(e) { return null; }
+    }
+    function arrayBufferToBase64(buffer){
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      const chunk = 8192;
+      for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      return btoa(binary);
+    }
+    function base64ToArrayBuffer(b64){
+      try {
+        const bin = atob(String(b64||'').replace(/\s/g,''));
+        const arr = new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
+        return arr.buffer;
+      } catch(_) { return null; }
+    }
+    (function(){
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('overlay');
+      const hamburger = document.getElementById('hamburger');
+      function openMenu(){ sidebar.classList.add('open'); overlay.classList.add('visible'); }
+      function closeMenu(){ sidebar.classList.remove('open'); overlay.classList.remove('visible'); }
+      function toggleMenu(){ sidebar.classList.contains('open') ? closeMenu() : openMenu(); }
+      hamburger.onclick = toggleMenu;
+      hamburger.ontouchend = (e)=>{ e.preventDefault(); toggleMenu(); };
+      overlay.onclick = closeMenu;
+      overlay.ontouchend = (e)=>{ e.preventDefault(); closeMenu(); };
+      document.querySelectorAll('.sidebar nav a').forEach(a=>{
+        const go = (e)=>{ e.preventDefault(); closeMenu();
+          document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+          document.querySelectorAll('.sidebar nav a').forEach(l=>l.classList.remove('active'));
+          const sec = a.dataset.section;
+          const el = document.getElementById('section-'+sec);
+          if(el){ el.classList.add('active'); a.classList.add('active'); }
+          if((sec==='soundboard'||sec==='parla') && navigator.mediaDevices){
+            const sbOut = document.getElementById('sbOutput');
+            if(sbOut && sbOut.options.length<=1 && typeof requestAndLoadDevices==='function') requestAndLoadDevices();
+          }
+          if(sec==='runsheet' && typeof loadRunSheet==='function') loadRunSheet();
+        };
+        a.onclick = a.ontouchend = go;
+      });
+    })();
+    (function(){
+      const g = document.getElementById('guideUrl');
+      if (g) g.textContent = location.origin + '/client';
+    })();
     const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
     const MAX_REC_SEC = 20;
-    const MIN_REC_MS = 1000;
+    /* PTT: un filo più lungo prima dell'invio (meno frasi troncate). */
+    const MIN_REC_MS = 1200;
     let ws = null, mediaRecorder = null, chunks = [], recTimeout = null, lastPlayOn = 'browser', lastSinkId = null;
     let recStartTime = 0, recDurationInterval = null, levelInterval = null, analyserNode = null, audioCtx = null;
     let isRecording = false, pendingStop = false, currentStream = null;
+    let wakeStream = null, wakeRawStream = null, wakeListenPending = false;
+    let wakeListenActive = false, wakeMimeType = '', wakeActiveMr = null;
+    let wakeCommandMode = false, wakeCommandIdleTimer = null;
+    let wakeAudioInFlight = false, wakeQueuedBlob = null;
+    let wakeLevelCtx = null, wakeAnalyser = null, wakeLevelSampleInterval = null;
+    let wakeSlicePeak = 0;
+    /** Livello 0-255: sotto questa soglia la slice non viene inviata (rumore/stanza silenziosa). */
+    const WAKE_VOICE_THRESHOLD = 11;
+    /** Dopo «Hey G1»: se nessun turno utile per questo tempo, torna solo ad ascoltare la wake word. */
+    const WAKE_COMMAND_SILENCE_MS = 26000;
+    /** Dopo startWakeRecorder: programma la prossima slice solo quando il round (risposta+TTS) è finito. */
+    let scheduleNextWakeSliceIfListening = function(){};
+    /* Slice più lunga = meno tagli a metà frase prima che parta STT/LLM (costa ~2s in più di attesa). */
+    const WAKE_SLICE_MS = 5200;
+    /** Coda riproduzione TTS: evita che due risposte MP3 si sovrappongano. */
+    let ttsPlaybackQueue = [];
+    let ttsPlaybackBusy = false;
+    const TTS_BEFORE_PLAY_GAP_MS = 180;
+    function enqueueTtsPlayback(b64, onPlaybackFullyEnded) {
+      if (!b64 || String(b64).length < 30) {
+        if (onPlaybackFullyEnded) onPlaybackFullyEnded();
+        return;
+      }
+      ttsPlaybackQueue.push({ b64: String(b64), onEnded: onPlaybackFullyEnded });
+      pumpTtsPlaybackQueue();
+    }
+    function pumpTtsPlaybackQueue() {
+      if (ttsPlaybackBusy) return;
+      if (ttsPlaybackQueue.length === 0) return;
+      ttsPlaybackBusy = true;
+      const item = ttsPlaybackQueue.shift();
+      setTimeout(function() {
+        try {
+          const audio = new Audio('data:audio/mpeg;base64,' + item.b64);
+          if (lastSinkId && audio.setSinkId) { try { audio.setSinkId(lastSinkId); } catch(_){} }
+          audio.onended = function() {
+            ttsPlaybackBusy = false;
+            if (item.onEnded) item.onEnded();
+            pumpTtsPlaybackQueue();
+          };
+          audio.onerror = function() {
+            ttsPlaybackBusy = false;
+            if (item.onEnded) item.onEnded();
+            pumpTtsPlaybackQueue();
+          };
+          audio.play().catch(function() {
+            ttsPlaybackBusy = false;
+            if (item.onEnded) item.onEnded();
+            pumpTtsPlaybackQueue();
+          });
+        } catch(_) {
+          ttsPlaybackBusy = false;
+          if (item.onEnded) item.onEnded();
+          pumpTtsPlaybackQueue();
+        }
+      }, TTS_BEFORE_PLAY_GAP_MS);
+    }
+    function clearTtsPlaybackQueue() {
+      ttsPlaybackQueue = [];
+      ttsPlaybackBusy = false;
+    }
+    /** Stesso codec/bitrate del push-to-talk; MIME allineato a mediaRecorder.mimeType lato PTT. */
+    function preferredRecorderMime() {
+      return MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+    }
+    /** Vincoli microfono: soppressione rumore browser + mono + AGC. Su Chromium si rafforzano i flag legacy se presenti. */
+    function buildAudioCaptureConstraints(deviceIdExact) {
+      const a = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      };
+      if (deviceIdExact && String(deviceIdExact).length > 5) {
+        a.deviceId = { exact: deviceIdExact };
+      }
+      try {
+        var ua = typeof navigator !== 'undefined' ? (navigator.userAgent || '') : '';
+        if (/Chrome|Chromium|Edg/i.test(ua) && !/OPR|Opera/i.test(ua)) {
+          a.googEchoCancellation = true;
+          a.googNoiseSuppression = true;
+          a.googAutoGainControl = true;
+          a.googHighpassFilter = true;
+        }
+      } catch(_){}
+      return { audio: a };
+    }
+    /** Soglia uguale al controllo su /ws (audio troppo corto) e a sendAudio. */
+    const WS_AUDIO_MIN_BYTES = 2000;
+    /** Costruisce e invia lo stesso messaggio usato da Parla (PTT). */
+    function sendAudioOverWs(b64, mime, opts) {
+      opts = opts || {};
+      const playOn = opts.playOn || 'browser';
+      const msg = {
+        type: 'audio',
+        data: b64,
+        play_on: playOn,
+        skip_wake: opts.skipWake !== undefined ? opts.skipWake : true,
+        format: mime || preferredRecorderMime()
+      };
+      if (playOn === 'server' && opts.deviceId != null) msg.device_id = opts.deviceId;
+      ws.send(JSON.stringify(msg));
+    }
+    let thinkingInterval = null, thinkingAudioCtx = null;
+    function startThinkingFeedback(showRecDebug){
+      stopThinkingFeedback();
+      if (showRecDebug !== false) {
+        const el = document.getElementById('recDebug');
+        if (el) { el.textContent = 'Sto elaborando (trascrizione + IA)…'; el.style.color = '#3b82f6'; }
+      }
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        thinkingAudioCtx = new Ctx();
+        thinkingInterval = setInterval(function(){
+          if (!thinkingAudioCtx) return;
+          const o = thinkingAudioCtx.createOscillator();
+          const g = thinkingAudioCtx.createGain();
+          o.frequency.value = 392;
+          g.gain.setValueAtTime(0.04, thinkingAudioCtx.currentTime);
+          g.gain.exponentialRampToValueAtTime(0.001, thinkingAudioCtx.currentTime + 0.11);
+          o.connect(g); g.connect(thinkingAudioCtx.destination);
+          o.start();
+          o.stop(thinkingAudioCtx.currentTime + 0.11);
+          thinkingAudioCtx.resume && thinkingAudioCtx.resume();
+        }, 800);
+      } catch(_){}
+    }
+    function stopThinkingFeedback(){
+      if (thinkingInterval) { clearInterval(thinkingInterval); thinkingInterval = null; }
+      if (thinkingAudioCtx) { try { thinkingAudioCtx.close(); } catch(_){} thinkingAudioCtx = null; }
+    }
+    function playWakeChime(){
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        const ctx = new Ctx();
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.value = 880;
+        g.gain.value = 0.09;
+        o.connect(g); g.connect(ctx.destination);
+        o.start();
+        o.stop(ctx.currentTime + 0.14);
+        ctx.resume && ctx.resume();
+      } catch(_){}
+    }
+    function resetWakeCommandMode(){
+      wakeCommandMode = false;
+      if (wakeCommandIdleTimer) { clearTimeout(wakeCommandIdleTimer); wakeCommandIdleTimer = null; }
+    }
+    function startWakeCommandIdleTimer(){
+      if (!wakeCommandMode) return;
+      if (wakeCommandIdleTimer) clearTimeout(wakeCommandIdleTimer);
+      wakeCommandIdleTimer = setTimeout(function(){
+        resetWakeCommandMode();
+        const wst = document.getElementById('wakeListenStatus');
+        const tg = document.getElementById('wakeListenToggle');
+        if (wst && tg && tg.checked) wst.textContent = 'In ascolto per «Hey G1»…';
+      }, WAKE_COMMAND_SILENCE_MS);
+    }
+    function stopWakeLevelMeter(){
+      if (wakeLevelSampleInterval) { clearInterval(wakeLevelSampleInterval); wakeLevelSampleInterval = null; }
+      if (wakeLevelCtx) { try { wakeLevelCtx.close(); } catch(_){} wakeLevelCtx = null; }
+      wakeAnalyser = null;
+      wakeSlicePeak = 0;
+    }
+    /** High-pass (taglia rimbombo/gravi) + compressore leggero → voce più stabile nel brusio; stream processato per MediaRecorder. */
+    function startWakeSpeechEnhancer(){
+      stopWakeLevelMeter();
+      if (!wakeRawStream) return;
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        wakeLevelCtx = new Ctx();
+        const src = wakeLevelCtx.createMediaStreamSource(wakeRawStream);
+        const hp = wakeLevelCtx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 100;
+        hp.Q.value = 0.707;
+        const comp = wakeLevelCtx.createDynamicsCompressor();
+        comp.threshold.value = -28;
+        comp.knee.value = 20;
+        comp.ratio.value = 3.5;
+        comp.attack.value = 0.003;
+        comp.release.value = 0.12;
+        wakeAnalyser = wakeLevelCtx.createAnalyser();
+        wakeAnalyser.fftSize = 512;
+        wakeAnalyser.smoothingTimeConstant = 0.35;
+        const dest = wakeLevelCtx.createMediaStreamDestination();
+        src.connect(hp);
+        hp.connect(comp);
+        comp.connect(wakeAnalyser);
+        comp.connect(dest);
+        wakeStream = dest.stream;
+        wakeLevelCtx.resume && wakeLevelCtx.resume();
+      } catch(_) {
+        wakeStream = wakeRawStream;
+        try {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          wakeLevelCtx = new Ctx();
+          wakeAnalyser = wakeLevelCtx.createAnalyser();
+          wakeAnalyser.fftSize = 512;
+          wakeAnalyser.smoothingTimeConstant = 0.35;
+          wakeLevelCtx.createMediaStreamSource(wakeRawStream).connect(wakeAnalyser);
+          wakeLevelCtx.resume && wakeLevelCtx.resume();
+        } catch(__){ wakeAnalyser = null; }
+      }
+    }
+    function onWakeResponseDone(){
+      wakeAudioInFlight = false;
+      if (wakeQueuedBlob && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) {
+        const b = wakeQueuedBlob;
+        wakeQueuedBlob = null;
+        trySendWakeChunk(b);
+      }
+      scheduleNextWakeSliceIfListening();
+    }
+    function trySendWakeChunk(blob){
+      if (!blob || blob.size < WS_AUDIO_MIN_BYTES) return;
+      if (!document.getElementById('wakeListenToggle').checked) return;
+      if (isRecording) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (wakeAudioInFlight) {
+        wakeQueuedBlob = blob;
+        return;
+      }
+      wakeAudioInFlight = true;
+      wakeListenPending = true;
+      const fr = new FileReader();
+      fr.onload = function(){
+        const b64 = arrayBufferToBase64(fr.result);
+        try {
+          startThinkingFeedback();
+          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: !wakeCommandMode });
+        } catch(_){
+          wakeListenPending = false;
+          wakeAudioInFlight = false;
+          stopThinkingFeedback();
+        }
+      };
+      fr.readAsArrayBuffer(blob);
+    }
+    function stopWakeRecorder(){
+      wakeListenActive = false;
+      scheduleNextWakeSliceIfListening = function(){};
+      stopWakeLevelMeter();
+      clearTtsPlaybackQueue();
+      try {
+        if (wakeActiveMr && wakeActiveMr.state !== 'inactive') wakeActiveMr.stop();
+      } catch(_){}
+      wakeActiveMr = null;
+      if (wakeRawStream) {
+        try { wakeRawStream.getTracks().forEach(function(t){ try { t.stop(); } catch(_){} }); } catch(_){}
+        wakeRawStream = null;
+      }
+      wakeStream = null;
+      const st = document.getElementById('wakeListenStatus');
+      if (st && !document.getElementById('wakeListenToggle').checked) st.textContent = 'Disattivato';
+      resetWakeCommandMode();
+      wakeQueuedBlob = null;
+      wakeAudioInFlight = false;
+    }
+    async function startWakeRecorder(){
+      const el = document.getElementById('wakeListenToggle');
+      if (!el || !el.checked || !navigator.mediaDevices) return;
+      if (isRecording) return;
+      stopWakeRecorder();
+      const micId = document.getElementById('mic').value;
+      try {
+        wakeRawStream = await navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micId));
+        startWakeSpeechEnhancer();
+      } catch(e) {
+        const st = document.getElementById('wakeListenStatus');
+        if (st) st.textContent = 'Microfono non disponibile per l\\'ascolto continuo.';
+        el.checked = false;
+        return;
+      }
+      await new Promise(function(r){ setTimeout(r, 150); });
+      wakeMimeType = preferredRecorderMime();
+      wakeListenActive = true;
+      scheduleNextWakeSliceIfListening = function(){
+        if (!wakeListenActive) return;
+        const tg = document.getElementById('wakeListenToggle');
+        if (!tg || !tg.checked) return;
+        if (isRecording) return;
+        setTimeout(runWakeSlice, 120);
+      };
+      function runWakeSlice(){
+        if (!wakeListenActive || !document.getElementById('wakeListenToggle').checked) return;
+        if (isRecording) { setTimeout(runWakeSlice, 350); return; }
+        if (!wakeStream) return;
+        const mr = new MediaRecorder(wakeStream, { mimeType: wakeMimeType, audioBitsPerSecond: 128000 });
+        wakeActiveMr = mr;
+        const ch = [];
+        wakeSlicePeak = 0;
+        if (wakeAnalyser) {
+          if (wakeLevelSampleInterval) clearInterval(wakeLevelSampleInterval);
+          wakeLevelSampleInterval = setInterval(function(){
+            if (!wakeAnalyser) return;
+            const buf = new Uint8Array(wakeAnalyser.frequencyBinCount);
+            wakeAnalyser.getByteFrequencyData(buf);
+            let s = 0;
+            for (let i = 0; i < buf.length; i++) if (buf[i] > s) s = buf[i];
+            if (s > wakeSlicePeak) wakeSlicePeak = s;
+          }, 45);
+        }
+        mr.ondataavailable = function(ev){ if (ev.data && ev.data.size) ch.push(ev.data); };
+        mr.onstop = function(){
+          wakeActiveMr = null;
+          if (wakeLevelSampleInterval) { clearInterval(wakeLevelSampleInterval); wakeLevelSampleInterval = null; }
+          if (!wakeListenActive) return;
+          const blob = new Blob(ch, { type: wakeMimeType });
+          const voiced = !wakeAnalyser || wakeSlicePeak >= WAKE_VOICE_THRESHOLD;
+          if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob);
+          else scheduleNextWakeSliceIfListening();
+          /* La prossima slice dopo risposta+TTS: onWakeResponseDone, oppure subito se slice silenziosa (nessun invio). */
+        };
+        mr.start();
+        setTimeout(function(){
+          try {
+            if (mr.state !== 'inactive') {
+              if (typeof mr.requestData === 'function') mr.requestData();
+              mr.stop();
+            }
+          } catch(_){}
+        }, WAKE_SLICE_MS);
+      }
+      runWakeSlice();
+      const st = document.getElementById('wakeListenStatus');
+      if (st) st.textContent = 'In ascolto per «Hey G1»…';
+    }
+    const wakeListenToggleEl = document.getElementById('wakeListenToggle');
+    if (wakeListenToggleEl) {
+      wakeListenToggleEl.onchange = function(){
+        if (wakeListenToggleEl.checked) {
+          const st = document.getElementById('wakeListenStatus');
+          if (st) st.textContent = 'Avvio ascolto…';
+          startWakeRecorder();
+        } else {
+          stopWakeRecorder();
+          resetWakeCommandMode();
+          const st = document.getElementById('wakeListenStatus');
+          if (st) st.textContent = 'Disattivato';
+        }
+      };
+    }
 
     const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-    if (!isLocalhost) {
+    const isSecure = location.protocol === 'https:';
+    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (!isLocalhost && !isSecure) {
       document.getElementById('secureContextWarn').style.display = 'block';
+      document.getElementById('secureWarnMobile').style.display = isMobile ? 'block' : 'none';
+      document.getElementById('secureWarnDesktop').style.display = isMobile ? 'none' : 'block';
       document.getElementById('hintAccess').style.display = 'none';
       document.getElementById('allowWrap').style.display = 'none';
       document.getElementById('devicesWrap').style.display = 'none';
+      document.getElementById('secureWarnMore').onclick = (e)=>{ e.preventDefault(); const d=document.getElementById('secureWarnDetails'); d.style.display = d.style.display==='none' ? 'block' : 'none'; };
     }
     if (!navigator.mediaDevices) {
       document.getElementById('secureContextWarn').style.display = 'block';
@@ -1132,25 +2247,64 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         let d;
         try { d = JSON.parse(e.data); } catch(_) { document.getElementById('result').innerHTML = '<div class="warn">Errore risposta server</div>'; return; }
         if(d.type==='response'){
+          stopThinkingFeedback();
           const r = d.data;
-          btn.disabled = false;
-          document.getElementById('recDebug').textContent = r.text ? '' : (r.message || '');
-          document.getElementById('recDebug').style.color = r.message ? '#f59e0b' : '#71717a';
-          const msg = r.message ? '<div class="warn">'+r.message+'</div>' : '';
-          const dur = r.duration_ms ? ' <span style="color:#71717a;font-size:12px;">('+r.duration_ms+' ms)</span>' : '';
-          document.getElementById('result').innerHTML = msg + '<div><b>Hai detto:</b> '+(r.text||'')+'</div><div><b>Risposta:</b> '+(r.response||'')+dur+'</div>';
-          if(lastPlayOn === 'browser' && r.audio_base64){
-            const audio = new Audio('data:audio/mpeg;base64,'+r.audio_base64);
-            if(lastSinkId && audio.setSinkId){ try { audio.setSinkId(lastSinkId); } catch(_){} }
-            audio.play();
+          let deferWakeDone = false;
+          try {
+            if (wakeListenPending) {
+              wakeListenPending = false;
+              if (r.wake_miss) {
+                btn.disabled = false;
+                return;
+              }
+              if (r.wake_ack) {
+                playWakeChime();
+                wakeCommandMode = true;
+                startWakeCommandIdleTimer();
+                const wst = document.getElementById('wakeListenStatus');
+                if (wst) wst.textContent = 'Ti ascolto… parla pure.';
+                btn.disabled = false;
+                deferWakeDone = true;
+                setTimeout(function(){ onWakeResponseDone(); }, 320);
+                return;
+              }
+              if (!r.response && r.message) {
+                const wst = document.getElementById('wakeListenStatus');
+                if (wakeCommandMode && wst) wst.textContent = 'Ti ascolto… (parla 1–2 sec più forte)';
+                else if (wst) wst.textContent = 'In ascolto per «Hey G1»…';
+                document.getElementById('result').innerHTML = '<div class="warn">'+r.message+'</div>';
+                btn.disabled = false;
+                return;
+              }
+            }
+            btn.disabled = false;
+            document.getElementById('recDebug').textContent = r.text ? '' : (r.message || '');
+            document.getElementById('recDebug').style.color = r.message ? '#f59e0b' : '#71717a';
+            const msg = r.message ? '<div class="warn">'+r.message+'</div>' : '';
+            const dur = r.duration_ms ? ' <span style="color:#71717a;font-size:12px;">('+r.duration_ms+' ms)</span>' : '';
+            document.getElementById('result').innerHTML = msg + '<div><b>Hai detto:</b> '+(r.text||'')+'</div><div><b>Risposta:</b> '+(r.response||'')+dur+'</div>';
+            const hasTts = lastPlayOn === 'browser' && r.audio_base64 && String(r.audio_base64).length > 50;
+            if (hasTts) {
+              deferWakeDone = true;
+              enqueueTtsPlayback(r.audio_base64, onWakeResponseDone);
+            }
+            const wst = document.getElementById('wakeListenStatus');
+            if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) wst.textContent = 'In ascolto per «Hey G1»…';
+            if (wakeCommandMode && !r.wake_ack && r.wake_miss !== true && (String(r.text||'').trim() || String(r.response||'').trim())) {
+              startWakeCommandIdleTimer();
+            }
+          } finally {
+            if (!deferWakeDone) onWakeResponseDone();
           }
         } else if(d.type==='error'){
+          stopThinkingFeedback();
+          clearTtsPlaybackQueue();
+          wakeAudioInFlight = false;
+          wakeQueuedBlob = null;
           btn.disabled = false;
           document.getElementById('result').innerHTML = '<div class="warn">Errore: '+ (d.data || '')+'</div>';
         } else if(d.type==='play' && d.data){
-          const a = new Audio('data:audio/mpeg;base64,'+d.data);
-          if(lastSinkId && a.setSinkId){ try { a.setSinkId(lastSinkId); } catch(_){} }
-          a.play();
+          enqueueTtsPlayback(d.data, null);
         }
       };
     }
@@ -1190,11 +2344,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         spkSel.innerHTML = '';
         spks.forEach((s,i) => spkSel.appendChild(new Option(s.label || ('Output '+(i+1)), 'browser_'+s.deviceId)));
         if(spks.length === 0) spkSel.appendChild(new Option('Predefinito', 'browser_default'));
-
+        spkSel.onchange = ()=>{ const v=spkSel.value; lastSinkId=(v&&v.startsWith('browser_')&&v!=='browser_default')?v.replace('browser_',''):null; };
+        const sbOut = document.getElementById('sbOutput');
+        if (sbOut) {
+          sbOut.innerHTML = '<option value="default">Predefinito</option>' + spks.map((s,i) => '<option value="'+s.deviceId+'">'+(s.label || ('Output '+(i+1)))+'</option>').join('');
+        }
         statusEl.textContent = mics.length === 0 && spks.length === 0 ? "Nessun dispositivo audio trovato. Collega microfono/cuffie e ricarica." : "";
       } catch(e) {
         micSel.innerHTML = '<option value="">Errore: '+e.message+'</option>';
         spkSel.innerHTML = '<option value="browser_default">Riproduci qui</option>';
+        const sbOut = document.getElementById('sbOutput');
+        if (sbOut) sbOut.innerHTML = '<option value="default">Predefinito</option>';
         statusEl.textContent = 'Errore lettura dispositivi.';
       }
     }
@@ -1225,43 +2385,225 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     };
 
     let soundboardSlots = [];
+    let sbTextMax = 280;
+    let sbEditIdx = -1, sbEditAudio = null, sbEditFmt = '', sbEditAudioRaw = null;
+    let sbEditAudioClean = null, sbEditFmtClean = 'mp3';
+    function sbMimeForFmt(fmt){
+      const f = (fmt||'webm').toLowerCase();
+      if(f==='mp3') return 'audio/mpeg';
+      if(f==='wav') return 'audio/wav';
+      return 'audio/'+f;
+    }
+    function sbPlaySlot(s){
+      const mode = (document.getElementById('sbPlayMode') && document.getElementById('sbPlayMode').value) || 'robot';
+      let b64 = null, fmt = 'mp3';
+      if(mode==='clean' && s.audio_base64_clean && s.audio_base64_clean.length>50){ b64 = s.audio_base64_clean; fmt = s.format_clean||'mp3'; }
+      else if(s.audio_base64 && s.audio_base64.length>50){ b64 = s.audio_base64; fmt = s.format||'mp3'; }
+      if(!b64 && mode==='clean' && s.audio_base64 && s.audio_base64.length>50){ b64 = s.audio_base64; fmt = s.format||'mp3'; }
+      if(!b64 && s.audio_base64_clean && s.audio_base64_clean.length>50){ b64 = s.audio_base64_clean; fmt = s.format_clean||'mp3'; }
+      if(!b64) return;
+      const a = new Audio('data:'+sbMimeForFmt(fmt)+';base64,'+b64);
+      const sbOut = document.getElementById('sbOutput');
+      const sinkId = (sbOut && sbOut.value && sbOut.value !== 'default') ? sbOut.value : null;
+      if(sinkId && typeof a.setSinkId === 'function') { try { a.setSinkId(sinkId); } catch(_){} }
+      a.play();
+    }
+    const sbDefaultIcons = ['🎤','🔊','📢','🎵','🎶','🎧','🎭','🚀','⭐','💡','🤝','☕','🎬','📷','🚪','🎁','✨','🏢','👋','🙏'];
+    function sbIconAt(i){ return sbDefaultIcons[i % sbDefaultIcons.length]; }
+    function updateSbCharCount(){
+      const ta = document.getElementById('sbModalText');
+      const n = (ta && ta.value) ? ta.value.length : 0;
+      const el = document.getElementById('sbModalCharCount');
+      if(el) el.textContent = n;
+    }
     function renderSoundboard(){
       const grid = document.getElementById('soundboardGrid');
       if (!grid) return;
-      const icons = ['🎤','🔊','📢','🎵','🎶','🎧','🎭','🚀','⭐','💡'];
-      grid.innerHTML = soundboardSlots.map((s,i)=>'<div id="sb'+i+'" style="display:flex;flex-direction:column;align-items:center;padding:10px;background:rgba(255,255,255,0.05);border-radius:10px;cursor:pointer;border:1px solid rgba(255,255,255,0.08);min-height:70px;"><span style="font-size:24px;margin-bottom:4px;">'+(s.icon||icons[i])+'</span><span style="font-size:11px;color:#9ca3af;text-align:center;overflow:hidden;text-overflow:ellipsis;max-width:100%;">'+(s.text||'Comando '+(i+1))+'</span><button type="button" onclick="event.stopPropagation();editSoundboard('+i+')" style="margin-top:4px;padding:2px 6px;font-size:10px;background:rgba(255,255,255,0.1);color:#9ca3af;border:none;border-radius:4px;cursor:pointer;">✏️</button></div>').join('');
+      grid.innerHTML = soundboardSlots.map((s,i)=>{
+        const hasR = !!(s.audio_base64 && s.audio_base64.length > 50);
+        const hasN = !!(s.audio_base64_clean && s.audio_base64_clean.length > 50);
+        const hasAudio = hasR || hasN;
+        const border = hasAudio ? '2px solid #14b8a6' : '1px solid rgba(255,255,255,0.08)';
+        const bg = hasAudio ? 'rgba(20,184,166,0.08)' : 'rgba(255,255,255,0.05)';
+        let badgeTitle = 'Vuoto', badgeHtml = '&#8212;';
+        if(hasR && hasN){ badgeTitle = 'Robot + Naturale'; badgeHtml = '<span style="color:#a78bfa;">R</span><span style="color:#14b8a6;">N</span>'; }
+        else if(hasR){ badgeTitle = 'Solo robot'; badgeHtml = 'R'; }
+        else if(hasN){ badgeTitle = 'Solo naturale'; badgeHtml = 'N'; }
+        const badge = hasAudio ? '<span style="position:absolute;top:4px;right:4px;font-size:9px;font-weight:700;color:#14b8a6;" title="'+badgeTitle+'">'+badgeHtml+'</span>' : '<span style="position:absolute;top:4px;right:4px;font-size:10px;color:#71717a;" title="Vuoto">&#8212;</span>';
+        const label = (s.text||'Comando '+(i+1)).replace(/</g,'&lt;').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+        return '<div id="sb'+i+'" style="position:relative;display:flex;flex-direction:column;align-items:center;padding:8px;background:'+bg+';border-radius:10px;cursor:pointer;border:'+border+';min-height:88px;">'+badge+'<span style="font-size:22px;margin-bottom:4px;">'+(s.icon||sbIconAt(i))+'</span><span class="sb-slot-text" style="font-size:10px;color:#9ca3af;text-align:center;max-width:100%;">'+label+'</span><button type="button" onclick="event.stopPropagation();editSoundboard('+i+')" style="margin-top:4px;padding:2px 6px;font-size:10px;background:rgba(255,255,255,0.1);color:#9ca3af;border:none;border-radius:4px;cursor:pointer;">✏️</button></div>';
+      }).join('');
       soundboardSlots.forEach((s,i)=>{
         const el = document.getElementById('sb'+i);
-        if (el) el.onclick = (e)=> { if (!e.target.closest('button') && s.audio_base64) { const fmt = s.format || 'webm'; const a=new Audio('data:audio/'+fmt+';base64,'+s.audio_base64); a.play(); } };
+        if (el) el.onclick = (e)=> {
+          if (!e.target.closest('button')) sbPlaySlot(s);
+        };
       });
     }
-    function editSoundboard(idx){
-      const s = soundboardSlots[idx] || {};
-      const icon = prompt('Icona (emoji):', s.icon || '🎤') || s.icon || '🎤';
-      const text = prompt('Testo pulsante:', s.text || 'Comando '+(idx+1)) || s.text || 'Comando '+(idx+1);
-      const rec = confirm('Registrare nuovo audio? (OK=registra 3 sec, Annulla=solo icona/testo)');
-      if (rec && navigator.mediaDevices) {
-        navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
-          const mr = new MediaRecorder(stream, {mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm'});
-          const chunks = [];
-          mr.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
-          mr.onstop = ()=>{
-            stream.getTracks().forEach(t=>t.stop());
-            const blob = new Blob(chunks, {type: mr.mimeType});
-            const fr = new FileReader();
-            fr.onload = ()=>{
-              const b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(fr.result)));
-              fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:idx, icon, text, audio_base64: b64, format: 'webm'})}).then(r=>r.json()).then(()=>{ fetch('/api/soundboard').then(r=>r.json()).then(d=>{ soundboardSlots=d.slots||[]; renderSoundboard(); }); });
-            };
-            fr.readAsArrayBuffer(blob);
-          };
-          mr.start(); alert('Registrando 3 secondi...'); setTimeout(()=>mr.stop(), 3000);
-        }).catch(()=>alert('Microfono non disponibile'));
-      } else {
-        fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:idx, icon, text, audio_base64: s.audio_base64||''})}).then(r=>r.json()).then(()=>{ fetch('/api/soundboard').then(r=>r.json()).then(d=>{ soundboardSlots=d.slots||[]; renderSoundboard(); }); });
-      }
+    function updateSbModalStatus(){
+      const st = document.getElementById('sbModalAudioStatus');
+      if(!st) return;
+      const r = sbEditAudio ? '<span style="color:#14b8a6;">Robot</span> '+Math.round((sbEditAudio.length||0)/1024)+' KB' : '<span style="color:#71717a;">Robot —</span>';
+      const n = sbEditAudioClean ? '<span style="color:#a78bfa;">Naturale</span> '+Math.round((sbEditAudioClean.length||0)/1024)+' KB' : '<span style="color:#71717a;">Naturale —</span>';
+      st.innerHTML = '&#128266; '+r+' · '+n;
     }
-    fetch('/api/soundboard').then(r=>r.json()).then(d=>{ soundboardSlots=d.slots||[]; renderSoundboard(); }).catch(()=>{});
+    function editSoundboard(idx){
+      sbEditIdx = idx;
+      const s = soundboardSlots[idx] || {};
+      document.getElementById('sbModalSlot').textContent = idx+1;
+      document.getElementById('sbModalIcon').value = s.icon || sbIconAt(idx);
+      document.getElementById('sbModalText').value = s.text || 'Comando '+(idx+1);
+      document.getElementById('sbModalText').setAttribute('maxlength', String(sbTextMax));
+      sbEditAudio = s.audio_base64 || null;
+      sbEditFmt = s.format || 'webm';
+      sbEditAudioClean = s.audio_base64_clean || null;
+      sbEditFmtClean = s.format_clean || 'mp3';
+      sbEditAudioRaw = null;
+      updateSbModalStatus();
+      updateSbCharCount();
+      document.getElementById('sbModal').style.display = 'flex';
+    }
+    const sbModalTextEl = document.getElementById('sbModalText');
+    if (sbModalTextEl) { sbModalTextEl.oninput = updateSbCharCount; }
+    function closeSbModal(){ document.getElementById('sbModal').style.display = 'none'; sbEditIdx = -1; sbEditAudio = null; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; }
+    document.getElementById('sbModalCancel').onclick = closeSbModal;
+    document.getElementById('sbModalSave').onclick = ()=>{
+      if (sbEditIdx < 0) return;
+      const icon = (document.getElementById('sbModalIcon').value || '🎤').trim().substring(0,4);
+      const text = (document.getElementById('sbModalText').value || 'Comando '+(sbEditIdx+1)).trim().substring(0, sbTextMax);
+      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3'})}).then(r=>r.json()).then(()=>{ fetch('/api/soundboard').then(r=>r.json()).then(d=>{ soundboardSlots=d.slots||[]; renderSoundboard(); }); });
+      closeSbModal();
+    };
+    document.getElementById('sbModalSynth').onclick = async ()=>{
+      const text = (document.getElementById('sbModalText').value||'').trim().substring(0, sbTextMax);
+      if (!text) { alert('Scrivi il testo da sintetizzare'); return; }
+      const btn = document.getElementById('sbModalSynth');
+      btn.disabled = true;
+      document.getElementById('sbModalAudioStatus').innerHTML = 'Generazione TTS...';
+      try {
+        const r = await fetch('/api/soundboard-synth', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
+        const d = await r.json();
+        if (d.ok) {
+          sbEditAudio = d.audio_base64; sbEditFmt = d.format||'mp3';
+          sbEditAudioClean = d.audio_base64_clean || null; sbEditFmtClean = d.format_clean || 'mp3';
+          sbEditAudioRaw = null; updateSbModalStatus();
+        }
+        else alert(d.error || 'Errore TTS');
+      } catch(e) { alert('Errore: '+e.message); }
+      btn.disabled = false;
+    };
+    document.getElementById('sbModalRecord').onclick = ()=>{
+      if (!navigator.mediaDevices) { alert('Microfono non disponibile'); return; }
+      document.getElementById('sbModalRecord').disabled = true;
+      document.getElementById('sbModalAudioStatus').innerHTML = 'Registrazione 3 sec...';
+      navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
+        const mr = new MediaRecorder(stream, {mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm'});
+        const chunks = [];
+        mr.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
+        mr.onstop = ()=>{
+          stream.getTracks().forEach(t=>t.stop());
+          const blob = new Blob(chunks, {type: mr.mimeType});
+          const fr = new FileReader();
+          fr.onload = async ()=>{
+            sbEditAudioRaw = fr.result;
+            document.getElementById('sbModalAudioStatus').innerHTML = 'Applicazione effetto...';
+            sbEditAudioClean = arrayBufferToBase64(fr.result); sbEditFmtClean = 'webm';
+            const proc = await applyRobotEffect(fr.result, 'webm');
+            if (proc) { sbEditAudio = proc.base64; sbEditFmt = proc.format; } else { sbEditAudio = arrayBufferToBase64(fr.result); sbEditFmt = 'webm'; }
+            updateSbModalStatus();
+            document.getElementById('sbModalRecord').disabled = false;
+          };
+          fr.readAsArrayBuffer(blob);
+        };
+        mr.start(); setTimeout(()=>mr.stop(), 3000);
+      }).catch(()=>{ alert('Microfono non disponibile'); document.getElementById('sbModalRecord').disabled = false; });
+    };
+    document.getElementById('sbModalFile').onchange = async (e)=>{
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      const ext = (f.name.split('.').pop()||'').toLowerCase();
+      const mime = {mp3:'audio/mpeg',wav:'audio/wav',ogg:'audio/ogg',webm:'audio/webm',m4a:'audio/mp4'}[ext] || f.type || 'audio/mpeg';
+      const buf = await f.arrayBuffer();
+      sbEditAudioRaw = buf;
+      document.getElementById('sbModalAudioStatus').innerHTML = 'Applicazione effetto...';
+      sbEditAudioClean = arrayBufferToBase64(buf); sbEditFmtClean = ext || 'mp3';
+      const proc = await applyRobotEffect(buf, mime.split('/')[1]||'mp3');
+      if (proc) { sbEditAudio = proc.base64; sbEditFmt = proc.format; } else { sbEditAudio = arrayBufferToBase64(buf); sbEditFmt = ext || 'mp3'; }
+      updateSbModalStatus();
+      e.target.value = '';
+    };
+    document.getElementById('sbModalClear').onclick = ()=>{ sbEditAudio = null; sbEditFmt = ''; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; sbEditAudioRaw = null; updateSbModalStatus(); };
+    document.getElementById('sbModalReapply').onclick = async ()=>{
+      if (!sbEditAudioRaw) { alert('Registra o importa prima un audio, poi regola i valori e clicca Riapplica.'); return; }
+      const btn = document.getElementById('sbModalReapply');
+      btn.disabled = true;
+      document.getElementById('sbModalAudioStatus').innerHTML = 'Riapplicazione effetto...';
+      const proc = await applyRobotEffect(sbEditAudioRaw, 'webm');
+      if (proc) { sbEditAudio = proc.base64; sbEditFmt = proc.format; }
+      updateSbModalStatus();
+      btn.disabled = false;
+    };
+    ['sbRing','sbBit','sbDist'].forEach(id=>{
+      const el = document.getElementById(id);
+      const spanId = id==='sbRing'?'sbRingVal':(id==='sbBit'?'sbBitVal':'sbDistVal');
+      el.oninput = ()=>{ document.getElementById(spanId).textContent = el.value; };
+    });
+    document.getElementById('sbModalTts').onclick = async ()=>{
+      if (!sbEditAudio || sbEditAudio.length < 100) { alert('Serve prima un audio (registra o importa)'); return; }
+      const btn = document.getElementById('sbModalTts');
+      btn.disabled = true;
+      document.getElementById('sbModalAudioStatus').innerHTML = 'Riprocessamento con TTS...';
+      try {
+        const r = await fetch('/api/audio-to-robot-voice', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({audio_base64: sbEditAudio, format: sbEditFmt||'wav'})});
+        const d = await r.json();
+        if (d.ok) {
+          sbEditAudioClean = d.audio_base64;
+          sbEditFmtClean = 'mp3';
+          const ab = base64ToArrayBuffer(d.audio_base64);
+          if (ab) {
+            const proc = await applyRobotEffect(ab, 'mp3');
+            if (proc) { sbEditAudio = proc.base64; sbEditFmt = proc.format; } else { sbEditAudio = d.audio_base64; sbEditFmt = 'mp3'; }
+          } else { sbEditAudio = d.audio_base64; sbEditFmt = 'mp3'; }
+          updateSbModalStatus();
+        } else alert(d.error || 'Errore');
+      } catch(e) { alert('Errore: '+e.message); }
+      btn.disabled = false;
+    };
+    document.getElementById('sbOutputRefresh').onclick = () => { if (typeof requestAndLoadDevices === 'function') requestAndLoadDevices(); };
+    fetch('/api/soundboard').then(r=>r.json()).then(d=>{
+      soundboardSlots=d.slots||[];
+      if (typeof d.text_max_len === 'number' && d.text_max_len > 0) { sbTextMax = d.text_max_len; const mx = document.getElementById('sbModalCharMax'); if(mx) mx.textContent = sbTextMax; }
+      renderSoundboard();
+    }).catch(()=>{});
+    function escAttr(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+    function loadRunSheet(){
+      fetch('/api/run-sheet').then(r=>r.json()).then(d=>{
+        const pol = document.getElementById('runSheetPolicy');
+        if(pol) pol.value = d.policy || '';
+        const tb = document.getElementById('runSheetBody');
+        if(!tb) return;
+        const rows = d.rows || [];
+        tb.innerHTML = rows.map((row,i)=>'<tr><td><input type="text" class="rs-fase" data-i="'+i+'" value="'+escAttr(row.fase)+'" /></td><td><input type="text" class="rs-att" value="'+escAttr(row.attivita)+'" /></td><td><input type="text" class="rs-ora" value="'+escAttr(row.ora_inizio)+'" /></td><td><input type="text" class="rs-dur" value="'+escAttr(row.durata_stimata)+'" /></td><td><input type="text" class="rs-note" value="'+escAttr(row.note)+'" /></td></tr>').join('');
+      }).catch(()=>{});
+    }
+    document.getElementById('runSheetSave').onclick = ()=>{
+      const policy = (document.getElementById('runSheetPolicy').value||'').trim();
+      const rows = [];
+      document.querySelectorAll('#runSheetBody tr').forEach(tr=>{
+        rows.push({
+          fase: (tr.querySelector('.rs-fase')&&tr.querySelector('.rs-fase').value)||'',
+          attivita: (tr.querySelector('.rs-att')&&tr.querySelector('.rs-att').value)||'',
+          ora_inizio: (tr.querySelector('.rs-ora')&&tr.querySelector('.rs-ora').value)||'',
+          durata_stimata: (tr.querySelector('.rs-dur')&&tr.querySelector('.rs-dur').value)||'',
+          note: (tr.querySelector('.rs-note')&&tr.querySelector('.rs-note').value)||''
+        });
+      });
+      const st = document.getElementById('runSheetStatus');
+      fetch('/api/run-sheet', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({policy, rows})})
+        .then(r=>r.json()).then(d=>{ if(st) st.textContent = d.ok ? 'Salvato.' : (d.error||'Errore'); if(st) st.style.color = d.ok ? '#22c55e' : '#f87171'; })
+        .catch(e=>{ if(st) st.textContent = e.message; if(st) st.style.color = '#f87171'; });
+    };
+    loadRunSheet();
 
     document.getElementById('btnTest').onclick = async () => {
       const btn = document.getElementById('btnTest');
@@ -1305,8 +2647,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const txt = (input.value || '').trim();
       if (!txt) { status.textContent = 'Scrivi qualcosa.'; status.style.color = '#f59e0b'; return; }
       document.getElementById('btnText').disabled = true;
-      status.textContent = ' Elaborazione...';
+      status.textContent = ' Elaborazione (IA)…';
       status.style.color = '#a1a1aa';
+      startThinkingFeedback(false);
       try {
         const r = await fetch('/api/text-chat', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: txt}) });
         const d = await r.json().catch(function(){ return {}; });
@@ -1331,6 +2674,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         status.textContent = ' Errore: ' + (e.message || String(e));
         status.style.color = '#dc2626';
       }
+      stopThinkingFeedback();
       document.getElementById('btnText').disabled = false;
     };
     document.getElementById('textInput').onkeydown = (e) => { if (e.key === 'Enter') document.getElementById('btnText').click(); };
@@ -1375,6 +2719,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
 
     async function startRec(){
       if(isRecording) return;
+      wakeListenPending = false;
+      stopWakeRecorder();
       isRecording = true;
       pendingStop = false;
       const micId = document.getElementById('mic').value;
@@ -1383,18 +2729,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       lastSinkId = (spkVal && spkVal.startsWith('browser_') && spkVal !== 'browser_default') ? spkVal.replace('browser_','') : null;
       const deviceId = null;
       try {
-        const constraints = {
-          audio: Object.assign(
-            { echoCancellation: true, noiseSuppression: true },
-            micId && micId.length > 5 ? { deviceId: { exact: micId } } : {}
-          )
-        };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const stream = await navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micId));
         if(pendingStop){ stream.getTracks().forEach(t=>t.stop()); isRecording=false; return; }
         currentStream = stream;
         await new Promise(r => setTimeout(r, 150));
         if(pendingStop){ stream.getTracks().forEach(t=>t.stop()); isRecording=false; return; }
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+        const mimeType = preferredRecorderMime();
         mediaRecorder = new MediaRecorder(stream, { mimeType: mimeType, audioBitsPerSecond: 128000 });
         chunks = [];
         mediaRecorder.ondataavailable = e => { if(e.data && e.data.size > 0) chunks.push(e.data); };
@@ -1411,7 +2751,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('recDebug').style.color = '#f59e0b';
             return;
           }
-          setTimeout(() => sendAudio(lastPlayOn, deviceId), 80);
+          setTimeout(function(){
+            sendAudio(lastPlayOn, deviceId);
+            if (document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) setTimeout(function(){ startWakeRecorder(); }, 400);
+          }, 80);
         };
         mediaRecorder.onerror = (e) => {
           clearAllIntervals();
@@ -1477,14 +2820,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
     }
     function sendAudio(playOn, outDeviceId){
+      wakeListenPending = false;
+      wakeQueuedBlob = null;
+      wakeAudioInFlight = false;
       if(!chunks.length || !ws || ws.readyState !== WebSocket.OPEN){
         document.getElementById('recDebug').textContent = 'Errore: '+(!chunks.length ? 'nessun audio' : 'WebSocket chiuso');
         document.getElementById('recDebug').style.color = '#dc2626';
         return;
       }
-      const recMime = mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : 'audio/webm';
+      const recMime = mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : preferredRecorderMime();
       const blob = new Blob(chunks, {type: recMime});
-      if(blob.size < 2000){
+      if(blob.size < WS_AUDIO_MIN_BYTES){
         document.getElementById('recDebug').textContent = 'Audio troppo corto ('+(blob.size/1024).toFixed(1)+' KB). Tieni premuto 1-2 secondi.';
         document.getElementById('recDebug').style.color = '#f59e0b';
         btn.disabled = false;
@@ -1493,17 +2839,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const sizeKb = (blob.size/1024).toFixed(1);
       document.getElementById('recDebug').textContent = 'Invio '+sizeKb+' KB...';
       document.getElementById('recDebug').style.color = '#3b82f6';
-      document.getElementById('result').innerHTML = '<div style="color:#3b82f6;">Elaborazione...</div>';
+      document.getElementById('result').innerHTML = '<div style="color:#3b82f6;">Elaborazione…</div>';
       btn.disabled = true;
+      startThinkingFeedback();
       const fr = new FileReader();
       fr.onload = () => {
-        const b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(fr.result)));
-        const msg = { type: 'audio', data: b64, play_on: playOn };
-        if(playOn === 'server' && outDeviceId != null) msg.device_id = outDeviceId;
-        ws.send(JSON.stringify(msg));
+        const b64 = arrayBufferToBase64(fr.result);
+        sendAudioOverWs(b64, recMime, { playOn: playOn, skipWake: true, deviceId: outDeviceId });
         chunks = [];
       };
       fr.readAsArrayBuffer(blob);
+    }
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(()=>{});
     }
   </script>
 </body>
@@ -1697,7 +3045,7 @@ LISTEN_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False):
+def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False, ssl_keyfile: str | None = None, ssl_certfile: str | None = None):
     if not HAS_FASTAPI:
         print("Installa: pip install fastapi uvicorn")
         return
@@ -1713,19 +3061,31 @@ def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False)
                 print("Su Jetson Orin NX esegui: sudo bash scripts/install_audio_jetson.sh")
                 print("Per ora: usa --no-audio-check per avviare comunque (dispositivi di rete).")
     import uvicorn
-    print(f"G1 Talk Module - http://{host}:{port}")
+    proto = "https" if ssl_keyfile else "http"
+    print(f"G1 Talk Module - {proto}://{host}:{port}")
     print("  Setup: /")
     print("  Ascolto Hey G1: /listen")
     print("  Parla (push): /local")
     print("  Client rete: /client")
-    uvicorn.run(app, host=host, port=port)
+    if ssl_keyfile:
+        print("  Da telefono (stessa rete): https://192.168.10.191:8081/client")
+    uvicorn.run(app, host=host, port=port, ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
 
 
 if __name__ == "__main__":
     import argparse
+    _cert_dir = Path(__file__).resolve().parent.parent / "config" / "certs"
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8081)
     p.add_argument("--no-audio-check", action="store_true", help="Avvia anche senza PortAudio (solo dispositivi di rete)")
+    p.add_argument("--ssl", action="store_true", help="Usa HTTPS (config/certs/). Per microfono da telefono.")
     args = p.parse_args()
-    run(args.host, args.port, skip_audio_check=args.no_audio_check)
+    keyfile = certfile = None
+    if args.ssl:
+        keyfile = _cert_dir / "key.pem"
+        certfile = _cert_dir / "cert.pem"
+        if not keyfile.exists() or not certfile.exists():
+            print("Certificati non trovati. Esegui: bash scripts/generate_ssl_cert.sh")
+            keyfile = certfile = None
+    run(args.host, args.port, skip_audio_check=args.no_audio_check, ssl_keyfile=str(keyfile) if keyfile else None, ssl_certfile=str(certfile) if certfile else None)

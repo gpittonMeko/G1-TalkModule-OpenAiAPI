@@ -1,0 +1,9 @@
+{
+  "che ore sono": "time",
+  "che ora è": "time",
+  "che ora e": "time",
+  "che tempo fa": "weather",
+  "che tempo": "weather",
+  "meteo": "weather",
+  "previsioni": "weather"
+}

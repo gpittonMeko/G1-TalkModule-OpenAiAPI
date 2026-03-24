@@ -1,13 +1,13 @@
 """
 Client Groq Whisper per Speech-to-Text.
 Alternativa veloce e gratuita: stesso modello Whisper, inferenza molto più rapida.
-Supporta webm, wav, mp3. API compatibile OpenAI.
 """
 
 from io import BytesIO
 from typing import Optional
 
 from talk_module.config import settings
+from talk_module.stt.audio_convert import prepare_audio_for_stt_api
 
 
 class GroqWhisperClient:
@@ -32,22 +32,13 @@ class GroqWhisperClient:
         language: Optional[str] = None,
         format_hint: Optional[str] = None,
     ) -> str:
-        """
-        Trascrive audio in testo. Accetta webm, wav, mp3.
-        Ritorna stringa vuota se audio vuoto o errore.
-        """
+        """Trascrive audio. Stessa pipeline di OpenAI: WAV 16k da qualsiasi container browser."""
         if not audio_bytes or len(audio_bytes) < 100:
             return ""
-        ext = format_hint or "webm"
-        if not format_hint:
-            if audio_bytes[:4] == b"RIFF":
-                ext = "wav"
-            elif audio_bytes[:3] == b"ID3" or (
-                len(audio_bytes) >= 2 and audio_bytes[:2] == b"\xff\xfb"
-            ):
-                ext = "mp3"
-        file = BytesIO(audio_bytes)
+        to_send, ext = prepare_audio_for_stt_api(audio_bytes, format_hint)
+        file = BytesIO(to_send)
         file.name = f"audio.{ext}"
+        file.seek(0)
         try:
             client = self._get_client()
             kwargs = {

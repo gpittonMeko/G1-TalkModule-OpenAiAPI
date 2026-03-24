@@ -1,0 +1,22 @@
+{
+  "name": "g1-talk",
+  "version": "1.0.0",
+  "description": "G1 Talk - Assistente vocale per robot Unitree G1",
+  "scripts": {
+    "build": "echo Built",
+    "cap:sync": "npx cap sync",
+    "cap:open": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/core": "^4.6.0",
+    "@capacitor/android": "^4.6.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^4.6.0"
+  },
+  "capacitor": {
+    "android": {
+      "allowMixedContent": true
+    }
+  }
+}

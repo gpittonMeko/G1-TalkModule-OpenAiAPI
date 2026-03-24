@@ -13,7 +13,8 @@ $pkgRoot = Join-Path $tempDir "G1-TalkModule-OpenAiAPI"
 if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
 New-Item -ItemType Directory -Path $pkgRoot -Force | Out-Null
 
-robocopy $root $pkgRoot /E /XD .git .venv venv env node_modules __pycache__ temp tmp dist voice-app .cursor /XF *.pyc *.log prova_audio_locale.html deploy.ps1 avvia_tutto.ps1 avvia_installer.ps1 avvia_installer.sh tunnel.ps1 crea_pacchetto.ps1 run.ps1 run.sh main.py /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+# capacitor-app: solo build Android su PC; sul G1 non serve (vedi scripts/prepara_pacchetto_completo_g1.ps1)
+robocopy $root $pkgRoot /E /XD .git .venv venv env node_modules __pycache__ temp tmp dist voice-app .cursor capacitor-app /XF *.pyc *.log prova_audio_locale.html deploy.ps1 avvia_tutto.ps1 avvia_installer.ps1 avvia_installer.sh tunnel.ps1 crea_pacchetto.ps1 run.ps1 run.sh main.py /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
 # Robocopy: 0=nothing, 1=ok, 2=extra, 8+=error
 if ($LASTEXITCODE -ge 8) { Write-Host "Errore robocopy: $LASTEXITCODE"; exit 1 }
 
@@ -43,6 +44,14 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path $pkgRoot -DestinationPath $zipPath -Force
 Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+
+# Esporta solo gli audio della soundboard in dist/soundboard_audio
+Push-Location $root
+python scripts/export_soundboard_audio.py 2>$null
+Pop-Location
+if (Test-Path (Join-Path $outDir "soundboard_audio")) {
+    Write-Host "  Audio soundboard: dist/soundboard_audio/" -ForegroundColor Gray
+}
 
 $size = (Get-Item $zipPath).Length / 1MB
 Write-Host ""

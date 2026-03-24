@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">G1 Talk</string>
+    <string name="title_activity_main">G1 Talk</string>
+    <string name="package_name">com.g1talk.app</string>
+    <string name="custom_url_scheme">com.g1talk.app</string>
+</resources>
