@@ -1,7 +1,9 @@
 # Avvia tutto: server + tunnel + apre il browser
 # Doppio click o: .\AVVIA.ps1
+# Jetson: $env:G1_SSH_HOST="unitree@192.168.123.164"; $env:G1_REMOTE_PATH="/home/unitree/G1-TalkModule-OpenAiAPI"
 
-$sshHost = "lab@192.168.10.191"
+$sshHost = if ($env:G1_SSH_HOST) { $env:G1_SSH_HOST } else { "lab@192.168.10.191" }
+$remote = if ($env:G1_REMOTE_PATH) { $env:G1_REMOTE_PATH } else { "/home/lab/G1-TalkModule-OpenAiAPI" }
 $url = "http://localhost:8081/client"
 
 Write-Host ""
@@ -10,7 +12,7 @@ Write-Host ""
 
 # 1. Riavvia server
 Write-Host "  [1] Server..." -NoNewline
-$r = ssh -o ConnectTimeout=20 $sshHost "bash /home/lab/G1-TalkModule-OpenAiAPI/scripts/restart_server.sh" 2>&1
+$r = ssh -o ConnectTimeout=20 $sshHost "bash '$remote/scripts/restart_server.sh'" 2>&1
 if ($r -match "OK:200") {
     Write-Host " OK" -ForegroundColor Green
 } else {

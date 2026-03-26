@@ -1,8 +1,10 @@
 #!/bin/bash
-# Riavvia G1 Talk Module sull'AI Accelerator
+# Riavvia G1 Talk Module (Jetson, AI Accelerator, ecc.)
 # HTTPS su 8081 (microfono da telefono). HTTP su 8080 reindirizza a HTTPS.
 
-cd /home/lab/G1-TalkModule-OpenAiAPI || exit 1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT" || exit 1
 pkill -f talk_module.web_app 2>/dev/null || true
 pkill -f http_redirect 2>/dev/null || true
 sleep 2

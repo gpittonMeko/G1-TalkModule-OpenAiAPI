@@ -2,6 +2,8 @@
 # G1 Talk Module - Installazione su Linux (Ubuntu/Debian, Jetson, Raspberry Pi)
 # Uso: bash install.sh [--no-audio]
 #   --no-audio  Salta installazione PortAudio (solo dispositivi web/ rete)
+# Su Ubuntu 20.04 con solo Python 3.8: installa 3.10 (vedi docs/INSTALLAZIONE.md) poi
+#   PYTHON=python3.10 bash install.sh
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,13 +14,20 @@ echo "  G1 Talk Module - Installazione"
 echo "=============================================="
 echo ""
 
-# Python
-if ! command -v python3 &>/dev/null; then
-    echo "ERRORE: Python 3 non trovato. Installa con: sudo apt install python3 python3-venv"
+# Python 3.10+ (PEP 585 / typing nel codice)
+PYTHON="${PYTHON:-python3}"
+if ! command -v "$PYTHON" &>/dev/null; then
+    echo "ERRORE: $PYTHON non trovato. Installa Python 3.10+ o imposta PYTHON= (vedi docs/INSTALLAZIONE.md)"
     exit 1
 fi
-PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-echo "[1/6] Python $PYVER: OK"
+if ! "$PYTHON" -c "import sys; assert sys.version_info >= (3,10)" 2>/dev/null; then
+    echo "ERRORE: Python 3.10+ richiesto (trovato $($PYTHON -c 'import sys; print(sys.version)'))."
+    echo "  Ubuntu 20.04 / Jetson: vedi docs/INSTALLAZIONE.md — Python su Jetson."
+    echo "  Poi: PYTHON=python3.10 bash install.sh"
+    exit 1
+fi
+PYVER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+echo "[1/6] Python $PYVER ($PYTHON): OK"
 
 # Dipendenze sistema
 echo ""
@@ -43,7 +52,7 @@ fi
 echo ""
 echo "[3/6] Virtual environment..."
 if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
+    "$PYTHON" -m venv .venv
     echo "      Creato .venv"
 else
     echo "      .venv esistente"

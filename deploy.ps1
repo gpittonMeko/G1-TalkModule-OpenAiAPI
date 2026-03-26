@@ -1,35 +1,69 @@
-# Deploy modifiche sull'AI Accelerator
+# Deploy modifiche sul server Linux (AI Accelerator, Jetson unitree, ecc.)
 # Uso: .\deploy.ps1
+# Override senza editare il file (PowerShell):
+#   $env:G1_SSH_HOST="unitree@192.168.123.164"
+#   $env:G1_REMOTE_PATH="/home/unitree/G1-TalkModule-OpenAiAPI"
+#   $env:G1_PUBLIC_IP="192.168.123.164"
+#   $env:G1_SSH_KEY="C:\path\to\id_ed25519_jetson"   # consigliato se non usi ssh-agent
+#   $env:G1_SKIP_OPENSSL="1"   # opzionale: salta generate_ssl_cert (se i certificati ci sono gia)
+#   .\deploy.ps1
+#
+# Se lo script "si ferma" su [1]: scp sta aspettando password o conferma host (primo collegamento).
+# Usa una chiave (-i / G1_SSH_KEY) o apri una finestra e accetta il fingerprint. BatchMode evita loop infiniti.
 
-$sshHost = "lab@192.168.10.191"
+$sshHost = if ($env:G1_SSH_HOST) { $env:G1_SSH_HOST } else { "lab@192.168.10.191" }
 $root = $PSScriptRoot
-$remote = "/home/lab/G1-TalkModule-OpenAiAPI"
+$remote = if ($env:G1_REMOTE_PATH) { $env:G1_REMOTE_PATH } else { "/home/lab/G1-TalkModule-OpenAiAPI" }
+$publicIp = if ($env:G1_PUBLIC_IP) { $env:G1_PUBLIC_IP } else { "192.168.10.191" }
+
+# Opzioni SSH comuni: timeout, niente prompt password in batch (fallisce subito se manca la chiave)
+$sshKeyArgs = @()
+if ($env:G1_SSH_KEY) {
+    $keyPath = $env:G1_SSH_KEY.Trim().Trim('"')
+    if (Test-Path -LiteralPath $keyPath) {
+        $sshKeyArgs = @("-i", $keyPath)
+    } else {
+        Write-Host "ATTENZIONE: G1_SSH_KEY non trovato: $keyPath" -ForegroundColor Yellow
+    }
+}
+$sshCommon = $sshKeyArgs + @(
+    "-o", "ConnectTimeout=15",
+    "-o", "BatchMode=yes",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=6",
+    "-o", "TCPKeepAlive=yes"
+)
 
 Write-Host "Deploy G1 Talk Module su $sshHost" -ForegroundColor Cyan
+if ($env:G1_SSH_KEY) { Write-Host "  Chiave: $($env:G1_SSH_KEY)" -ForegroundColor Gray }
 Write-Host ""
 
 # Copia file Python
 Write-Host "  [1] talk_module..." -NoNewline
-scp -o ConnectTimeout=10 `
+scp @sshCommon `
     "$root\talk_module\web_app.py" `
     "$root\talk_module\config.py" `
     "$root\talk_module\audio_robot_effect.py" `
     "$root\talk_module\quick_lookup.py" `
     "$root\talk_module\robot_actions.py" `
     "$root\talk_module\llm\openai_client.py" `
-    "${sshHost}:${remote}/talk_module/" 2>$null
-scp -o ConnectTimeout=10 "$root\talk_module\tts\openai_tts.py" "${sshHost}:${remote}/talk_module/tts/" 2>$null
-scp -o ConnectTimeout=10 `
+    "${sshHost}:${remote}/talk_module/"
+if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1a] codice $LASTEXITCODE (SSH/chiave/host?)" -ForegroundColor Red; exit $LASTEXITCODE }
+scp @sshCommon "$root\talk_module\tts\openai_tts.py" "${sshHost}:${remote}/talk_module/tts/"
+if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1b] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
+scp @sshCommon `
     "$root\talk_module\stt\fuzzy_correct.py" `
     "$root\talk_module\stt\audio_convert.py" `
     "$root\talk_module\stt\whisper_client.py" `
     "$root\talk_module\stt\groq_client.py" `
-    "${sshHost}:${remote}/talk_module/stt/" 2>$null
+    "${sshHost}:${remote}/talk_module/stt/"
+if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1c] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
 # Copia config (soundboard.json escluso: dati utente sul server, non sovrascrivere)
 Write-Host "  [2] config..." -NoNewline
-scp -o ConnectTimeout=10 `
+scp @sshCommon `
     "$root\config\knowledge.json" `
     "$root\config\robot_actions.json" `
     "$root\config\stt_config.json" `
@@ -37,30 +71,70 @@ scp -o ConnectTimeout=10 `
     "$root\config\run_sheet.json" `
     "$root\config\soundboard_script.json" `
     "$root\config\elenco_testi_soundboard.txt" `
-    "${sshHost}:${remote}/config/" 2>$null
+    "${sshHost}:${remote}/config/"
+if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [2] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
 Write-Host "  [2b] soundboard.json (audio, ~5MB)..." -NoNewline
-scp -C -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=120 "$root\config\soundboard.json" "${sshHost}:${remote}/config/"
+scp @sshCommon -C -o ServerAliveInterval=30 -o ServerAliveCountMax=120 "$root\config\soundboard.json" "${sshHost}:${remote}/config/"
 if ($LASTEXITCODE -eq 0) { Write-Host " OK" -ForegroundColor Green } else { Write-Host " ERRORE scp $LASTEXITCODE" -ForegroundColor Red }
 
 # Installa dipendenze (duckduckgo-search per quick_lookup)
-Write-Host "  [3] Dipendenze..." -NoNewline
-ssh -o ConnectTimeout=15 $sshHost "cd $remote && .venv/bin/pip install -q ddgs imageio-ffmpeg" 2>$null
+Write-Host "  [3] Dipendenze (max 180s)..." -NoNewline
+ssh @sshCommon $sshHost "cd $remote && timeout 180 .venv/bin/pip install -q ddgs imageio-ffmpeg"
+if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE pip $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
-# Scripts e certificati SSL
-Write-Host "  [3b] Scripts + SSL..." -NoNewline
-scp -o ConnectTimeout=10 "$root\scripts\restart_server.sh" "$root\scripts\generate_ssl_cert.sh" "$root\scripts\http_redirect.py" "${sshHost}:${remote}/scripts/" 2>$null
-ssh -o ConnectTimeout=15 $sshHost "cd $remote && bash scripts/generate_ssl_cert.sh" 2>$null
+# Scripts e certificati SSL (3 sotto-passi: puo richiedere 15-40 s su rete lenta / Jetson)
+Write-Host "  [3b] Scripts + SSL" -ForegroundColor Cyan
+Write-Host "       scp (restart, generate_ssl_cert, http_redirect)..." -NoNewline
+scp @sshCommon "$root\scripts\restart_server.sh" "$root\scripts\generate_ssl_cert.sh" "$root\scripts\http_redirect.py" "${sshHost}:${remote}/scripts/"
+if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [3b] $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
+# Windows spesso salva .sh con CRLF: su bash Linux rompe "set" e path. Normalizza sul server.
+Write-Host "       sed CRLF su script..." -NoNewline
+# Bash vuole 's/\r$//': in PowerShell "$" dentro le doppie virgolette rompe il comando (sed resta aperto → sembra che aspetti Invio).
+ssh @sshCommon $sshHost ('cd ' + $remote + ' && sed -i ''s/\r$//'' scripts/*.sh 2>/dev/null; true')
+Write-Host " OK" -ForegroundColor Green
+# Certificati SSL: non rilanciare openssl se i file ci sono gia (evita "blocco" percepito fino a 120s)
+if ($env:G1_SKIP_OPENSSL -eq "1") {
+    Write-Host "       openssl: saltato (G1_SKIP_OPENSSL=1)" -ForegroundColor Gray
+} else {
+    Write-Host "       openssl certificati..." -NoNewline
+    ssh @sshCommon -T $sshHost "cd $remote && test -f config/certs/key.pem && test -f config/certs/cert.pem"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host " OK (gia presenti, skip openssl)" -ForegroundColor Green
+    } else {
+        Write-Host " creazione (max 90s, niente output fino a fine)..." -ForegroundColor DarkGray
+        ssh @sshCommon -T $sshHost "cd $remote && (command -v timeout >/dev/null 2>&1 && timeout 90 env TALK_PUBLIC_HOST=$publicIp bash scripts/generate_ssl_cert.sh || env TALK_PUBLIC_HOST=$publicIp bash scripts/generate_ssl_cert.sh)"
+        $certCode = $LASTEXITCODE
+        if ($certCode -eq 124) {
+            Write-Host " TIMEOUT openssl dopo 90s. Usa certificati esistenti o: `$env:G1_SKIP_OPENSSL='1'" -ForegroundColor Yellow
+        } elseif ($certCode -ne 0) {
+            Write-Host " ERRORE generate_ssl_cert $certCode" -ForegroundColor Red
+            exit $certCode
+        } else {
+            Write-Host "       openssl: OK" -ForegroundColor Green
+        }
+    }
+}
 
 # Riavvia server (timeout 50s: script ~2+8+5*2=20s max)
 Write-Host "  [4] Restart server..." -ForegroundColor Gray
+$keyPathResolved = if ($env:G1_SSH_KEY) { $env:G1_SSH_KEY.Trim().Trim('"') } else { "" }
 $job = Start-Job -ScriptBlock {
-    param($h, $r)
-    ssh -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=10 -T $h "cd $r && timeout 45 bash scripts/restart_server.sh"
-} -ArgumentList $sshHost, $remote
+    param($h, $r, $keyPath)
+    $args = @(
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=10",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-T"
+    )
+    if ($keyPath -and (Test-Path -LiteralPath $keyPath)) { $args = @("-i", $keyPath) + $args }
+    & ssh @args $h "cd $r && timeout 45 bash scripts/restart_server.sh"
+} -ArgumentList $sshHost, $remote, $keyPathResolved
 $null = Wait-Job $job -Timeout 50
 $r = Receive-Job $job
 Stop-Job $job -ErrorAction SilentlyContinue
@@ -74,8 +148,8 @@ if ($r -match "OK:200") {
 
 Write-Host ""
 Write-Host "  Da telefono (stessa rete):" -ForegroundColor Green
-Write-Host "    http://192.168.10.191:8080/client  (redirect a HTTPS)" -ForegroundColor White
-Write-Host "    oppure https://192.168.10.191:8081/client" -ForegroundColor White
+Write-Host "    http://${publicIp}:8080/client  (redirect a HTTPS)" -ForegroundColor White
+Write-Host "    oppure https://${publicIp}:8081/client" -ForegroundColor White
 Write-Host "  Al primo accesso: Avanzate -> Procedi (certificato)" -ForegroundColor Yellow
 Write-Host "  Da PC (tunnel): http://localhost:8081/client" -ForegroundColor Cyan
 Write-Host "  Ctrl+F5 per evitare cache" -ForegroundColor Gray
