@@ -821,15 +821,13 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.post("/api/soundboard")
     def api_save_soundboard(data: dict = Body(...)):
-        """Salva slot: audio_base64 = robot; audio_base64_clean = TTS/registrazione senza effetto server."""
+        """Salva slot: audio naturale (TTS/registrazione); audio_base64 e audio_base64_clean allineati."""
         global _soundboard_cache
         slot = int(data.get("slot", 0))
         if slot < 0 or slot >= SOUNDBOARD_SLOT_COUNT:
             return {"ok": False, "error": f"slot 0-{SOUNDBOARD_SLOT_COUNT - 1}"}
         audio_b64 = str(data.get("audio_base64", ""))
         fmt = str(data.get("format", "webm"))
-        if audio_b64 and fmt != "wav":
-            audio_b64, fmt = _apply_robot_effect(audio_b64, fmt)
         clean_b64 = str(data.get("audio_base64_clean", "")) if "audio_base64_clean" in data else None
         clean_fmt = str(data.get("format_clean", "mp3") or "mp3")
         slots = _load_soundboard()
@@ -837,6 +835,9 @@ self.addEventListener('activate', () => self.clients.claim());
             prev = slots[slot] if slot < len(slots) else {}
             clean_b64 = str(prev.get("audio_base64_clean") or "")
             clean_fmt = str(prev.get("format_clean") or "mp3")
+        elif not clean_b64 and audio_b64:
+            clean_b64 = audio_b64
+            clean_fmt = fmt
         txt = str(data.get("text", "")).strip()[:SOUNDBOARD_TEXT_MAX_LEN] or f"Comando {slot+1}"
         slots[slot] = {
             "icon": str(data.get("icon", "🎤"))[:4],
@@ -904,14 +905,13 @@ self.addEventListener('activate', () => self.clients.claim());
     def api_soundboard_play_local(data: dict = Body(...)):
         """Riproduce uno slot audio sulla cassa del Jetson (sounddevice + device_id dal setup)."""
         slot_idx = int(data.get("slot", -1))
-        mode = str(data.get("mode", "robot") or "robot").lower()
         slots = _load_soundboard()
         if slot_idx < 0 or slot_idx >= len(slots):
             raise HTTPException(400, "Slot non valido")
         s = slots[slot_idx] or {}
         b64: Optional[str] = None
         fmt = "mp3"
-        if mode == "clean" and s.get("audio_base64_clean") and len(str(s.get("audio_base64_clean", ""))) > 50:
+        if s.get("audio_base64_clean") and len(str(s.get("audio_base64_clean", ""))) > 50:
             b64 = str(s["audio_base64_clean"])
             fmt = str(s.get("format_clean") or "mp3")
         elif s.get("audio_base64") and len(str(s.get("audio_base64", ""))) > 50:
@@ -950,7 +950,7 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.post("/api/soundboard-synth")
     def api_soundboard_synth(data: dict = Body(...)):
-        """TTS dal testo + effetto robotico, per popolare uno slot senza registrare."""
+        """TTS dal testo (voce naturale), per popolare uno slot senza registrare."""
         text = str(data.get("text", "")).strip()[:SOUNDBOARD_TEXT_MAX_LEN]
         if not text:
             return {"ok": False, "error": "Testo vuoto"}
@@ -963,11 +963,10 @@ self.addEventListener('activate', () => self.clients.claim());
             if not raw:
                 return {"ok": False, "error": "TTS non ha prodotto audio"}
             b64_clean = base64.b64encode(raw).decode()
-            b64_robot, fmt = _apply_robot_effect(b64_clean, "wav")
             return {
                 "ok": True,
-                "audio_base64": b64_robot,
-                "format": fmt,
+                "audio_base64": b64_clean,
+                "format": "wav",
                 "audio_base64_clean": b64_clean,
                 "format_clean": "wav",
             }
@@ -2017,6 +2016,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     .section { display: none; }
     .section.active { display: block; }
     #section-soundboard.section.active { display: block !important; }
+    #section-robot.section.active { display: flex !important; flex-direction: column; min-height: calc(100vh - 100px); }
+    #robotControlFrame { flex: 1; width: 100%; min-height: 360px; border: 0; border-radius: 12px; background: #0f1115; }
     h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 4px; }
     .step {
       background: rgba(255,255,255,0.03);
@@ -2221,6 +2222,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <a href="#" data-section="parla"><span class="icon">&#127908;</span> Parla</a>
       <a href="#" data-section="knowledge"><span class="icon">&#128214;</span> Knowledge</a>
       <a href="#" data-section="devices"><span class="icon">&#128268;</span> Dispositivi</a>
+      <a href="#" data-section="robot"><span class="icon">&#127918;</span> Robot (G1)</a>
       <a href="#" data-section="info"><span class="icon">&#8505;</span> Info</a>
     </nav>
   </aside>
@@ -2231,8 +2233,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <button type="button" class="client-tab" data-section="parla" onclick="return window.g1ActivateClientSection('parla')"><span class="ct-ic" aria-hidden="true">&#127908;</span><span>Parla</span></button>
       <button type="button" class="client-tab" data-section="knowledge" onclick="return window.g1ActivateClientSection('knowledge')"><span class="ct-ic" aria-hidden="true">&#128214;</span><span>Know</span></button>
       <button type="button" class="client-tab" data-section="devices" onclick="return window.g1ActivateClientSection('devices')"><span class="ct-ic" aria-hidden="true">&#128268;</span><span>I/O</span></button>
+      <button type="button" class="client-tab" data-section="robot" onclick="return window.g1ActivateClientSection('robot')"><span class="ct-ic" aria-hidden="true">&#127918;</span><span>Robot</span></button>
       <button type="button" class="client-tab" data-section="info" onclick="return window.g1ActivateClientSection('info')"><span class="ct-ic" aria-hidden="true">&#8505;</span><span>Info</span></button>
-      <a href="/robot-control" class="client-tab" style="text-decoration:none;"><span class="ct-ic" aria-hidden="true">&#127918;</span><span>Robot</span></a>
     </nav>
     <script>
     (function(){
@@ -2254,6 +2256,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         nodes = document.querySelectorAll('#sidebar nav a');
         for (i = 0; i < nodes.length; i++) nodes[i].classList.toggle('active', nodes[i].getAttribute('data-section') === sec);
         try { window.scrollTo(0, 0); } catch (e) {}
+        if (sec === 'robot') {
+          var rf = document.getElementById('robotControlFrame');
+          if (rf) { rf.src = location.origin + '/robot-control'; }
+        }
         setTimeout(function(){
           if ((sec === 'soundboard' || sec === 'parla') && navigator.mediaDevices) {
             var o = document.getElementById('sbOutput');
@@ -2267,7 +2273,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </script>
     <section id="section-soundboard" class="section active">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Soundboard</h2>
-  <p class="hint" style="margin-bottom:8px;"><strong>Predefinito: cassa del robot</strong> (uscita audio sulla Jetson). Serve setup <code>/</code> con altoparlante <em>locale</em> salvato. «Browser» = solo per provare l’audio sul PC/telefono. <strong>Voce</strong> Robot o Naturale sotto.</p>
+  <p class="hint" style="margin-bottom:8px;"><strong>Predefinito: cassa del robot</strong> (uscita audio sulla Jetson). Serve setup <code>/</code> con altoparlante <em>locale</em> salvato. «Browser» = audio su questo telefono/PC. <strong>Voce:</strong> solo TTS / registrazione naturale.</p>
   <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     <label style="font-size:12px;color:#9ca3af;">Uscita audio:</label>
     <select id="sbPlayDest" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;min-width:220px;">
@@ -2278,18 +2284,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <select id="sbOutput" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;min-width:180px;">
       <option value="default">Predefinito</option>
     </select>
-    <label style="font-size:12px;color:#9ca3af;">Voce:</label>
-    <select id="sbPlayMode" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;min-width:140px;">
-      <option value="robot">Robot (effetto)</option>
-      <option value="clean">Naturale (TTS pulito)</option>
-    </select>
     <button type="button" id="sbOutputRefresh" style="padding:6px 12px;font-size:12px;background:rgba(255,255,255,0.08);color:#9ca3af;border:1px solid rgba(255,255,255,0.1);border-radius:8px;cursor:pointer;">Aggiorna</button>
   </div>
   <p id="soundboardLoadErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;grid-column:1/-1;"></p>
   <div id="soundboardScroll">
   <div id="soundboardGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;"></div>
   </div>
-  <p class="hint" style="margin-top:8px;font-size:11px;">Modifica (✏️): registra, importa, <b>Genera TTS dal testo</b>, icona. Effetto robotico in automatico (tranne WAV già processato).</p>
+  <p class="hint" style="margin-top:8px;font-size:11px;">Modifica (✏️): registra, importa, <b>Genera TTS dal testo</b>, icona. Audio sempre naturale.</p>
     <div class="quick-guide" id="quickGuide">
       <details>
         <summary>Come funziona (apri per la guida rapida)</summary>
@@ -2323,19 +2324,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           <button type="button" id="sbModalTts" style="padding:10px 16px;background:#8b5cf6;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;" title="Riprocessa con TTS">Voce TTS da audio</button>
           <button type="button" id="sbModalClear" style="padding:10px 16px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Rimuovi audio</button>
         </div>
-        <details style="margin-top:12px;font-size:12px;color:#9ca3af;" open>
-          <summary style="cursor:pointer;color:#a1a1aa;">Effetto robotico (regola i valori)</summary>
-          <div style="margin-top:8px;">
-            <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">Ring modulator (Hz) <span id="sbRingVal">115</span></label>
-            <input type="range" id="sbRing" min="50" max="250" value="115" style="width:100%;accent-color:#14b8a6;" />
-            <label style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">Bitcrusher (bit) <span id="sbBitVal">8</span></label>
-            <input type="range" id="sbBit" min="3" max="16" value="8" style="width:100%;accent-color:#14b8a6;" />
-            <label style="display:flex;align-items:center;gap:8px;margin:10px 0 6px;">Distorsione (gain) <span id="sbDistVal">2.5</span></label>
-            <input type="range" id="sbDist" min="0.5" max="6" step="0.1" value="2.5" style="width:100%;accent-color:#14b8a6;" />
-            <button type="button" id="sbModalReapply" style="margin-top:8px;padding:8px 14px;background:rgba(20,184,166,0.2);color:#14b8a6;border:1px solid #14b8a6;border-radius:8px;cursor:pointer;font-size:12px;">Riapplica effetto</button>
-            <p class="hint" style="margin-top:6px;font-size:11px;">Regola i valori poi Registra/Importa, oppure Riapplica se hai appena caricato audio.</p>
-          </div>
-        </details>
       </div>
       <div style="display:flex;gap:8px;margin-top:16px;">
         <button type="button" id="sbModalSave" style="flex:1;padding:12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Salva</button>
@@ -2489,7 +2477,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <li><code>G1-TalkModule-OpenAiAPI.zip</code> — solo installazione Linux sul G1 (<code>install.sh</code>)</li>
     </ul>
     <p style="margin:0 0 8px;">G1 Talk Module — assistente vocale per Unitree G1.</p>
-    <p class="hint" style="margin:0 0 16px;">Menu: <strong>Soundboard</strong> (frasi pronte), <strong>Tempi evento</strong>, <strong>Parla</strong> (Hey G1 / testo), <strong>Knowledge</strong>, <strong>Dispositivi</strong>. La guida sintetica è in cima alla pagina (riquadro verde).</p>
+    <p class="hint" style="margin:0 0 16px;">Menu: <strong>Soundboard</strong>, <strong>Tempi</strong>, <strong>Parla</strong>, <strong>Knowledge</strong>, <strong>Dispositivi</strong>, <strong>Robot</strong> (joystick + gesti G1 verso <code>192.168.123.161</code> da <code>.env</code>). Guida in cima alla pagina.</p>
     <p style="margin:0 0 8px;font-size:14px;"><b>Da telefono (stessa rete WiFi del server):</b></p>
     <p class="hint" style="margin:0 0 8px;">Nessun bridge. Apri (HTTPS per microfono):</p>
     <a href="http://192.168.10.191:8080/client" style="display:inline-block;padding:12px 18px;background:#14b8a6;color:#0c0e14;border-radius:10px;text-decoration:none;font-weight:600;font-size:15px;margin-bottom:4px;">192.168.10.191:8080/client</a>
@@ -2497,6 +2485,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <p style="margin:0 0 6px;font-size:13px;"><b>Da PC (rete diversa):</b></p>
     <p class="hint" style="margin:0;font-size:12px;">Tunnel SSH poi localhost:8081/client</p>
   </div>
+    </section>
+    <section id="section-robot" class="section">
+      <h2 style="font-size:1.2rem;margin:0 0 8px;">Robot G1 — Sport mode</h2>
+      <p class="hint" style="margin:0 0 12px;font-size:12px;">Joystick e gesti braccia: comandi al robot (default IP <code>192.168.123.161</code>, modificabile sotto). Il robot deve essere in sport mode (telecomando).</p>
+      <iframe id="robotControlFrame" title="Robot control" src="about:blank"></iframe>
     </section>
   </main>
   <header class="header">
@@ -2526,82 +2519,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       window.addEventListener('orientationchange', function(){ setTimeout(syncMainHeaderPad, 200); });
       if (window.visualViewport) window.visualViewport.addEventListener('resize', syncMainHeaderPad);
     })();
-    function audioBufferToWav(buffer){
-      const nc = buffer.numberOfChannels, sr = buffer.sampleRate, len = buffer.length;
-      const dataSize = len * nc * 2;
-      const arr = new ArrayBuffer(44 + dataSize);
-      const v = new DataView(arr);
-      let o = 0;
-      function w16(x){ v.setUint16(o, x, true); o+=2; }
-      function w32(x){ v.setUint32(o, x, true); o+=4; }
-      const s = (c)=>String.fromCharCode(c);
-      for(let i=0;i<4;i++) v.setUint8(o++, 'RIFF'.charCodeAt(i));
-      w32(36+dataSize);
-      for(let i=0;i<4;i++) v.setUint8(o++, 'WAVE'.charCodeAt(i));
-      for(let i=0;i<4;i++) v.setUint8(o++, 'fmt '.charCodeAt(i));
-      w32(16); w16(1); w16(nc); w32(sr); w32(sr*nc*2); w16(nc*2); w16(16);
-      for(let i=0;i<4;i++) v.setUint8(o++, 'data'.charCodeAt(i));
-      w32(dataSize);
-      const left = buffer.getChannelData(0);
-      const right = nc>1 ? buffer.getChannelData(1) : left;
-      for(let i=0;i<len;i++){
-        const L = Math.max(-1,Math.min(1,left[i]));
-        const R = nc>1 ? Math.max(-1,Math.min(1,right[i])) : L;
-        v.setInt16(o, L<0 ? L*0x8000 : L*0x7FFF, true); o+=2;
-        if(nc>1){ v.setInt16(o, R<0 ? R*0x8000 : R*0x7FFF, true); o+=2; }
-      }
-      return arr;
-    }
-    function getRobotParams(){ return { ring: parseInt(document.getElementById('sbRing').value)||115, bit: parseInt(document.getElementById('sbBit').value)||8, dist: parseFloat(document.getElementById('sbDist').value)||2.5 }; }
-    async function applyRobotEffect(arrayBuffer, mimeType, params){
-      params = params || getRobotParams();
-      try {
-        const ctx = new (window.AudioContext||window.webkitAudioContext)();
-        const buf = await ctx.decodeAudioData(arrayBuffer.slice(0));
-        const off = new OfflineAudioContext(buf.numberOfChannels, buf.length, buf.sampleRate);
-        const src = off.createBufferSource();
-        src.buffer = buf;
-        const lp = off.createBiquadFilter();
-        lp.type='lowpass'; lp.frequency.value=2800;
-        const hp = off.createBiquadFilter();
-        hp.type='highpass'; hp.frequency.value=200;
-        src.connect(lp); lp.connect(hp); hp.connect(off.destination);
-        src.start(0);
-        let out = await off.startRendering();
-        const sr = out.sampleRate;
-        const len = out.length;
-        const carrierFreq = params.ring;
-        const bitDepth = params.bit;
-        const gain = params.dist;
-        for (let ch = 0; ch < out.numberOfChannels; ch++) {
-          const d = out.getChannelData(ch);
-          for (let i = 0; i < len; i++) {
-            const t = i / sr;
-            const carrier = Math.sin(2 * Math.PI * carrierFreq * t);
-            let s = d[i] * carrier * gain;
-            s = Math.tanh(s);
-            const step = Math.pow(2, bitDepth);
-            s = Math.round(s * step) / step;
-            d[i] = Math.max(-1, Math.min(1, s));
-          }
-        }
-        return { base64: arrayBufferToBase64(audioBufferToWav(out)), format: 'wav' };
-      } catch(e) { return null; }
-    }
     function arrayBufferToBase64(buffer){
       const bytes = new Uint8Array(buffer);
       let binary = '';
       const chunk = 8192;
       for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
       return btoa(binary);
-    }
-    function base64ToArrayBuffer(b64){
-      try {
-        const bin = atob(String(b64||'').replace(/\\s/g,''));
-        const arr = new Uint8Array(bin.length);
-        for(let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
-        return arr.buffer;
-      } catch(_) { return null; }
     }
     (function(){
       var sidebar = document.getElementById('sidebar');
@@ -3610,14 +3533,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       });
     }
     function sbPlaySlot(s, slotIndex){
-      const mode = (document.getElementById('sbPlayMode') && document.getElementById('sbPlayMode').value) || 'robot';
       const destEl = document.getElementById('sbPlayDest');
       const dest = (destEl && destEl.value) || 'server';
       if (dest === 'server' && typeof slotIndex === 'number') {
         fetch('/api/soundboard-play-local', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ slot: slotIndex, mode: mode })
+          body: JSON.stringify({ slot: slotIndex })
         }).then(async function(r){
           const d = await r.json().catch(function(){ return {}; });
           if (!r.ok) {
@@ -3629,10 +3551,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       function playFromData(sd){
         let b64 = null, fmt = 'mp3';
-        if(mode==='clean' && sd.audio_base64_clean && sd.audio_base64_clean.length>50){ b64 = sd.audio_base64_clean; fmt = sd.format_clean||'mp3'; }
+        if(sd.audio_base64_clean && sd.audio_base64_clean.length>50){ b64 = sd.audio_base64_clean; fmt = sd.format_clean||'mp3'; }
         else if(sd.audio_base64 && sd.audio_base64.length>50){ b64 = sd.audio_base64; fmt = sd.format||'mp3'; }
-        if(!b64 && mode==='clean' && sd.audio_base64 && sd.audio_base64.length>50){ b64 = sd.audio_base64; fmt = sd.format||'mp3'; }
-        if(!b64 && sd.audio_base64_clean && sd.audio_base64_clean.length>50){ b64 = sd.audio_base64_clean; fmt = sd.format_clean||'mp3'; }
         if(!b64) return;
         const a = new Audio('data:'+sbMimeForFmt(fmt)+';base64,'+b64);
         const sbOut = document.getElementById('sbOutput');
@@ -3668,9 +3588,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         const border = hasAudio ? '2px solid #14b8a6' : '1px solid rgba(255,255,255,0.08)';
         const bg = hasAudio ? 'rgba(20,184,166,0.08)' : 'rgba(255,255,255,0.05)';
         let badgeTitle = 'Vuoto', badgeHtml = '&#8212;';
-        if(hasR && hasN){ badgeTitle = 'Robot + Naturale'; badgeHtml = '<span style="color:#a78bfa;">R</span><span style="color:#14b8a6;">N</span>'; }
-        else if(hasR){ badgeTitle = 'Solo robot'; badgeHtml = 'R'; }
-        else if(hasN){ badgeTitle = 'Solo naturale'; badgeHtml = 'N'; }
+        if(hasAudio){ badgeTitle = 'Audio'; badgeHtml = '&#9654;'; }
         const badge = hasAudio ? '<span style="position:absolute;top:4px;right:4px;font-size:9px;font-weight:700;color:#14b8a6;" title="'+badgeTitle+'">'+badgeHtml+'</span>' : '<span style="position:absolute;top:4px;right:4px;font-size:10px;color:#71717a;" title="Vuoto">&#8212;</span>';
         const label = (s.text||'Comando '+(i+1)).replace(/\u003c/g,'&lt;').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
         return '<div id="sb'+i+'" role="button" tabindex="0" aria-label="Riproduci slot '+(i+1)+'" style="position:relative;display:flex;flex-direction:column;align-items:center;padding:8px;background:'+bg+';border-radius:10px;cursor:pointer;border:'+border+';min-height:88px;touch-action:manipulation;-webkit-tap-highlight-color:rgba(20,184,166,0.2);">'+badge+'<span style="font-size:22px;margin-bottom:4px;pointer-events:none;">'+(s.icon||sbIconAt(i))+'</span><span class="sb-slot-text" style="font-size:10px;color:#9ca3af;text-align:center;max-width:100%;pointer-events:none;">'+label+'</span><button type="button" onclick="event.stopPropagation();editSoundboard('+i+')" style="margin-top:4px;padding:8px 10px;font-size:10px;background:rgba(255,255,255,0.1);color:#9ca3af;border:none;border-radius:4px;cursor:pointer;touch-action:manipulation;">✏️</button></div>';
@@ -3739,9 +3657,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     function updateSbModalStatus(){
       const st = document.getElementById('sbModalAudioStatus');
       if(!st) return;
-      const r = sbEditAudio ? '<span style="color:#14b8a6;">Robot</span> '+Math.round((sbEditAudio.length||0)/1024)+' KB' : '<span style="color:#71717a;">Robot -</span>';
-      const n = sbEditAudioClean ? '<span style="color:#a78bfa;">Naturale</span> '+Math.round((sbEditAudioClean.length||0)/1024)+' KB' : '<span style="color:#71717a;">Naturale -</span>';
-      st.innerHTML = '&#128266; '+r+' · '+n;
+      const kb = sbEditAudio ? Math.round((sbEditAudio.length||0)/1024) : 0;
+      st.innerHTML = sbEditAudio ? '&#128266; <span style="color:#14b8a6;">Audio naturale</span> '+kb+' KB' : '&#128266; <span style="color:#71717a;">Nessun audio</span>';
     }
     function editSoundboard(idx){
       sbEditIdx = idx;
@@ -3792,8 +3709,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         const r = await fetch('/api/soundboard-synth', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
         const d = await r.json();
         if (d.ok) {
-          sbEditAudio = d.audio_base64; sbEditFmt = d.format||'mp3';
-          sbEditAudioClean = d.audio_base64_clean || null; sbEditFmtClean = d.format_clean || 'mp3';
+          sbEditAudio = d.audio_base64; sbEditFmt = d.format||'wav';
+          sbEditAudioClean = d.audio_base64_clean || d.audio_base64; sbEditFmtClean = d.format_clean || d.format || 'wav';
           sbEditAudioRaw = null; updateSbModalStatus();
         }
         else alert(d.error || 'Errore TTS');
@@ -3813,11 +3730,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           const blob = new Blob(chunks, {type: mr.mimeType});
           const fr = new FileReader();
           fr.onload = async ()=>{
-            sbEditAudioRaw = fr.result;
-            document.getElementById('sbModalAudioStatus').innerHTML = 'Applicazione effetto...';
-            sbEditAudioClean = arrayBufferToBase64(fr.result); sbEditFmtClean = 'webm';
-            const proc = await applyRobotEffect(fr.result, 'webm');
-            if (proc) { sbEditAudio = proc.base64; sbEditFmt = proc.format; } else { sbEditAudio = arrayBufferToBase64(fr.result); sbEditFmt = 'webm'; }
+            const b64 = arrayBufferToBase64(fr.result);
+            document.getElementById('sbModalAudioStatus').innerHTML = 'Registrazione pronta';
+            sbEditAudio = b64; sbEditFmt = 'webm';
+            sbEditAudioClean = b64; sbEditFmtClean = 'webm';
+            sbEditAudioRaw = null;
             updateSbModalStatus();
             document.getElementById('sbModalRecord').disabled = false;
           };
@@ -3832,31 +3749,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const ext = (f.name.split('.').pop()||'').toLowerCase();
       const mime = {mp3:'audio/mpeg',wav:'audio/wav',ogg:'audio/ogg',webm:'audio/webm',m4a:'audio/mp4'}[ext] || f.type || 'audio/mpeg';
       const buf = await f.arrayBuffer();
-      sbEditAudioRaw = buf;
-      document.getElementById('sbModalAudioStatus').innerHTML = 'Applicazione effetto...';
-      sbEditAudioClean = arrayBufferToBase64(buf); sbEditFmtClean = ext || 'mp3';
-      const proc = await applyRobotEffect(buf, mime.split('/')[1]||'mp3');
-      if (proc) { sbEditAudio = proc.base64; sbEditFmt = proc.format; } else { sbEditAudio = arrayBufferToBase64(buf); sbEditFmt = ext || 'mp3'; }
+      const b64 = arrayBufferToBase64(buf);
+      document.getElementById('sbModalAudioStatus').innerHTML = 'File caricato';
+      sbEditAudio = b64; sbEditFmt = ext || 'mp3';
+      sbEditAudioClean = b64; sbEditFmtClean = ext || 'mp3';
+      sbEditAudioRaw = null;
       updateSbModalStatus();
       e.target.value = '';
     };
     document.getElementById('sbModalClear').onclick = ()=>{ sbEditAudio = null; sbEditFmt = ''; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; sbEditAudioRaw = null; updateSbModalStatus(); };
-    document.getElementById('sbModalReapply').onclick = async ()=>{
-      if (!sbEditAudioRaw) { alert('Registra o importa prima un audio, poi regola i valori e clicca Riapplica.'); return; }
-      const btn = document.getElementById('sbModalReapply');
-      btn.disabled = true;
-      document.getElementById('sbModalAudioStatus').innerHTML = 'Riapplicazione effetto...';
-      const proc = await applyRobotEffect(sbEditAudioRaw, 'webm');
-      if (proc) { sbEditAudio = proc.base64; sbEditFmt = proc.format; }
-      updateSbModalStatus();
-      btn.disabled = false;
-    };
-    ['sbRing','sbBit','sbDist'].forEach(id=>{
-      const el = document.getElementById(id);
-      if (!el) return;
-      const spanId = id==='sbRing'?'sbRingVal':(id==='sbBit'?'sbBitVal':'sbDistVal');
-      el.oninput = ()=>{ const sp = document.getElementById(spanId); if (sp) sp.textContent = el.value; };
-    });
     document.getElementById('sbModalTts').onclick = async ()=>{
       if (!sbEditAudio || sbEditAudio.length < 100) { alert('Serve prima un audio (registra o importa)'); return; }
       const btn = document.getElementById('sbModalTts');
@@ -3866,13 +3767,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         const r = await fetch('/api/audio-to-robot-voice', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({audio_base64: sbEditAudio, format: sbEditFmt||'wav'})});
         const d = await r.json();
         if (d.ok) {
+          sbEditAudio = d.audio_base64;
+          sbEditFmt = 'mp3';
           sbEditAudioClean = d.audio_base64;
           sbEditFmtClean = 'mp3';
-          const ab = base64ToArrayBuffer(d.audio_base64);
-          if (ab) {
-            const proc = await applyRobotEffect(ab, 'mp3');
-            if (proc) { sbEditAudio = proc.base64; sbEditFmt = proc.format; } else { sbEditAudio = d.audio_base64; sbEditFmt = 'mp3'; }
-          } else { sbEditAudio = d.audio_base64; sbEditFmt = 'mp3'; }
           updateSbModalStatus();
         } else alert(d.error || 'Errore');
       } catch(e) { alert('Errore: '+e.message); }
