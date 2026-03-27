@@ -12,13 +12,24 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
-def _ffmpeg_executable() -> str:
+def _ffmpeg_candidates() -> list[str]:
+    """Ordine: bundle imageio-ffmpeg, poi PATH, poi percorsi tipici Linux (Jetson)."""
+    seen: set[str] = set()
+    out: list[str] = []
     try:
         import imageio_ffmpeg
 
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and exe not in seen:
+            seen.add(exe)
+            out.append(exe)
     except Exception:
-        return "ffmpeg"
+        pass
+    for p in ("ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
 
 
 def detect_container(audio_bytes: bytes) -> str:
@@ -74,40 +85,60 @@ def ffmpeg_bytes_to_wav(audio_bytes: bytes, input_suffix: str) -> Tuple[bytes, O
     input_suffix = (input_suffix or "webm").lstrip(".").lower()
     if input_suffix not in ("webm", "mp4", "m4a", "mp3", "ogg", "wav"):
         input_suffix = "webm"
+    path_in = ""
+    path_out = ""
     try:
-        ff = _ffmpeg_executable()
         with tempfile.NamedTemporaryFile(suffix=f".{input_suffix}", delete=False) as f_in:
             f_in.write(audio_bytes)
             path_in = f_in.name
         path_out = str(Path(path_in).with_suffix(".wav"))
-        try:
-            subprocess.run(
-                [
-                    ff,
-                    "-y",
-                    "-i",
-                    path_in,
-                    "-acodec",
-                    "pcm_s16le",
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    path_out,
-                ],
-                capture_output=True,
-                timeout=25,
-                check=True,
-            )
-            wav = Path(path_out).read_bytes()
-            if not _is_valid_wav(wav):
-                return audio_bytes, "output WAV non valido o troppo corto"
-            return wav, None
-        finally:
+        last_err: Optional[str] = None
+        for ff in _ffmpeg_candidates():
+            if not ff:
+                continue
+            try:
+                cp = subprocess.run(
+                    [
+                        ff,
+                        "-y",
+                        "-i",
+                        path_in,
+                        "-acodec",
+                        "pcm_s16le",
+                        "-ar",
+                        "16000",
+                        "-ac",
+                        "1",
+                        path_out,
+                    ],
+                    capture_output=True,
+                    timeout=45,
+                    check=False,
+                )
+                if cp.returncode != 0:
+                    err_txt = (cp.stderr or b"").decode("utf-8", errors="replace")[:900].strip()
+                    last_err = f"{ff} exit {cp.returncode}" + (f": {err_txt}" if err_txt else "")
+                    continue
+                wav = Path(path_out).read_bytes()
+                if not _is_valid_wav(wav):
+                    last_err = f"{ff}: output WAV non valido o troppo corto"
+                    continue
+                return wav, None
+            except FileNotFoundError:
+                last_err = f"{ff}: eseguibile non trovato"
+                continue
+            except subprocess.TimeoutExpired:
+                last_err = f"{ff}: timeout conversione"
+                continue
+            except Exception as e:
+                last_err = f"{ff}: {e}"
+                continue
+        return audio_bytes, last_err or "nessun ffmpeg ha funzionato"
+    finally:
+        if path_in:
             Path(path_in).unlink(missing_ok=True)
+        if path_out:
             Path(path_out).unlink(missing_ok=True)
-    except Exception as e:
-        return audio_bytes, str(e)
 
 
 def prepare_audio_for_stt_api(
@@ -146,7 +177,7 @@ def prepare_audio_for_stt_api(
 
     raise RuntimeError(
         "Audio dal browser non convertibile in WAV per STT. "
-        "pip install imageio-ffmpeg (include ffmpeg senza PATH Windows). "
+        "Sul server: pip install -U imageio-ffmpeg e/o sudo apt install -y ffmpeg. "
         f"Dettaglio: {last_err or 'conversione fallita'}"
     )
 
