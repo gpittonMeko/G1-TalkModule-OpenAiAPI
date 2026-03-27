@@ -9,26 +9,48 @@ from openai import OpenAI
 
 from talk_module.config import settings
 
-DEFAULT_SYSTEM = """Sei G1, robot umanoide Unitree, in veste di host a un evento aziendale in contesto McKinsey. Rispondi sempre in italiano.
+DEFAULT_SYSTEM = """Sei G1, robot umanoide Unitree, host digitale in sala durante un evento aziendale. Rispondi sempre in italiano.
 
-STILE: tono McKinsey — professionale, caloroso, chiaro, mai invadente. Risposte brevissime: massimo 15 parole salvo richiesta esplicita di dettaglio. Nessuna consulenza personalizzata, nessuna promessa su risultati o progetti. Non inventare fatti su persone o clienti.
+STILE: professionale, cordiale, chiaro e conciso. Risposte brevi: massimo 15 parole salvo richiesta esplicita di dettaglio. Non dare consulenza personalizzata né promesse su risultati. Non inventare fatti su persone, clienti o numeri non verificabili.
 
-NON fare mai: rimandare a «sala stampa», ufficio stampa o simili — sei tu l'host in sala; rispondi in prima persona con calore. Su storia McKinsey o centenario: racconto breve e sobrio (1926, rete globale, Italia/Milano se serve), mai scaricare l'ospite.
-
-CONTESTO EVENTO: accoglienza, orientamento (accredito, guardaroba, sala), transizioni di programma. Per messaggi scriptati ufficiali suggerisci la soundboard se appropriato.
+CONTESTO: accoglienza, orientamento (accredito, guardaroba, sala), indicazioni pratiche. Per messaggi ufficiali scriptati suggerisci la soundboard se appropriato.
 
 HARDWARE: Unitree G1 — umanoide bimanuale; interazione vocale e gesti; teleoperato quando serve.
 
-MCKINSEY (fatti generali, prudenza):
-- McKinsey & Company è un'organizzazione globale di consulenza strategica; fondata nel 1926 negli Stati Uniti.
-- Nel 2026 ricorre il centenario (100 anni): puoi accennarci con sobrietà se chiedono storia o anniversario, senza numeri operativi o claim non verificabili.
-- In Italia è presente con uffici (es. Milano) al servizio di imprese e istituzioni. Non citare clienti o dettagli interni se non noti.
+NON assumere che l'evento sia legato a una società di consulenza specifica, a una città (es. Milano) o a un anniversario aziendale, salvo che l'utente ne parli esplicitamente."""
 
-DGS: partner tecnologico romano su automazione e robotica, per contesto operativo del robot."""
+MCKINSEY_EVENT_SUPPLEMENT = """CONTESTO AGGIUNTIVO (solo perché la domanda riguarda McKinsey o società di consulenza strategica):
+- Sei host in un evento legato a McKinsey & Company. Tono professionale e caloroso, in linea con l'organizzazione.
+- McKinsey & Company è un'organizzazione globale di consulenza strategica; fondata nel 1926 negli Stati Uniti. In Italia ha uffici tra cui Milano. Non citare clienti o dettagli interni.
+- Su storia o centenario: racconto breve e sobrio se chiedono, senza scaricare l'ospite.
+- Non rimandare a «sala stampa» o ufficio stampa: rispondi in prima persona come host in sala.
+
+DGS: partner tecnologico su automazione e robotica, per contesto operativo del robot."""
 
 
-def _dynamic_event_context() -> str:
-    """Data odierna e nota evento (si aggiorna ad ogni richiesta, zero ritardo)."""
+def _needs_mckinsey_or_consulting_context(user_message: str) -> bool:
+    """True solo se il testo utente riguarda McKinsey o consulenza strategica in senso stretto."""
+    t = (user_message or "").lower()
+    if "mckinsey" in t or "mc kinsey" in t:
+        return True
+    needles = (
+        "società di consulenza",
+        "societa di consulenza",
+        "consulenza strategica",
+        "management consulting",
+        "firma di consulenza",
+        "firme di consulenza",
+        "organizzazione di consulenza",
+        "big three",
+        "bcg",
+        "bain &",
+        "bain and",
+    )
+    return any(n in t for n in needles)
+
+
+def _dynamic_event_context(user_message: str) -> str:
+    """Data odierna; nota evento McKinsey solo se la domanda è nel tema."""
     m_it = (
         "gennaio",
         "febbraio",
@@ -45,10 +67,13 @@ def _dynamic_event_context() -> str:
     )
     d = date.today()
     oggi = f"{d.day} {m_it[d.month - 1]} {d.year}"
-    return (
-        f"Riferimento temporale: oggi è {oggi}. "
-        "Se utile, il 31 marzo 2026 è una data simbolica nel calendario dell'evento legata al centenario McKinsey; non ripetere date a meno che non serva alla domanda."
-    )
+    parts = [f"Riferimento temporale: oggi è {oggi}."]
+    if _needs_mckinsey_or_consulting_context(user_message):
+        parts.append(
+            "Se pertinente alla domanda, il 31 marzo 2026 può essere una data simbolica nel calendario dell'evento McKinsey; "
+            "non ripetere date senza necessità."
+        )
+    return " ".join(parts)
 
 
 class LLMClient:
@@ -67,12 +92,15 @@ class LLMClient:
         """
         if not user_message or not user_message.strip():
             return ""
-        sys = system or self.system_prompt
-        sys = f"{sys}\n\n{_dynamic_event_context()}"
+        um = user_message.strip()
+        base = system or self.system_prompt
+        if _needs_mckinsey_or_consulting_context(um):
+            base = f"{base}\n\n{MCKINSEY_EVENT_SUPPLEMENT}"
+        sys = f"{base}\n\n{_dynamic_event_context(um)}"
         messages = [{"role": "system", "content": sys}]
-        for h in self.history[-4:]:  # ultimi 2 scambi
+        for h in self.history[-2:]:  # ultimo scambio (meno token / latenza)
             messages.append(h)
-        messages.append({"role": "user", "content": user_message.strip()})
+        messages.append({"role": "user", "content": um})
         try:
             kwargs = {
                 "model": self.model,
@@ -98,7 +126,7 @@ class LLMClient:
             resp = self.client.chat.completions.create(**kwargs)
             content = resp.choices[0].message.content
             if content:
-                self.history.append({"role": "user", "content": user_message.strip()})
+                self.history.append({"role": "user", "content": um})
                 self.history.append({"role": "assistant", "content": content})
             return (content or "").strip()
         except Exception as e:

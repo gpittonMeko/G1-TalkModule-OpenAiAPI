@@ -1,11 +1,10 @@
 """
 Routing azioni Unitree G1: comandi vocali -> SDK (Arm Actions, Locomotion).
 Config: config/robot_actions.json. Opzionale: UNITREE_ROBOT_IP in .env.
-Per SDK: pip install unitree_sdk2_python. Robot in sport mode (L1+A).
+Per SDK: unitree_sdk2py. Robot in sport mode (L1+A).
 
-G1 Arm Action API (unitree_sdk2):
-  - API 7106: ExecuteAction(action_id)
-  - API 7107: GetActionList()
+DDS: SDK recente usa ChannelFactoryInitialize(0, iface); le versioni vecchie
+usano ChannelFactory.Instance().Init(...) — vedi _ensure_dds_init().
 """
 
 import json
@@ -13,8 +12,37 @@ import os
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
+
+
+@dataclass(frozen=True)
+class RobotMatch:
+    """Match da config/robot_actions.json: risposta TTS + azione braccia e/o comando locomozione."""
+
+    response: str
+    arm_action: str = ""
+    loco_command: str = ""
+
+# Comandi che mettono il G1 in smorzamento / coppia zero o sequenze da caduta: richiedono confirmed=true (client «Sei sicuro?»).
+_LOCO_REQUIRES_CONFIRM = frozenset(
+    {
+        "damp",
+        "zero_torque",
+        "squat_up_damp",
+        "lie_standup",
+    }
+)
+
+
+def loco_command_requires_confirm(command: str) -> bool:
+    return (command or "").strip().lower() in _LOCO_REQUIRES_CONFIRM
+
+
+def _loco_log(msg: str) -> None:
+    print(f"[G1 loco {datetime.now().isoformat(timespec='seconds')}] {msg}", flush=True)
 
 ROBOT_ACTIONS_PATH = Path(__file__).resolve().parent.parent / "config" / "robot_actions.json"
 SCRIPT_ACTIONS_PATH = Path(__file__).resolve().parent.parent / "scripts" / "robot_action.sh"
@@ -38,22 +66,58 @@ G1_ARM_ACTIONS: dict[int, dict] = {
 }
 
 _NAME_TO_ID = {v["name"]: k for k, v in G1_ARM_ACTIONS.items()}
+_SHAKE_HAND_ID = _NAME_TO_ID.get("shake_hand", 27)
 
 _sdk_client = None
 _loco_client = None
 _dds_inited = False
+_bound_loco_service: Optional[str] = None
 _sdk_lock = threading.Lock()
 
 
 def _ensure_dds_init() -> None:
-    """Inizializza DDS una sola volta (condivisa tra braccia e locomozione G1)."""
+    """Inizializza DDS una sola volta (braccia + locomozione G1)."""
     global _dds_inited
     if _dds_inited:
         return
-    from unitree_sdk2py.core.channel import ChannelFactory
+    iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+    try:
+        from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
-    ChannelFactory.Instance().Init(0, "eth0")
+        ChannelFactoryInitialize(0, iface)
+    except ImportError:
+        from unitree_sdk2py.core.channel import ChannelFactory
+
+        ChannelFactory.Instance().Init(0, iface)
     _dds_inited = True
+
+
+def _ensure_loco_client_locked():
+    """
+    Con _sdk_lock acquisito. DDS già inizializzato.
+    Applica UNITREE_LOCO_SERVICE_NAME (default sport; su firmware vecchi prova loco).
+    """
+    global _loco_client, _bound_loco_service
+    import unitree_sdk2py.g1.loco.g1_loco_api as g1_api
+    import unitree_sdk2py.g1.loco.g1_loco_client as g1_lc_mod
+    from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+
+    name = (os.getenv("UNITREE_LOCO_SERVICE_NAME") or "sport").strip() or "sport"
+    g1_api.LOCO_SERVICE_NAME = name
+    if hasattr(g1_lc_mod, "LOCO_SERVICE_NAME"):
+        g1_lc_mod.LOCO_SERVICE_NAME = name
+    if _loco_client is not None and _bound_loco_service != name:
+        _loco_client = None
+    _bound_loco_service = name
+    if _loco_client is None:
+        _loco_client = LocoClient()
+        try:
+            to = float(os.getenv("UNITREE_LOCO_TIMEOUT", "10") or "10")
+        except ValueError:
+            to = 10.0
+        _loco_client.SetTimeout(to)
+        _loco_client.Init()
+    return _loco_client, name
 
 
 def _load_robot_actions() -> dict:
@@ -72,9 +136,27 @@ def get_arm_actions_list() -> list[dict]:
     return [{"id": k, **v} for k, v in sorted(G1_ARM_ACTIONS.items()) if k != 99]
 
 
-def check_robot_action(user_input: str) -> Optional[tuple[str, str]]:
+def _fuzzy_contains(text: str, pattern: str, threshold: float = 0.82) -> bool:
+    """True se text contiene pattern esattamente, oppure una sotto-sequenza molto simile."""
+    if pattern in text:
+        return True
+    pwords = pattern.split()
+    if len(pwords) < 2:
+        return False
+    from difflib import SequenceMatcher
+    plen = len(pattern)
+    margin = max(3, plen // 4)
+    for start in range(0, max(1, len(text) - plen + margin + 1)):
+        end = min(len(text), start + plen + margin)
+        window = text[start:end]
+        if SequenceMatcher(None, window, pattern).ratio() >= threshold:
+            return True
+    return False
+
+
+def check_robot_action(user_input: str) -> Optional[RobotMatch]:
     """
-    Se user_input contiene un pattern di robot_actions, ritorna (response, action_id).
+    Se user_input contiene (o fuzzy-contiene) un pattern di robot_actions, ritorna RobotMatch.
     Altrimenti None.
     """
     if not user_input or not user_input.strip():
@@ -82,11 +164,14 @@ def check_robot_action(user_input: str) -> Optional[tuple[str, str]]:
     txt = user_input.strip().lower()
     actions = _load_robot_actions()
     for pattern, cfg in sorted(actions.items(), key=lambda x: -len(x[0])):
-        if pattern and pattern in txt:
-            action_id = (cfg.get("action") or "").strip()
+        if not pattern:
+            continue
+        if _fuzzy_contains(txt, pattern):
+            arm = (cfg.get("action") or "").strip()
+            loco = (cfg.get("loco_command") or cfg.get("loco") or "").strip()
             response = (cfg.get("response") or "Ok").strip()
-            if action_id:
-                return response, action_id
+            if arm or loco:
+                return RobotMatch(response=response, arm_action=arm, loco_command=loco)
     return None
 
 
@@ -103,6 +188,34 @@ def _resolve_action_int(action_id) -> Optional[int]:
     return _NAME_TO_ID.get(s)
 
 
+def _schedule_shake_hand_release(robot_ip: str) -> None:
+    """Dopo la stretta di mano, torna in posa neutra (release braccia) dopo qualche secondo."""
+    try:
+        delay = float((os.getenv("G1_SHAKE_HAND_RELEASE_DELAY_SEC") or "5.5").strip() or "5.5")
+    except ValueError:
+        delay = 5.5
+    delay = max(2.0, min(delay, 30.0))
+
+    def _run():
+        time.sleep(delay)
+        try:
+            execute_robot_action("release_arm", robot_ip=robot_ip)
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _is_shake_hand_action(action_id) -> bool:
+    s = str(action_id).strip().lower()
+    if s == "shake_hand":
+        return True
+    try:
+        return int(s) == _SHAKE_HAND_ID
+    except ValueError:
+        return _resolve_action_int(action_id) == _SHAKE_HAND_ID
+
+
 def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tuple[bool, str]:
     """
     Esegue azione sul robot G1. Ritorna (success, message).
@@ -110,15 +223,20 @@ def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tupl
     Prova: 1) script scripts/robot_action.sh, 2) unitree_sdk2py G1ArmActionClient.
     """
     ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+    shake = _is_shake_hand_action(action_id)
 
     if SCRIPT_ACTIONS_PATH.exists() and os.access(SCRIPT_ACTIONS_PATH, os.X_OK):
         try:
             r = subprocess.run(
                 [str(SCRIPT_ACTIONS_PATH), str(action_id), ip],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True,
+                text=True,
+                timeout=15,
                 cwd=str(SCRIPT_ACTIONS_PATH.parent),
             )
             if r.returncode == 0:
+                if shake:
+                    _schedule_shake_hand_release(ip)
                 return True, "ok"
             return False, (r.stderr or r.stdout or "script fallito").strip()
         except Exception as e:
@@ -130,20 +248,16 @@ def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tupl
             return False, f"Teaching: crea scripts/robot_action.sh con logica per {action_id}"
         return False, f"Azione non riconosciuta: {action_id}"
 
-    return _do_arm_action(act_int, ip)
+    ok, msg = _do_arm_action(act_int, ip)
+    if ok and act_int == _SHAKE_HAND_ID:
+        _schedule_shake_hand_release(ip)
+    return ok, msg
 
 
 def _do_arm_action(action_id: int, robot_ip: str) -> tuple[bool, str]:
     """Esegue G1 Arm Action via SDK (API 7106 = ExecuteAction)."""
     global _sdk_client
     try:
-        from unitree_sdk2py.core.channel import ChannelFactorytInitialize
-        from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
-    except ImportError:
-        pass
-
-    try:
-        from unitree_sdk2py.core.channel import ChannelFactory
         from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
 
         with _sdk_lock:
@@ -178,21 +292,122 @@ def _do_arm_action_http(action_id: int, robot_ip: str) -> tuple[bool, str]:
         return False, "unitree_sdk2py non installato e HTTP fallback non disponibile. pip install unitree_sdk2_python"
 
 
-def send_move_command(vx: float, vy: float, vyaw: float, robot_ip: Optional[str] = None) -> tuple[bool, str]:
-    """G1: velocità via LocoClient.Move (vx avanti, vy laterale, vyaw rad/s)."""
-    ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
-    global _loco_client
-    try:
-        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
-
+def _loco_pulse_forward_back(vx: float, n_pulses: int = 2) -> tuple[bool, str]:
+    """Due (o n) impulsi di marcia senza tenere _sdk_lock durante sleep."""
+    parts: list[str] = []
+    svc_name = ""
+    for i in range(n_pulses):
         with _sdk_lock:
             _ensure_dds_init()
-            if _loco_client is None:
-                _loco_client = LocoClient()
-                _loco_client.SetTimeout(10.0)
-                _loco_client.Init()
-            _loco_client.Move(float(vx), float(vy), float(vyaw))
-        return True, "ok"
+            lc, svc_name = _ensure_loco_client_locked()
+            rc = lc.SetVelocity(float(vx), 0.0, 0.0, 0.58)
+        parts.append(f"pulse{i + 1} rc={rc}")
+        if rc != 0:
+            return False, _loco_rpc_message(rc, "loco_pulse") + " | " + "; ".join(parts)
+        time.sleep(0.62)
+    with _sdk_lock:
+        _ensure_dds_init()
+        lc, svc_name = _ensure_loco_client_locked()
+        rz = lc.SetVelocity(0.0, 0.0, 0.0, 0.35)
+    parts.append(f"stop rc={rz}")
+    msg = "; ".join(parts) + f" svc={svc_name}"
+    _loco_log(f"loco_pulse vx={vx} {msg}")
+    return True, msg
+
+
+def _loco_spin_inplace_macro() -> tuple[bool, str]:
+    try:
+        steps = max(8, min(80, int((os.getenv("G1_SPIN_STEPS") or "34").strip() or "34")))
+    except ValueError:
+        steps = 34
+    try:
+        vyaw = float((os.getenv("G1_SPIN_VYAW") or "0.92").strip() or "0.92")
+    except ValueError:
+        vyaw = 0.92
+    try:
+        dt = float((os.getenv("G1_SPIN_DT") or "0.2").strip() or "0.2")
+    except ValueError:
+        dt = 0.2
+    parts: list[str] = []
+    svc_name = ""
+    for i in range(steps):
+        with _sdk_lock:
+            _ensure_dds_init()
+            lc, svc_name = _ensure_loco_client_locked()
+            rc = lc.SetVelocity(0.0, 0.0, vyaw, dt + 0.06)
+        if rc != 0:
+            return False, _loco_rpc_message(rc, "spin_inplace") + " | " + "; ".join(parts)
+        parts.append(f"s{i} rc={rc}")
+        time.sleep(dt)
+    with _sdk_lock:
+        _ensure_dds_init()
+        lc, svc_name = _ensure_loco_client_locked()
+        rz = lc.SetVelocity(0.0, 0.0, 0.0, 0.35)
+    msg = f"spin steps={steps} vyaw={vyaw} stop_rc={rz} svc={svc_name}"
+    _loco_log(f"spin_inplace {msg}")
+    return True, msg
+
+
+def _loco_rpc_message(rc: int, op: str) -> str:
+    iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+    return (
+        f"{op} rifiutato (codice RPC {rc}, atteso 0). "
+        f"Sport mode (es. L1+A), DDS su {iface}. "
+        f"Se rc=0 ma non si muove: prova UNITREE_LOCO_SERVICE_NAME=loco. "
+        f"G1_READY_SEQUENCE=squat_then_high usa solo Squat2Up (706), senza Damp."
+    )
+
+
+def _run_ready_sequence(lc, svc_name: str) -> tuple[bool, str]:
+    iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+    seq = (os.getenv("G1_READY_SEQUENCE") or "standard").strip().lower()
+    skip_start = os.getenv("G1_READY_SKIP_START", "").lower() in ("1", "true", "yes")
+    UINT32_MAX = float((1 << 32) - 1)
+    parts: list[str] = []
+
+    def do_start() -> None:
+        if skip_start:
+            parts.append("Start skipped")
+            return
+        # Start() nell'SDK non ritorna il codice RPC; usiamo SetFsmId(200) come fa Start().
+        rs = lc.SetFsmId(200)
+        parts.append(f"Start(FSM200) rc={rs}")
+        time.sleep(0.2)
+
+    if seq in ("squat", "squat_then_high", "from_squat"):
+        # Mai Damp qui: FSM 1 = smorzamento passivo → rischio caduta se il robot non è già in squat.
+        ru = lc.SetFsmId(706)
+        parts.append(f"Squat2Up rc={ru}")
+        if ru != 0:
+            return False, _loco_rpc_message(ru, "Squat2StandUp (706)") + " | " + "; ".join(parts)
+        time.sleep(1.0)
+        do_start()
+    else:
+        do_start()
+
+    rh = lc.SetStandHeight(UINT32_MAX)
+    parts.append(f"StandH rc={rh}")
+    if rh != 0:
+        return False, _loco_rpc_message(rh, "Ready (HighStand)") + " | " + "; ".join(parts)
+    msg = "; ".join(parts) + f". iface={iface} svc={svc_name} seq={seq}"
+    _loco_log(f"ready OK {msg}")
+    return True, msg
+
+
+def send_move_command(vx: float, vy: float, vyaw: float, robot_ip: Optional[str] = None) -> tuple[bool, str]:
+    """G1: velocità via LocoClient SetVelocity (vx avanti, vy laterale, vyaw rad/s)."""
+    ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+    try:
+        with _sdk_lock:
+            _ensure_dds_init()
+            lc, svc = _ensure_loco_client_locked()
+            rc = lc.SetVelocity(float(vx), float(vy), float(vyaw), 1.0)
+            iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+            msg = f"Move rc={rc} iface={iface} svc={svc}"
+            _loco_log(msg)
+            if rc != 0:
+                return False, _loco_rpc_message(rc, "Move/SetVelocity") + f" | {msg}"
+        return True, msg
     except ImportError:
         pass
     except Exception as e:
@@ -210,17 +425,32 @@ def send_move_command(vx: float, vy: float, vyaw: float, robot_ip: Optional[str]
         return False, f"move HTTP fallback: {e}"
 
 
-def execute_g1_loco_command(command: str, robot_ip: Optional[str] = None) -> tuple[bool, str]:
+def execute_g1_loco_command(
+    command: str,
+    robot_ip: Optional[str] = None,
+    *,
+    confirmed: bool = False,
+    mode: Optional[int] = None,
+) -> tuple[bool, str]:
     """
-    Comandi locomozione G1 (LocoClient, es. g1_loco_client_example.py):
-      ready → HighStand (posa eretta / pronto)
-      walk  → Move(0.28, 0, 0) passo avanti (stesso schema SDK)
-      stop_walk → Move(0, 0, 0)
+    Locomozione G1 (unitree_sdk2 C++ / DeepWiki: balance 0=stand statico, 1=gait continuo).
+    Comandi: ready, squat_up (706), squat_down (FSM 2), stand_up_simple (FSM 4), sit (3),
+    locked_standing / continuous_gait, set_balance + mode, walk_slow / walk_fast, …
+    damp / zero_torque / squat_up_damp / lie_standup richiedono confirmed=True.
     """
     ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
     cmd = (command or "").strip().lower()
 
-    if SCRIPT_ACTIONS_PATH.exists() and os.access(SCRIPT_ACTIONS_PATH, os.X_OK):
+    if loco_command_requires_confirm(cmd) and not confirmed:
+        return (
+            False,
+            "Comando PERICOLOSO bloccato: serve conferma nel client («Sei sicuro?») che invia confirmed=true, "
+            "oppure conferma esplicita via API. Evita cadute e smorzamento involontario.",
+        )
+
+    def _run_loco_script() -> Optional[tuple[bool, str]]:
+        if not (SCRIPT_ACTIONS_PATH.exists() and os.access(SCRIPT_ACTIONS_PATH, os.X_OK)):
+            return None
         try:
             r = subprocess.run(
                 [str(SCRIPT_ACTIONS_PATH), f"loco_{cmd}", ip],
@@ -230,32 +460,197 @@ def execute_g1_loco_command(command: str, robot_ip: Optional[str] = None) -> tup
                 cwd=str(SCRIPT_ACTIONS_PATH.parent),
             )
             if r.returncode == 0:
-                return True, "ok"
-        except Exception:
-            pass
+                msg = (r.stdout or "").strip() or "ok"
+                return True, msg[:500]
+            err = (r.stderr or r.stdout or "script fallito").strip()
+            return False, err[:500]
+        except Exception as e:
+            return False, str(e)
 
-    global _loco_client
     try:
-        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient  # noqa: F401
+    except ImportError:
+        out = _run_loco_script()
+        if out is not None:
+            return out
+        return False, "Installa unitree_sdk2_python con modulo G1 LocoClient"
 
+    script_first = os.getenv("G1_LOCO_SCRIPT_FIRST", "").lower() in ("1", "true", "yes")
+    if script_first:
+        out = _run_loco_script()
+        if out is not None and out[0]:
+            return out
+
+    UINT32_MAX = float((1 << 32) - 1)
+    _macro_fwd = frozenset(
+        {"double_step_forward", "due_passi_avanti", "two_steps_forward", "due passi avanti"}
+    )
+    _macro_back = frozenset(
+        {"double_step_back", "due_passi_indietro", "two_steps_back", "due passi indietro"}
+    )
+    _macro_spin = frozenset({"spin_inplace", "gira_su_te_stesso", "turn_around", "ruotati", "gira"})
+    if cmd in _macro_fwd:
+        return _loco_pulse_forward_back(0.22, 2)
+    if cmd in _macro_back:
+        return _loco_pulse_forward_back(-0.2, 2)
+    if cmd in _macro_spin:
+        return _loco_spin_inplace_macro()
+
+    try:
         with _sdk_lock:
             _ensure_dds_init()
-            if _loco_client is None:
-                _loco_client = LocoClient()
-                _loco_client.SetTimeout(10.0)
-                _loco_client.Init()
+            lc, svc_name = _ensure_loco_client_locked()
             if cmd in ("ready", "pronto", "high_stand"):
-                _loco_client.HighStand()
-            elif cmd in ("low_stand", "basso"):
-                _loco_client.LowStand()
-            elif cmd in ("walk", "cammina", "avanti"):
-                _loco_client.Move(0.28, 0.0, 0.0)
-            elif cmd in ("stop_walk", "stop", "ferma"):
-                _loco_client.Move(0.0, 0.0, 0.0)
-            else:
-                return False, f"Comando locomozione sconosciuto: {command}"
-        return True, "ok"
-    except ImportError:
-        return False, "Installa unitree_sdk2_python con modulo G1 LocoClient"
+                ok, msg = _run_ready_sequence(lc, svc_name)
+                return ok, msg
+            if cmd in ("squat_up", "alzati", "squat2stand", "squat2standup"):
+                # Solo transizione SDK «da squat» (706). NON Damp: il Damp (1) manda in collasso se non sei in squat.
+                ru = lc.SetFsmId(706)
+                parts = [f"Squat2Up rc={ru}"]
+                if ru != 0:
+                    return False, _loco_rpc_message(ru, "Squat2StandUp") + " | " + "; ".join(parts)
+                iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+                msg = "; ".join(parts) + f". iface={iface} svc={svc_name} (no Damp)"
+                _loco_log(f"squat_up {msg}")
+                return True, msg
+            if cmd in ("squat_down", "stand_to_squat", "squat_fsm", "accosciati"):
+                # unitree_sdk2 C++: Squat() = FSM 2 (da stance in piedi verso squat). Diverso da 706 (Squat2StandUp).
+                rc = lc.SetFsmId(2)
+                msg = f"Squat FSM2 rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "Squat FSM2") + f" | {msg}"
+                return True, msg
+            if cmd in ("stand_up_simple", "standup_fsm", "stand_basic", "alzati_semplice"):
+                rc = lc.SetFsmId(4)
+                msg = f"StandUp FSM4 rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "StandUp FSM4") + f" | {msg}"
+                return True, msg
+            if cmd in ("sit", "siediti"):
+                rc = lc.SetFsmId(3)
+                msg = f"Sit FSM3 rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "Sit") + f" | {msg}"
+                return True, msg
+            if cmd in ("loco_start", "start_locomotion"):
+                rc = lc.SetFsmId(200)
+                msg = f"LocoStart FSM200 rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "LocoStart") + f" | {msg}"
+                return True, msg
+            if cmd in ("locked_standing", "balance_static", "regular_mode", "stand_balance"):
+                rc = lc.SetBalanceMode(0)
+                msg = f"BalanceMode(0 stand statico / «locked») rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "SetBalanceMode(0)") + f" | {msg}"
+                return True, msg
+            if cmd in ("continuous_gait", "gait_mode", "running_mode", "gait"):
+                rc = lc.SetBalanceMode(1)
+                msg = f"BalanceMode(1 gait continuo / «running») rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "SetBalanceMode(1)") + f" | {msg}"
+                return True, msg
+            if cmd in ("set_balance", "balance_mode_set"):
+                if mode is None:
+                    return (
+                        False,
+                        "Per set_balance serve nel JSON il campo mode: 0 = stand statico, 1 = gait continuo (doc. Unitree G1).",
+                    )
+                if mode not in (0, 1):
+                    return False, "set_balance: mode consentiti solo 0 oppure 1."
+                rc = lc.SetBalanceMode(mode)
+                msg = f"BalanceMode({mode}) rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, f"SetBalanceMode({mode})") + f" | {msg}"
+                return True, msg
+            if cmd == "squat_up_damp":
+                # Come esempio Unitree: Damp poi 706 — solo dopo conferma esplicita.
+                parts = []
+                rd = lc.SetFsmId(1)
+                parts.append(f"Damp rc={rd}")
+                time.sleep(0.5)
+                ru = lc.SetFsmId(706)
+                parts.append(f"Squat2Up rc={ru}")
+                if ru != 0:
+                    return False, _loco_rpc_message(ru, "Squat2StandUp") + " | " + "; ".join(parts)
+                iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+                msg = "; ".join(parts) + f". iface={iface} svc={svc_name}"
+                _loco_log(f"squat_up_damp {msg}")
+                return True, msg
+            if cmd == "damp":
+                rc = lc.SetFsmId(1)
+                msg = f"Damp rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "Damp") + f" | {msg}"
+                return True, msg
+            if cmd in ("zero_torque", "zero_coppia"):
+                rc = lc.SetFsmId(0)
+                msg = f"ZeroTorque rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "ZeroTorque") + f" | {msg}"
+                return True, msg
+            if cmd in ("lie_standup", "lie2stand"):
+                rc = lc.SetFsmId(702)
+                msg = f"Lie2StandUp rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "Lie2StandUp") + f" | {msg}"
+                return True, msg
+            if cmd in ("low_stand", "basso"):
+                rc = lc.SetStandHeight(0.0)
+                msg = f"StandH(low) rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "LowStand") + f" | {msg}"
+                return True, msg
+            if cmd in ("walk_slow", "cammina_lento", "passo_lento"):
+                rc = lc.SetVelocity(0.15, 0.0, 0.0, 1.0)
+                msg = f"WalkSlow vx=0.15 rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "WalkSlow") + f" | {msg}"
+                return True, msg
+            if cmd in ("walk_fast", "cammina_veloce", "passo_veloce", "run_step"):
+                rc = lc.SetVelocity(0.45, 0.0, 0.0, 1.0)
+                msg = f"WalkFast vx=0.45 rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "WalkFast") + f" | {msg}"
+                return True, msg
+            if cmd in ("walk", "cammina", "avanti"):
+                rc = lc.SetVelocity(0.28, 0.0, 0.0, 1.0)
+                msg = f"Walk vx=0.28 rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "Walk") + f" | {msg}"
+                return True, msg
+            if cmd in ("stop_walk", "stop", "ferma", "stand_still", "fermo_equilibrio"):
+                rc = lc.SetVelocity(0.0, 0.0, 0.0, 1.0)
+                msg = f"Vel0 rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "Stop/Vel0") + f" | {msg}"
+                return True, msg
+            if cmd in ("balance_stand", "bilanciamento"):
+                try:
+                    bm = mode if mode is not None else int((os.getenv("G1_BALANCE_MODE") or "0").strip() or "0")
+                except ValueError:
+                    bm = 0
+                rc = lc.SetBalanceMode(bm)
+                msg = f"BalanceMode({bm}) rc={rc} svc={svc_name}"
+                _loco_log(msg)
+                if rc != 0:
+                    return False, _loco_rpc_message(rc, "SetBalanceMode") + f" | {msg}"
+                return True, msg
+            return False, f"Comando locomozione sconosciuto: {command}"
     except Exception as e:
         return False, str(e)

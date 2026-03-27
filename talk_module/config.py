@@ -51,7 +51,7 @@ class Settings:
     whisper_prompt: str = _str(
         os.getenv("WHISPER_PROMPT"),
         "Italiano. L'utente può usare frasi lunghe: trascrivi tutto ciò che dici, senza tagliare a metà periodo. "
-        "Esempi: hey g1, buonasera, McKinsey, centenario. Solo parole effettivamente pronunciate.",
+        "Esempi: hey g1, buonasera, grazie. Solo parole effettivamente pronunciate.",
     )
     # STT fuzzy: threshold e min_word_length in config/stt_config.json (opzionale override via .env)
     stt_fuzzy_threshold: float = float(os.getenv("STT_FUZZY_THRESHOLD", "0.72"))

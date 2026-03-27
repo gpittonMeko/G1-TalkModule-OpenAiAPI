@@ -19,3 +19,4 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 # ffmpeg incluso (Windows/Linux) per WebM browser → WAV verso STT
 imageio-ffmpeg>=0.4.9
+tqdm>=4.66.0
