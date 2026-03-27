@@ -1,5 +1,26 @@
 {
-  "extra_phrases": ["prova prova prova", "hey g1", "hey markone"],
+  "extra_phrases": [
+    "prova prova prova",
+    "hey g1",
+    "hey markone",
+    "dammi la mano",
+    "dare la mano",
+    "dai la mano",
+    "stringi la mano",
+    "la mano",
+    "mano",
+    "saluta",
+    "fai ciao",
+    "fai due passi avanti",
+    "due passi avanti",
+    "fai due passi indietro",
+    "due passi indietro",
+    "vai indietro",
+    "gira su te stesso",
+    "girati",
+    "ruotati",
+    "fai un giro"
+  ],
   "threshold": 0.72,
   "min_word_length": 3,
   "use_italian_vocabulary": true

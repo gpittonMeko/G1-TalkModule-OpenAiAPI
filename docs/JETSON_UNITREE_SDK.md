@@ -71,7 +71,7 @@ cd ~/G1-TalkModule-OpenAiAPI
 
 ## Rete e runtime DDS
 
-`robot_actions.py` inizializza `ChannelFactory` su **`eth0`** (Ethernet verso il robot). In sport mode e rete corretta, LocoClient e arm client parlano al G1 via DDS. Se cambi interfaccia, va allineato il codice in `_ensure_dds_init()`.
+`robot_actions.py` chiama **`ChannelFactoryInitialize(0, iface)`** (API ufficiale SDK: il singleton non espone `.Instance()`). L’interfaccia di default è **`eth0`**; sovrascrivibile con env **`UNITREE_DDS_INTERFACE`**. In sport mode e rete corretta, LocoClient e arm client parlano al G1 via DDS.
 
 ---
 

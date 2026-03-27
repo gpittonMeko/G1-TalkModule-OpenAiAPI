@@ -8,13 +8,6 @@
       "fonte": "documento"
     },
     {
-      "icon": "📝",
-      "label_corto": "WELCOME — registrazione",
-      "testo_tts": "Date pure il vostro nome ai miei colleghi per essere registrati!",
-      "fase": "WELCOME",
-      "fonte": "documento"
-    },
-    {
       "icon": "🧥",
       "label_corto": "WELCOME — guardaroba",
       "testo_tts": "Grazie per esservi uniti a noi questa sera. Prego, il guardaroba è da questa parte.",
@@ -27,20 +20,6 @@
       "testo_tts": "Benvenuti nella zona welcome coffee. Accomodatevi pure e servitevi.",
       "fase": "COFFEE",
       "fonte": "runbook_fase"
-    },
-    {
-      "icon": "🤖",
-      "label_corto": "Tipologia 1 — presentazione G1",
-      "testo_tts": "Buonasera! Mi presento: sono G1! Non vedo l'ora che inizi l'evento!",
-      "fase": "INTERAZIONE_SINGOLA",
-      "fonte": "documento"
-    },
-    {
-      "icon": "😄",
-      "label_corto": "Tipologia 1 — scherzo / chiusura",
-      "testo_tts": "Scusate, sono il solito burlone! Grazie per essere qui, buon proseguimento!",
-      "fase": "INTERAZIONE_SINGOLA",
-      "fonte": "documento"
     },
     {
       "icon": "🎭",
@@ -57,86 +36,23 @@
       "fonte": "documento"
     },
     {
-      "icon": "🎬",
-      "label_corto": "SALA — fondo palco / coreografia",
-      "testo_tts": "A fondo palco vi mostreremo una breve sequenza di movimenti, saluti e coreografia: grazie per l'attenzione.",
-      "fase": "SALA_PRINCIPALE",
-      "fonte": "runbook_fase"
-    },
-    {
-      "icon": "🎤",
-      "label_corto": "STAMPA — G1_A colleghi",
-      "testo_tts": "Buon pomeriggio! Vi presento i miei colleghi, tutti umanoidi di ultimissima generazione. Siamo qui per assistervi durante l'evento, dopo aver fatto la conoscenza dei vostri ospiti.",
-      "fase": "STAMPA_GREEN",
-      "fonte": "documento"
-    },
-    {
-      "icon": "📚",
-      "label_corto": "STAMPA — storia McKinsey",
-      "testo_tts": "McKinsey & Company nasce negli Stati Uniti nel 1926 ed è cresciuta fino a diventare una rete globale di consulenti al fianco di leader e organizzazioni.",
-      "fase": "STAMPA_GREEN",
-      "fonte": "runbook_curiosita"
-    },
-    {
-      "icon": "🏢",
-      "label_corto": "STAMPA — sede Italia",
-      "testo_tts": "In Italia McKinsey è presente con una solida base, tra cui Milano, per affiancare imprese e istituzioni sul territorio.",
-      "fase": "STAMPA_GREEN",
-      "fonte": "runbook_curiosita"
-    },
-    {
-      "icon": "👥",
-      "label_corto": "SALA — interazione multipla",
-      "testo_tts": "Grazie a tutti per la calorosa accoglienza. Tra poco riprenderemo il programma: seguite pure le indicazioni del team in sala.",
-      "fase": "SALA_PRINCIPALE",
-      "fonte": "runbook_fase"
-    },
-    {
       "icon": "🔊",
       "label_corto": "SALA — messaggio inizio (operatore)",
-      "testo_tts": "Attenzione: tra pochi istanti inizia la parte centrale dell'evento. Vi preghiamo di accomodarvi e di tenere i telefoni in silenzioso, grazie.",
+      "testo_tts": "Tra pochi istanti inizia l'evento. Vi preghiamo di accomodarvi e di mettere i telefoni in modalità silenziosa.",
       "fase": "SALA_PRINCIPALE",
       "fonte": "runbook_soundboard_operatore"
     },
     {
-      "icon": "🤝",
-      "label_corto": "WELCOME — saluto singolo",
-      "testo_tts": "Piacere incontrarvi! Io sono G1: se avete bisogno di indicazioni per accredito, coffee o sala, chiedete pure.",
-      "fase": "WELCOME",
-      "fonte": "runbook_interazione"
-    },
-    {
       "icon": "🎁",
-      "label_corto": "DEFLUSSO — regalo",
-      "testo_tts": "Grazie per essere stati con noi! Non dimenticate di prendere il vostro regalo.",
+      "label_corto": "DEFLUSSO — ricordo",
+      "testo_tts": "Grazie per essere stati con noi. Non dimenticate di ritirare all'uscita un piccolo ricordo pensato per voi.",
       "fase": "DEFLUSSO",
       "fonte": "documento"
-    },
-    {
-      "icon": "📱",
-      "label_corto": "DEFLUSSO — QR omaggio",
-      "testo_tts": "Mostrate al mio collega il vostro QR code per ritirare il vostro omaggio!",
-      "fase": "DEFLUSSO",
-      "fonte": "documento"
-    },
-    {
-      "icon": "🚪",
-      "label_corto": "DEFLUSSO — uscita accredito",
-      "testo_tts": "Per l'uscita e la consegna del gift, rivolgetevi al presidio all'accredito: i colleghi vi aiuteranno con piacere.",
-      "fase": "DEFLUSSO",
-      "fonte": "runbook_presidio"
-    },
-    {
-      "icon": "🛡️",
-      "label_corto": "DEMO — presenza operatori",
-      "testo_tts": "Per la vostra sicurezza e un'esperienza fluida, il robot è assistito dai nostri operatori in sala: potete rivolgervi anche a loro in qualsiasi momento.",
-      "fase": "OPERATIVITA",
-      "fonte": "runbook_demo_operatori"
     },
     {
       "icon": "✨",
       "label_corto": "Chiusura — ringraziamento",
-      "testo_tts": "Grazie ancora di essere stati con noi: vi auguriamo una splendida serata e arrivederci!",
+      "testo_tts": "Grazie per essere stati con noi. Vi auguriamo una splendida serata. Arrivederci.",
       "fase": "DEFLUSSO",
       "fonte": "runbook_chiusura"
     }

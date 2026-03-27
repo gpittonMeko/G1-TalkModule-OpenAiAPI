@@ -7,77 +7,29 @@
 Buonasera, e benvenuti! Da questa parte per l'accredito.
 
 ---
-2. WELCOME — registrazione
-Date pure il vostro nome ai miei colleghi per essere registrati!
-
----
-3. WELCOME — guardaroba
+2. WELCOME — guardaroba
 Grazie per esservi uniti a noi questa sera. Prego, il guardaroba è da questa parte.
 
 ---
-4. COFFEE — accoglienza
+3. COFFEE — accoglienza
 Benvenuti nella zona welcome coffee. Accomodatevi pure e servitevi.
 
 ---
-5. Tipologia 1 — presentazione G1
-Buonasera! Mi presento: sono G1! Non vedo l'ora che inizi l'evento!
-
----
-6. Tipologia 1 — scherzo / chiusura
-Scusate, sono il solito burlone! Grazie per essere qui, buon proseguimento!
-
----
-7. SALA — posto, evento inizia
+4. SALA — posto, evento inizia
 Vi preghiamo di prendere posto: l'evento sta per iniziare! Grazie.
 
 ---
-8. SALA — accomodatevi
+5. SALA — accomodatevi
 Accomodatevi, l'evento comincerà a breve!
 
 ---
-9. SALA — fondo palco / coreografia
-A fondo palco vi mostreremo una breve sequenza di movimenti, saluti e coreografia: grazie per l'attenzione.
+6. SALA — messaggio inizio (operatore)
+Tra pochi istanti inizia l'evento. Vi preghiamo di accomodarvi e di mettere i telefoni in modalità silenziosa.
 
 ---
-10. STAMPA — G1_A colleghi
-Buon pomeriggio! Vi presento i miei colleghi, tutti umanoidi di ultimissima generazione. Siamo qui per assistervi durante l'evento, dopo aver fatto la conoscenza dei vostri ospiti.
+7. DEFLUSSO — ricordo
+Grazie per essere stati con noi. Non dimenticate di ritirare all'uscita un piccolo ricordo pensato per voi.
 
 ---
-11. STAMPA — storia McKinsey
-McKinsey & Company nasce negli Stati Uniti nel 1926 ed è cresciuta fino a diventare una rete globale di consulenti al fianco di leader e organizzazioni.
-
----
-12. STAMPA — sede Italia
-In Italia McKinsey è presente con una solida base, tra cui Milano, per affiancare imprese e istituzioni sul territorio.
-
----
-13. SALA — interazione multipla
-Grazie a tutti per la calorosa accoglienza. Tra poco riprenderemo il programma: seguite pure le indicazioni del team in sala.
-
----
-14. SALA — messaggio inizio (operatore)
-Attenzione: tra pochi istanti inizia la parte centrale dell'evento. Vi preghiamo di accomodarvi e di tenere i telefoni in silenzioso, grazie.
-
----
-15. WELCOME — saluto singolo
-Piacere incontrarvi! Io sono G1: se avete bisogno di indicazioni per accredito, coffee o sala, chiedete pure.
-
----
-16. DEFLUSSO — regalo
-Grazie per essere stati con noi! Non dimenticate di prendere il vostro regalo.
-
----
-17. DEFLUSSO — QR omaggio
-Mostrate al mio collega il vostro QR code per ritirare il vostro omaggio!
-
----
-18. DEFLUSSO — uscita accredito
-Per l'uscita e la consegna del gift, rivolgetevi al presidio all'accredito: i colleghi vi aiuteranno con piacere.
-
----
-19. DEMO — presenza operatori
-Per la vostra sicurezza e un'esperienza fluida, il robot è assistito dai nostri operatori in sala: potete rivolgervi anche a loro in qualsiasi momento.
-
----
-20. Chiusura — ringraziamento
-Grazie ancora di essere stati con noi: vi auguriamo una splendida serata e arrivederci!
+8. Chiusura — ringraziamento
+Grazie per essere stati con noi. Vi auguriamo una splendida serata. Arrivederci.

@@ -15,6 +15,10 @@
     "action": "shake_hand",
     "response": "Ecco la mano!"
   },
+  "la mano": {
+    "action": "shake_hand",
+    "response": "Ecco la mano!"
+  },
   "saluta": {
     "action": "wave_hand",
     "response": "Ciao!"
@@ -22,6 +26,58 @@
   "fai ciao": {
     "action": "wave_hand",
     "response": "Ciao!"
+  },
+  "fai due passi avanti": {
+    "loco_command": "double_step_forward",
+    "response": "Ok, due passi avanti."
+  },
+  "due passi avanti": {
+    "loco_command": "double_step_forward",
+    "response": "Ok, due passi avanti."
+  },
+  "cammina due passi": {
+    "loco_command": "double_step_forward",
+    "response": "Due passi avanti."
+  },
+  "passi avanti": {
+    "loco_command": "double_step_forward",
+    "response": "Due passi avanti."
+  },
+  "fai due passi indietro": {
+    "loco_command": "double_step_back",
+    "response": "Ok, due passi indietro."
+  },
+  "due passi indietro": {
+    "loco_command": "double_step_back",
+    "response": "Ok, due passi indietro."
+  },
+  "vai indietro": {
+    "loco_command": "double_step_back",
+    "response": "Indietro."
+  },
+  "passi indietro": {
+    "loco_command": "double_step_back",
+    "response": "Indietro."
+  },
+  "gira su te stesso": {
+    "loco_command": "spin_inplace",
+    "response": "Mi giro!"
+  },
+  "girati": {
+    "loco_command": "spin_inplace",
+    "response": "Mi giro!"
+  },
+  "ruotati": {
+    "loco_command": "spin_inplace",
+    "response": "Ruoto!"
+  },
+  "fai un giro su te stesso": {
+    "loco_command": "spin_inplace",
+    "response": "Giro su me stesso."
+  },
+  "fai un giro": {
+    "loco_command": "spin_inplace",
+    "response": "Mi giro!"
   },
   "_comment_teaching": "Per azioni teaching: usa action 'teaching_X' dove X è l'ID dalla app Unitree (Demo Teaching). Es: teaching_1, teaching_2"
 }
