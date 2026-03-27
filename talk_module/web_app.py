@@ -22,7 +22,7 @@ _executor = ThreadPoolExecutor(max_workers=2)
 
 # FastAPI + WebSocket
 try:
-    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body, Request
+    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body, Request, Query
     from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
     HAS_FASTAPI = True
 except ImportError:
@@ -41,9 +41,47 @@ from talk_module.network_discovery import (
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "audio_devices.json"
 KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "config" / "knowledge.json"
 SOUNDBOARD_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard.json"
+SOUNDBOARD_LITE_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard_lite.json"
 RUN_SHEET_PATH = Path(__file__).resolve().parent.parent / "config" / "run_sheet.json"
 SOUNDBOARD_SLOT_COUNT = 20
 SOUNDBOARD_TEXT_MAX_LEN = 280
+# soundboard.json può essere ~20MB: una sola lettura parse in RAM finché il file non cambia (mtime).
+_soundboard_cache: tuple[int, list[dict]] | None = None
+
+
+def _invalidate_soundboard_cache() -> None:
+    global _soundboard_cache
+    _soundboard_cache = None
+
+
+def _read_soundboard_lite_fast() -> list[dict] | None:
+    """Elenco slot leggero da file piccolo; valido solo se source_mtime_ns coincide con soundboard.json."""
+    if not SOUNDBOARD_LITE_PATH.exists() or not SOUNDBOARD_PATH.exists():
+        return None
+    try:
+        main_ns = SOUNDBOARD_PATH.stat().st_mtime_ns
+        data = json.loads(SOUNDBOARD_LITE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("source_mtime_ns") != main_ns:
+            return None
+        slots = data.get("slots")
+        if not isinstance(slots, list) or len(slots) != SOUNDBOARD_SLOT_COUNT:
+            return None
+        return slots
+    except Exception:
+        return None
+
+
+def _write_soundboard_lite_sidecar(slots_lite: list[dict]) -> None:
+    if not SOUNDBOARD_PATH.exists():
+        return
+    try:
+        main_ns = SOUNDBOARD_PATH.stat().st_mtime_ns
+        payload = {"source_mtime_ns": main_ns, "slots": slots_lite}
+        SOUNDBOARD_LITE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Sentinel: solo wake word, senza domanda (risposta = settings.hey_g1_ack_text)
@@ -176,6 +214,7 @@ _ws_clients: dict = {}
 
 if HAS_FASTAPI:
     from fastapi.responses import JSONResponse
+    from talk_module.audio.device_utils import resolve_configured_microphone_index
 
     app = FastAPI(
         title="G1 Talk Module",
@@ -195,7 +234,11 @@ if HAS_FASTAPI:
     _stt = _llm = _tts = _player = _recorder = None
 
     def get_services():
-        global _stt, _llm, _tts, _player, _recorder
+        global _stt, _llm, _tts, _player, _recorder, _device_config_mtime, _config_dirty
+        if _config_dirty:
+            _config_dirty = False
+            _player = None
+            _recorder = None
         if _stt is None:
             from talk_module.llm import LLMClient
             from talk_module.tts import TTSClient
@@ -223,11 +266,17 @@ if HAS_FASTAPI:
                 if _AUDIO_AVAILABLE and AudioRecorder:
                     cfg = load_device_config()
                     mic_cfg = cfg.get("microphone")
-                    mic_id = mic_cfg.get("device_id") if isinstance(mic_cfg, dict) and mic_cfg.get("type") == "local" else None
+                    mic_id = resolve_configured_microphone_index(mic_cfg) if isinstance(mic_cfg, dict) else None
                     spk_cfg = cfg.get("speaker")
                     spk_id = spk_cfg.get("device_id") if isinstance(spk_cfg, dict) and spk_cfg.get("type") == "local" else None
+                    try:
+                        spk_id = int(spk_id) if spk_id is not None and str(spk_id).strip() != "" else None
+                    except (TypeError, ValueError):
+                        spk_id = None
                     _player = AudioPlayer(device_id=spk_id)
                     _recorder = AudioRecorder(device_id=mic_id)
+                    if mic_id is not None:
+                        print(f"[Audio] Recorder: PortAudio input index={mic_id} (config name={mic_cfg.get('name') if mic_cfg else None})", flush=True)
             except (OSError, ImportError, TypeError, AttributeError, NameError):
                 pass
         else:
@@ -238,11 +287,17 @@ if HAS_FASTAPI:
                     if _AUDIO_AVAILABLE and AudioRecorder:
                         cfg = load_device_config()
                         mic_cfg = cfg.get("microphone")
-                        mic_id = mic_cfg.get("device_id") if isinstance(mic_cfg, dict) and mic_cfg.get("type") == "local" else None
+                        mic_id = resolve_configured_microphone_index(mic_cfg) if isinstance(mic_cfg, dict) else None
                         spk_cfg = cfg.get("speaker")
                         spk_id = spk_cfg.get("device_id") if isinstance(spk_cfg, dict) and spk_cfg.get("type") == "local" else None
+                        try:
+                            spk_id = int(spk_id) if spk_id is not None and str(spk_id).strip() != "" else None
+                        except (TypeError, ValueError):
+                            spk_id = None
                         _player = AudioPlayer(device_id=spk_id)
                         _recorder = AudioRecorder(device_id=mic_id)
+                        if mic_id is not None:
+                            print(f"[Audio] Recorder: PortAudio input index={mic_id} (config name={mic_cfg.get('name') if mic_cfg else None})", flush=True)
                 except (OSError, ImportError, TypeError, AttributeError, NameError):
                     pass
         return _stt, _llm, _tts, _player, _recorder
@@ -430,10 +485,26 @@ self.addEventListener('activate', () => self.clients.claim());
                 if lbl:
                     return f"{name} ({lbl})"
                 return name
-            inputs = [{"type": "local", "device_id": d["index"], "name": _label(d), "value": f"local_{d['index']}"}
-                     for d in mics_raw]
-            outputs = [{"type": "local", "device_id": d["index"], "name": _label(d), "value": f"local_{d['index']}"}
-                      for d in spks_raw]
+            inputs = [
+                {
+                    "type": "local",
+                    "device_id": d["index"],
+                    "name": _label(d),
+                    "value": f"local_{d['index']}",
+                    "device_type": d.get("device_type") or "other",
+                }
+                for d in mics_raw
+            ]
+            outputs = [
+                {
+                    "type": "local",
+                    "device_id": d["index"],
+                    "name": _label(d),
+                    "value": f"local_{d['index']}",
+                    "device_type": d.get("device_type") or "other",
+                }
+                for d in spks_raw
+            ]
         except (OSError, Exception):
             pass
         # Dispositivi di rete: client web connessi (apri /client sul telefono o G1)
@@ -555,8 +626,10 @@ self.addEventListener('activate', () => self.clients.claim());
 
     def _load_soundboard() -> list[dict]:
         """Carica soundboard da config/soundboard.json. N slot: {icon, text, audio_base64}."""
+        global _soundboard_cache
         n = SOUNDBOARD_SLOT_COUNT
         if not SOUNDBOARD_PATH.exists():
+            _soundboard_cache = None
             return [
                 {
                     "icon": "🎤",
@@ -569,6 +642,9 @@ self.addEventListener('activate', () => self.clients.claim());
                 for i in range(n)
             ]
         try:
+            mtime_ns = SOUNDBOARD_PATH.stat().st_mtime_ns
+            if _soundboard_cache is not None and _soundboard_cache[0] == mtime_ns:
+                return _soundboard_cache[1]
             data = json.loads(SOUNDBOARD_PATH.read_text(encoding="utf-8"))
             slots = data.get("slots") or []
             while len(slots) < n:
@@ -590,8 +666,11 @@ self.addEventListener('activate', () => self.clients.claim());
                 s.setdefault("format", "webm")
                 s.setdefault("audio_base64_clean", "")
                 s.setdefault("format_clean", "mp3")
-            return slots[:n]
+            out = slots[:n]
+            _soundboard_cache = (mtime_ns, out)
+            return out
         except Exception:
+            _soundboard_cache = None
             return [
                 {
                     "icon": "🎤",
@@ -603,6 +682,24 @@ self.addEventListener('activate', () => self.clients.claim());
                 }
                 for i in range(n)
             ]
+
+    def _soundboard_slots_lite(slots: list[dict]) -> list[dict]:
+        """Solo metadati per la griglia UI: evita ~20MB JSON su mobile (crash/OOM su /api/soundboard)."""
+        lite: list[dict] = []
+        for s in slots:
+            ar = str(s.get("audio_base64") or "")
+            ac = str(s.get("audio_base64_clean") or "")
+            lite.append(
+                {
+                    "icon": s.get("icon"),
+                    "text": s.get("text"),
+                    "format": s.get("format") or "webm",
+                    "format_clean": s.get("format_clean") or "mp3",
+                    "has_robot": len(ar) > 50,
+                    "has_clean": len(ac) > 50,
+                }
+            )
+        return lite
 
     def _default_run_sheet() -> dict:
         return {
@@ -631,8 +728,35 @@ self.addEventListener('activate', () => self.clients.claim());
             return _default_run_sheet()
 
     @app.get("/api/soundboard")
-    def api_get_soundboard():
-        return {"slots": _load_soundboard(), "slot_count": SOUNDBOARD_SLOT_COUNT, "text_max_len": SOUNDBOARD_TEXT_MAX_LEN}
+    def api_get_soundboard(lite: bool = Query(False, description="Solo icona/testo/flag audio; niente base64 (leggero per telefono)")):
+        if lite:
+            fast = _read_soundboard_lite_fast()
+            if fast is not None:
+                return {"slots": fast, "slot_count": SOUNDBOARD_SLOT_COUNT, "text_max_len": SOUNDBOARD_TEXT_MAX_LEN}
+        slots = _load_soundboard()
+        if lite:
+            lite_slots = _soundboard_slots_lite(slots)
+            _write_soundboard_lite_sidecar(lite_slots)
+            slots = lite_slots
+        return {"slots": slots, "slot_count": SOUNDBOARD_SLOT_COUNT, "text_max_len": SOUNDBOARD_TEXT_MAX_LEN}
+
+    @app.get("/api/soundboard-slot/{slot_idx}")
+    def api_get_soundboard_slot(slot_idx: int):
+        """Un solo slot con audio completo: per riproduzione su Browser o modifica slot."""
+        if slot_idx < 0 or slot_idx >= SOUNDBOARD_SLOT_COUNT:
+            raise HTTPException(400, "Slot non valido")
+        slots = _load_soundboard()
+        if slot_idx >= len(slots):
+            raise HTTPException(400, "Slot non valido")
+        s = slots[slot_idx]
+        return {
+            "icon": s.get("icon"),
+            "text": s.get("text"),
+            "audio_base64": s.get("audio_base64") or "",
+            "format": s.get("format") or "webm",
+            "audio_base64_clean": s.get("audio_base64_clean") or "",
+            "format_clean": s.get("format_clean") or "mp3",
+        }
 
     @app.get("/api/run-sheet")
     def api_get_run_sheet():
@@ -693,6 +817,7 @@ self.addEventListener('activate', () => self.clients.claim());
     @app.post("/api/soundboard")
     def api_save_soundboard(data: dict = Body(...)):
         """Salva slot: audio_base64 = robot; audio_base64_clean = TTS/registrazione senza effetto server."""
+        global _soundboard_cache
         slot = int(data.get("slot", 0))
         if slot < 0 or slot >= SOUNDBOARD_SLOT_COUNT:
             return {"ok": False, "error": f"slot 0-{SOUNDBOARD_SLOT_COUNT - 1}"}
@@ -718,8 +843,11 @@ self.addEventListener('activate', () => self.clients.claim());
         }
         try:
             SOUNDBOARD_PATH.write_text(json.dumps({"slots": slots}, indent=2), encoding="utf-8")
+            _soundboard_cache = (SOUNDBOARD_PATH.stat().st_mtime_ns, slots[: SOUNDBOARD_SLOT_COUNT])
+            _write_soundboard_lite_sidecar(_soundboard_slots_lite(slots[: SOUNDBOARD_SLOT_COUNT]))
             return {"ok": True}
         except Exception as e:
+            _invalidate_soundboard_cache()
             return {"ok": False, "error": str(e)}
 
     def _soundboard_bytes_to_wav_playable(raw: bytes, fmt: str) -> bytes:
@@ -854,11 +982,13 @@ self.addEventListener('activate', () => self.clients.claim());
     def api_get_config():
         return load_device_config()
 
+    _config_dirty = False
+
     @app.post("/api/config")
     def api_save_config(data: dict = Body(...)):
-        global _player, _recorder
+        global _player, _recorder, _config_dirty
         save_device_config(data)
-        _player = _recorder = None
+        _config_dirty = True
         return {"ok": True}
 
     WAKE_WORDS = ("hey g1", "hey g 1", "ehi g1", "ehi g 1", "hey markone", "hey mark one", "ehi markone", "ehi mark one")
@@ -1113,17 +1243,16 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.websocket("/ws/listen")
     async def websocket_listen(ws: WebSocket):
-        """Ascolto continuo: Hey G1 attiva, 10 sec silenzio = stop. Solo mic/speaker locali."""
+        """Ascolto continuo: Hey G1 attiva, mic locale Jetson. Speaker locale o browser (audio_base64)."""
         await ws.accept()
         cfg = load_device_config()
         if not cfg.get("microphone") or cfg.get("microphone", {}).get("type") != "local":
             await ws.send_text(json.dumps({"type": "error", "data": "Configura microfono locale dal setup"}))
             await ws.close()
             return
-        if cfg.get("speaker", {}).get("type") != "local":
-            await ws.send_text(json.dumps({"type": "error", "data": "Configura altoparlante locale dal setup"}))
-            await ws.close()
-            return
+
+        spk = cfg.get("speaker") or {}
+        play_local = spk.get("type") == "local"
 
         listen_queue = queue.Queue()
         listen_stop = threading.Event()
@@ -1134,18 +1263,24 @@ self.addEventListener('activate', () => self.clients.claim());
                 if not recorder:
                     listen_queue.put({"error": "PortAudio non disponibile"})
                     return
+                print(f"[Listen] Record loop started, device={recorder.device_id}, rate={recorder.sample_rate}", flush=True)
+                chunk_count = 0
                 for audio_bytes in recorder.record_until_silence(
-                    silence_seconds=6,
+                    silence_seconds=5,
                     chunk_duration=0.5,
-                    silence_threshold=0.01,
+                    silence_threshold=0.0035,
                     max_duration=60.0,
                     stop_check=lambda: listen_stop.is_set(),
                 ):
                     if listen_stop.is_set():
                         break
                     if len(audio_bytes) > 500:
+                        chunk_count += 1
+                        print(f"[Listen] Yielded audio chunk #{chunk_count}, size={len(audio_bytes)} bytes", flush=True)
                         listen_queue.put(audio_bytes)
+                print(f"[Listen] Record loop ended (chunks yielded: {chunk_count})", flush=True)
             except Exception as e:
+                print(f"[Listen] Record loop ERROR: {e}", flush=True)
                 listen_queue.put({"error": str(e)})
 
         rec_thread = threading.Thread(target=_record_loop, daemon=True)
@@ -1166,7 +1301,7 @@ self.addEventListener('activate', () => self.clients.claim());
                     break
                 result = _process_audio(item, skip_wake_word=False)
                 await ws.send_text(json.dumps({"type": "response", "data": result}))
-                if result.get("audio_base64") and player:
+                if result.get("audio_base64") and play_local and player:
                     import base64 as b64
                     player.play_bytes(b64.b64decode(result["audio_base64"]), format_hint="mp3")
         except WebSocketDisconnect:
@@ -1257,6 +1392,65 @@ self.addEventListener('activate', () => self.clients.claim());
             pass
         finally:
             ptt_stop.set()
+
+    @app.websocket("/ws/mic-level")
+    async def websocket_mic_level(ws: WebSocket):
+        """Stream real-time mic audio levels to the browser for visual monitoring."""
+        await ws.accept()
+        cfg = load_device_config()
+        mic = cfg.get("microphone") or {}
+        if not mic or mic.get("type") != "local":
+            await ws.send_text(json.dumps({"type": "error", "data": "Nessun microfono locale configurato"}))
+            await ws.close()
+            return
+
+        level_stop = threading.Event()
+        level_queue = queue.Queue()
+
+        def _level_loop():
+            try:
+                import sounddevice as sd
+                import numpy as np
+                from talk_module.audio.device_utils import resolve_configured_microphone_index
+                mic_id = resolve_configured_microphone_index(mic)
+                if mic_id is None:
+                    level_queue.put({"error": "Microfono non trovato"})
+                    return
+                dev_info = sd.query_devices(mic_id)
+                rate = int(dev_info.get("default_samplerate", 44100))
+                block = int(rate * 0.08)
+                dev_name = dev_info.get("name", "?")
+                level_queue.put({"type": "info", "name": dev_name, "rate": rate, "device": mic_id})
+                with sd.InputStream(device=mic_id, channels=1, samplerate=rate,
+                                    blocksize=block, dtype="float32") as stream:
+                    while not level_stop.is_set():
+                        data, _ = stream.read(block)
+                        audio = data.squeeze()
+                        rms = float(np.sqrt(np.mean(audio ** 2)))
+                        peak = float(np.max(np.abs(audio)))
+                        db = max(-60.0, 20 * np.log10(rms + 1e-10))
+                        level_queue.put({"type": "level", "rms": round(rms, 5),
+                                         "peak": round(peak, 5), "db": round(db, 1)})
+            except Exception as e:
+                level_queue.put({"error": str(e)})
+
+        t = threading.Thread(target=_level_loop, daemon=True)
+        t.start()
+        try:
+            loop = asyncio.get_running_loop()
+            while True:
+                try:
+                    item = await loop.run_in_executor(_executor, lambda: level_queue.get(timeout=0.3))
+                except queue.Empty:
+                    continue
+                if isinstance(item, dict) and "error" in item:
+                    await ws.send_text(json.dumps({"type": "error", "data": item["error"]}))
+                    break
+                await ws.send_text(json.dumps(item))
+        except WebSocketDisconnect:
+            pass
+        finally:
+            level_stop.set()
 
     @app.post("/api/record-and-process")
     async def api_record_and_process(duration: float = Body(10, embed=True)):
@@ -1403,7 +1597,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid #3f3f46; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .status { font-size: 13px; color: #a1a1aa; margin-top: 4px; }
-    .device-count { font-size: 12px; color: #22c55e; margin-top: 4px; }
+    .device-count { font-size: 12px; color: #a1a1aa; margin-top: 8px; line-height: 1.4; }
+    .device-summary { border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; font-size: 13px; line-height: 1.45; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); }
+    .device-summary.has-local { border-color: rgba(34,197,94,0.45); background: rgba(34,197,94,0.08); }
+    .device-summary.none { border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.06); }
+    .device-summary .sum-title { display: block; color: #86efac; margin-bottom: 8px; font-size: 13px; }
+    .device-summary.none .sum-warn { color: #fcd34d; font-size: 13px; }
+    .device-summary .sum-list { margin: 0; padding-left: 18px; color: #e4e4e7; }
+    .device-summary .sum-list li { margin: 4px 0; }
+    select optgroup { font-weight: 600; color: #9ca3af; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -1420,15 +1622,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <h2>1. Microfono</h2>
     <div id="searchStatus"><span class="spinner" id="mainSpinner" style="display:none"></span> <span id="statusText"></span></div>
     <p class="device-label">Scegli il microfono</p>
+    <div id="micSummary" class="device-summary" style="display:none;"></div>
     <select id="mic" aria-label="Seleziona microfono"><option value="web_wait">Rete WiFi: apri /client su telefono o G1</option></select>
-    <p class="hint">Integrati, USB, Bluetooth. Oppure Rete WiFi.</p>
+    <p class="hint">Voci raggruppate: <strong>sul server</strong> (USB/Jetson) e <strong>rete</strong> (telefono/tablet). Sotto vedi l’elenco rilevato.</p>
     <p class="device-count" id="micCount"></p>
   </div>
   <div class="step">
     <h2>2. Altoparlante / Cuffie</h2>
     <p class="device-label">Scegli altoparlante o cuffie</p>
+    <div id="spkSummary" class="device-summary" style="display:none;"></div>
     <select id="speaker" aria-label="Seleziona altoparlante o cuffie"><option value="web_wait">Rete WiFi: apri /client su telefono o G1</option></select>
-    <p class="hint">Integrati, cuffie (jack/USB), speaker USB/Bluetooth.</p>
+    <p class="hint">Stesso raggruppamento: uscite <strong>sul server</strong> o audio <strong>in rete</strong>.</p>
     <p class="device-count" id="spkCount"></p>
   </div>
   <div class="step" id="btStep" style="display:none">
@@ -1468,6 +1672,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     document.getElementById('clientUrl').textContent = location.origin + '/client';
     let mics = [], spks = [], showAll = false, lastBtDevices = [];
     function escOpt(s){ return String(s||'').replace(/&/g,'&amp;').replace(/\u003c/g,'&lt;').replace(/"/g,'&quot;'); }
+    function isLocalDev(m){
+      return m && (m.type === 'local' || (m.value && String(m.value).indexOf('local_') === 0));
+    }
     function fillBtSelect(){
       const sel = document.getElementById('btMacSelect');
       if(!sel) return;
@@ -1483,10 +1690,52 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('mainSpinner').style.display = loading ? 'inline-block' : 'none';
       document.getElementById('statusText').textContent = loading ? 'Ricerca in corso...' : '';
     }
+    function buildGroupedSelect(arr){
+      const loc = arr.filter(isLocalDev);
+      const net = arr.filter(function(m){ return !isLocalDev(m); });
+      let h = '';
+      if(loc.length){
+        h += '<optgroup label="── Sul server (Jetson / PC) — periferiche collegate">';
+        loc.forEach(function(m){ h += '<option value="'+escOpt(m.value)+'">'+escOpt(m.name)+'</option>'; });
+        h += '</optgroup>';
+      }
+      if(net.length){
+        h += '<optgroup label="── Rete WiFi — telefono, tablet, altri client">';
+        net.forEach(function(m){ h += '<option value="'+escOpt(m.value)+'">'+escOpt(m.name)+'</option>'; });
+        h += '</optgroup>';
+      }
+      return h || '<option value="web_wait">Nessuna opzione</option>';
+    }
+    function updateDeviceSummaries(){
+      const ml = mics.filter(isLocalDev);
+      const sl = spks.filter(isLocalDev);
+      const ms = document.getElementById('micSummary');
+      const ss = document.getElementById('spkSummary');
+      if(ms){
+        ms.style.display = 'block';
+        if(ml.length){
+          ms.className = 'device-summary has-local';
+          ms.innerHTML = '<strong class="sum-title">Microfoni rilevati sul server ('+ml.length+')</strong><ul class="sum-list">'+ml.map(function(m){return '<li>'+escOpt(m.name)+'</li>';}).join('')+'</ul>';
+        } else {
+          ms.className = 'device-summary none';
+          ms.innerHTML = '<span class="sum-warn">Nessun microfono sul server (nessuna voce USB/scheda in elenco). Collega una periferica o usa il gruppo «Rete».</span>';
+        }
+      }
+      if(ss){
+        ss.style.display = 'block';
+        if(sl.length){
+          ss.className = 'device-summary has-local';
+          ss.innerHTML = '<strong class="sum-title">Uscite audio rilevate sul server ('+sl.length+')</strong><ul class="sum-list">'+sl.map(function(m){return '<li>'+escOpt(m.name)+'</li>';}).join('')+'</ul>';
+        } else {
+          ss.className = 'device-summary none';
+          ss.innerHTML = '<span class="sum-warn">Nessuna uscita locale evidenziata. Collega cuffie/cassa USB o usa il gruppo «Rete».</span>';
+        }
+      }
+    }
     function renderSelects(){
-      const opts = m=>'<option value="'+m.value+'">'+m.name+'</option>';
-      document.getElementById('mic').innerHTML = mics.map(opts).join('');
-      document.getElementById('speaker').innerHTML = spks.map(opts).join('');
+      document.getElementById('mic').innerHTML = buildGroupedSelect(mics);
+      document.getElementById('speaker').innerHTML = buildGroupedSelect(spks);
+      updateDeviceSummaries();
     }
     function loadDevices(){
       setLoading(true);
@@ -1507,10 +1756,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         renderSelects();
         setLoading(false);
         document.getElementById('showAllBtn').textContent = showAll ? 'Solo consigliati' : 'Mostra tutti i dispositivi';
-        const micLocal = mics.filter(m => m.type === 'local' || (m.value && m.value.startsWith('local_')));
-        const spkLocal = spks.filter(s => s.type === 'local' || (s.value && s.value.startsWith('local_')));
-        document.getElementById('micCount').textContent = micLocal.length ? micLocal.length + ' microfono/i rilevato/i' : '';
-        document.getElementById('spkCount').textContent = spkLocal.length ? spkLocal.length + ' altoparlante/cuffie rilevati' : '';
+        const micLocal = mics.filter(isLocalDev);
+        const spkLocal = spks.filter(isLocalDev);
+        const micNet = mics.filter(function(m){ return !isLocalDev(m); }).length;
+        const spkNet = spks.filter(function(s){ return !isLocalDev(s); }).length;
+        document.getElementById('micCount').textContent = micLocal.length + ' sul server · ' + micNet + ' in rete';
+        document.getElementById('spkCount').textContent = spkLocal.length + ' sul server · ' + spkNet + ' in rete';
         return fetch('/api/config');
       }).then(r=>r&&r.json()).then(cfg=>{
         if(cfg&&cfg.microphone&&cfg.microphone.value) document.getElementById('mic').value = cfg.microphone.value;
@@ -1610,11 +1861,22 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       align-items: center;
       gap: 12px;
       padding: 16px 20px;
+      padding-top: calc(16px + env(safe-area-inset-top, 0px));
       border-bottom: 1px solid rgba(255,255,255,0.06);
       background: rgba(0,0,0,0.92);
-      position: sticky;
+      position: fixed;
       top: 0;
-      z-index: 40;
+      left: 0;
+      right: 0;
+      margin: 0 auto;
+      max-width: 420px;
+      width: 100%;
+      box-sizing: border-box;
+      z-index: 10000;
+      isolation: isolate;
+      -webkit-backface-visibility: hidden;
+      backface-visibility: hidden;
+      touch-action: manipulation;
     }
     .hamburger {
       width: 40px;
@@ -1629,6 +1891,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       transition: background 0.2s;
+      position: relative;
+      z-index: 2;
+      flex-shrink: 0;
     }
     .hamburger:hover { background: rgba(20,184,166,0.2); }
     .header h1 { font-size: 1.25rem; font-weight: 600; margin: 0; flex: 1; }
@@ -1691,18 +1956,29 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       visibility: visible !important;
       pointer-events: auto !important;
     }
+    /* pointer-events sul main rimosso: su alcuni WebView rompeva la griglia soundboard (slot invisibili / non cliccabili). */
     .main-content {
       padding: 24px;
+      padding-top: calc(24px + 5.5rem + env(safe-area-inset-top, 0px));
       position: relative;
-      z-index: 30;
       touch-action: auto;
-      pointer-events: auto;
-      isolation: isolate;
-      transform: translateZ(0);
-      -webkit-transform: translateZ(0);
+    }
+    /* Niente translateZ/isolation qui: su WebKit mobile possono rompere tap su select/bottoni nel main. */
+    .main-content select,
+    .main-content button,
+    .main-content .btn,
+    .main-content summary,
+    .main-content input[type="checkbox"],
+    .main-content input[type="radio"],
+    .main-content textarea {
+      touch-action: auto !important;
+      pointer-events: auto !important;
+      position: relative;
+      z-index: 2;
     }
     .section { display: none; }
     .section.active { display: block; }
+    #section-soundboard.section.active { display: block !important; }
     h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 4px; }
     .step {
       background: rgba(255,255,255,0.03);
@@ -1787,14 +2063,21 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     input::placeholder { color: #6b7280; }
     @media (max-width: 480px) {
       body { max-width: 100%; padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); padding-bottom: env(safe-area-inset-bottom); }
-      .header { padding: 12px 16px; padding-left: max(16px, env(safe-area-inset-left)); }
+      .header {
+        padding: 12px 16px;
+        padding-left: max(16px, env(safe-area-inset-left));
+        padding-right: max(16px, env(safe-area-inset-right));
+        padding-top: calc(12px + env(safe-area-inset-top, 0px));
+      }
       .hamburger { width: 44px; height: 44px; font-size: 24px; min-width: 44px; min-height: 44px; }
       .main-content { padding: 16px; padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+      .main-content select { font-size: 16px !important; min-height: 44px; }
       .btn { width: 160px; height: 160px; font-size: 15px; margin: 20px auto; }
       .btn-allow { padding: 16px 20px; min-height: 48px; font-size: 15px; }
       input[type="text"] { font-size: 16px; min-height: 44px; }
       .step { padding: 14px; margin: 10px 0; }
       #soundboardGrid { grid-template-columns: repeat(4, 1fr) !important; gap: 10px !important; }
+      #soundboardScroll { min-height: 200px; }
       #sbModal > div { max-width: 100%; margin: env(safe-area-inset-top) 12px env(safe-area-inset-bottom); padding: 20px; }
       #sbModal button, #sbModal label { min-height: 44px; padding: 12px 16px; display: inline-flex; align-items: center; justify-content: center; }
       #sbModal input[type="range"] { min-height: 36px; }
@@ -1813,8 +2096,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     @media (max-width: 480px) {
       input.wake-checkbox { width: auto !important; height: auto !important; min-width: 44px; min-height: 44px; }
     }
-    button, .btn, .btn-allow, .hamburger { -webkit-user-select: none; user-select: none; }
+    button, .btn, .btn-allow, .hamburger, .client-tab { -webkit-user-select: none; user-select: none; }
     #soundboardScroll { max-height: min(62vh, 520px); overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y pinch-zoom; margin-bottom: 8px; }
+    #soundboardScroll, #soundboardGrid, #soundboardGrid [role="button"] {
+      pointer-events: auto !important;
+    }
+    #soundboardGrid [role="button"] { touch-action: manipulation; }
     .sb-slot-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.25; word-break: break-word; }
     #sbModalText { width: 100%; min-height: 72px; padding: 10px; margin-top: 4px; background: #27272a; border: 1px solid #3f3f46; border-radius: 8px; color: #fff; font-family: inherit; font-size: 13px; resize: vertical; }
     #runSheetTable { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
@@ -1838,14 +2125,56 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     .quick-guide details { margin-top: 6px; }
     .quick-guide summary { cursor: pointer; color: #2dd4bf; font-weight: 600; font-size: 13px; list-style: none; }
     .quick-guide summary::-webkit-details-marker { display: none; }
+    /* Telefono: tab nel flusso del main (no position:fixed → niente layer/hit-test rotti su WebKit). */
+    .client-section-tabs {
+      display: none;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      gap: 6px;
+      padding: 8px 0 12px;
+      margin: 0 0 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      scrollbar-width: none;
+    }
+    .client-section-tabs::-webkit-scrollbar { display: none; }
+    .client-tab {
+      flex: 1 0 auto;
+      min-width: 52px;
+      max-width: 72px;
+      margin: 0;
+      border: none;
+      background: rgba(255,255,255,0.06);
+      color: #a1a1aa;
+      font-size: 9px;
+      font-weight: 600;
+      font-family: inherit;
+      padding: 8px 4px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      line-height: 1.1;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: rgba(20,184,166,0.25);
+    }
+    .client-tab .ct-ic { font-size: 18px; line-height: 1; }
+    .client-tab.active { color: #2dd4bf; background: rgba(20,184,166,0.15); border: 1px solid rgba(20,184,166,0.35); }
+    @media (max-width: 480px) {
+      /* Spazio sotto header fisso “G1 Talk” che altrimenti taglia la riga tab */
+      .client-section-tabs { display: flex; margin-top: 40px; }
+      .header .hamburger { display: none !important; }
+    }
+    @media (min-width: 481px) {
+      .client-section-tabs { display: none !important; }
+    }
   </style>
 </head>
 <body>
-  <header class="header">
-    <button type="button" class="hamburger" id="hamburger" aria-label="Menu">&#9776;</button>
-    <h1>G1 Talk</h1>
-  </header>
-  <!-- overlay/sidebar PRIMA di main: così <main> è ultimo nel body e riceve i tap (bug WebKit su layer fixed successivi). -->
+  <!-- overlay/sidebar poi <main>; header in fondo al body: ultimo sibling = hit-test corretto su WebKit mobile (hamburger). -->
   <div class="overlay" id="overlay"></div>
   <aside class="sidebar" id="sidebar">
     <nav>
@@ -1858,18 +2187,45 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </nav>
   </aside>
   <main class="main-content">
-    <div class="quick-guide" id="quickGuide">
-      <details>
-        <summary>Come funziona (apri per la guida rapida)</summary>
-        <p style="margin:8px 0 4px;"><strong>Due modi, un solo server</strong> — voce e IA girano sul <strong>PC del G1</strong> (o Linux sulla stessa rete). Questa pagina è il <strong>telecomando</strong> dal telefono o dal PC.</p>
-        <ul>
-          <li><strong>Browser (consigliato):</strong> stesso WiFi del robot → apri questo indirizzo (<code id="guideUrl">/client</code>). Per il microfono serve HTTPS; al primo accesso «Avanzate → Procedi».</li>
-          <li><strong>APK Android:</strong> stessa schermata; inserisci l’IP del server nell’app launcher. Per la <strong>cassa Bluetooth</strong>: accoppia il telefono all’altoparlante in Impostazioni → l’audio esce lì.</li>
-          <li><strong>Prima volta sul robot:</strong> copia lo zip d’installazione, <code>bash install.sh</code>, configura <code>.env</code>, poi <code>bash scripts/restart_server.sh</code>. Pacchetto Windows: <code>dist/G1_Pacchetto_Installazione_Completa.zip</code>.</li>
-        </ul>
-        <p class="hint" style="margin:6px 0 0;font-size:11px;">Dettagli in menu <strong>Info</strong> · Leggi anche <code>LEGGIMI.txt</code> nel pacchetto.</p>
-      </details>
-    </div>
+    <nav class="client-section-tabs" id="clientSectionTabs" aria-label="Sezioni">
+      <button type="button" class="client-tab active" data-section="soundboard" onclick="return window.g1ActivateClientSection('soundboard')"><span class="ct-ic" aria-hidden="true">&#128266;</span><span>Sound</span></button>
+      <button type="button" class="client-tab" data-section="runsheet" onclick="return window.g1ActivateClientSection('runsheet')"><span class="ct-ic" aria-hidden="true">&#128197;</span><span>Tempi</span></button>
+      <button type="button" class="client-tab" data-section="parla" onclick="return window.g1ActivateClientSection('parla')"><span class="ct-ic" aria-hidden="true">&#127908;</span><span>Parla</span></button>
+      <button type="button" class="client-tab" data-section="knowledge" onclick="return window.g1ActivateClientSection('knowledge')"><span class="ct-ic" aria-hidden="true">&#128214;</span><span>Know</span></button>
+      <button type="button" class="client-tab" data-section="devices" onclick="return window.g1ActivateClientSection('devices')"><span class="ct-ic" aria-hidden="true">&#128268;</span><span>I/O</span></button>
+      <button type="button" class="client-tab" data-section="info" onclick="return window.g1ActivateClientSection('info')"><span class="ct-ic" aria-hidden="true">&#8505;</span><span>Info</span></button>
+    </nav>
+    <script>
+    (function(){
+      function closeDrawer(){
+        var sb = document.getElementById('sidebar');
+        var ov = document.getElementById('overlay');
+        if (sb) sb.classList.remove('open');
+        if (ov) ov.classList.remove('visible');
+      }
+      window.g1ActivateClientSection = function(sec){
+        var nodes, i, el = document.getElementById('section-'+sec);
+        if (!el) return false;
+        closeDrawer();
+        nodes = document.querySelectorAll('main.main-content .section');
+        for (i = 0; i < nodes.length; i++) nodes[i].classList.remove('active');
+        el.classList.add('active');
+        nodes = document.querySelectorAll('#clientSectionTabs .client-tab');
+        for (i = 0; i < nodes.length; i++) nodes[i].classList.toggle('active', nodes[i].getAttribute('data-section') === sec);
+        nodes = document.querySelectorAll('#sidebar nav a');
+        for (i = 0; i < nodes.length; i++) nodes[i].classList.toggle('active', nodes[i].getAttribute('data-section') === sec);
+        try { window.scrollTo(0, 0); } catch (e) {}
+        setTimeout(function(){
+          if ((sec === 'soundboard' || sec === 'parla') && navigator.mediaDevices) {
+            var o = document.getElementById('sbOutput');
+            if (o && o.options && o.options.length <= 1 && typeof requestAndLoadDevices === 'function') requestAndLoadDevices();
+          }
+          if (sec === 'runsheet' && typeof loadRunSheet === 'function') loadRunSheet();
+        }, 0);
+        return false;
+      };
+    })();
+    </script>
     <section id="section-soundboard" class="section active">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Soundboard</h2>
   <p class="hint" style="margin-bottom:8px;"><strong>Predefinito: cassa del robot</strong> (uscita audio sulla Jetson). Serve setup <code>/</code> con altoparlante <em>locale</em> salvato. «Browser» = solo per provare l’audio sul PC/telefono. <strong>Voce</strong> Robot o Naturale sotto.</p>
@@ -1890,11 +2246,24 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </select>
     <button type="button" id="sbOutputRefresh" style="padding:6px 12px;font-size:12px;background:rgba(255,255,255,0.08);color:#9ca3af;border:1px solid rgba(255,255,255,0.1);border-radius:8px;cursor:pointer;">Aggiorna</button>
   </div>
+  <p id="soundboardLoadErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;grid-column:1/-1;"></p>
   <div id="soundboardScroll">
   <div id="soundboardGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;"></div>
   </div>
   <p class="hint" style="margin-top:8px;font-size:11px;">Modifica (✏️): registra, importa, <b>Genera TTS dal testo</b>, icona. Effetto robotico in automatico (tranne WAV già processato).</p>
-  <div id="sbModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:300;padding:20px;flex-direction:column;align-items:center;justify-content:center;overflow-y:auto;-webkit-overflow-scrolling:touch;">
+    <div class="quick-guide" id="quickGuide">
+      <details>
+        <summary>Come funziona (apri per la guida rapida)</summary>
+        <p style="margin:8px 0 4px;"><strong>Due modi, un solo server</strong> — voce e IA girano sul <strong>PC del G1</strong> (o Linux sulla stessa rete). Questa pagina è il <strong>telecomando</strong> dal telefono o dal PC.</p>
+        <ul>
+          <li><strong>Browser (consigliato):</strong> stesso WiFi del robot → apri questo indirizzo (<code id="guideUrl">/client</code>). Per il microfono serve HTTPS; al primo accesso «Avanzate → Procedi».</li>
+          <li><strong>APK Android:</strong> stessa schermata; inserisci l’IP del server nell’app launcher. Per la <strong>cassa Bluetooth</strong>: accoppia il telefono all’altoparlante in Impostazioni → l’audio esce lì.</li>
+          <li><strong>Prima volta sul robot:</strong> copia lo zip d’installazione, <code>bash install.sh</code>, configura <code>.env</code>, poi <code>bash scripts/restart_server.sh</code>. Pacchetto Windows: <code>dist/G1_Pacchetto_Installazione_Completa.zip</code>.</li>
+        </ul>
+        <p class="hint" style="margin:6px 0 0;font-size:11px;">Dettagli in menu <strong>Info</strong> · Leggi anche <code>LEGGIMI.txt</code> nel pacchetto.</p>
+      </details>
+    </div>
+  <div id="sbModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:15000;padding:20px;flex-direction:column;align-items:center;justify-content:center;overflow-y:auto;-webkit-overflow-scrolling:touch;">
     <div style="background:#1a1d24;border-radius:16px;padding:24px;max-width:400px;width:100%;border:1px solid rgba(255,255,255,0.1);margin:auto;">
       <h3 style="margin:0 0 16px;font-size:1.1rem;">Modifica slot <span id="sbModalSlot">0</span></h3>
       <div style="margin-bottom:12px;">
@@ -1951,71 +2320,90 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
   <span id="runSheetStatus" class="hint" style="margin-left:12px;"></span>
     </section>
     <section id="section-parla" class="section">
-  <h2 style="font-size:1.2rem;margin:0 0 8px;">Parla con G1</h2>
-  <p style="margin:0 0 10px;padding:10px 12px;background:rgba(20,184,166,0.12);border-left:3px solid #14b8a6;border-radius:6px;font-size:13px;line-height:1.45;color:#e4e4e7;"><strong style="color:#2dd4bf;">Nuovo flusso wake:</strong> con l’opzione sotto il microfono resta in ascolto per «Hey G1» / G1 / G one… → <strong>bip</strong> → poi chiedi senza ripetere la wake. Il <strong>pulsante tondo</strong> è sempre senza wake word.</p>
-  <p class="hint" style="margin-bottom:12px;"><strong>Uso:</strong> prima <strong>Consenti microfono</strong>. Opzionale: checkbox <strong>Ascolto continuo (wake word)</strong>. In alternativa <strong>scrivi</strong> sotto.</p>
-  <p class="hint" style="margin:0 0 12px;padding:10px 12px;background:rgba(59,130,246,0.12);border-left:3px solid #3b82f6;border-radius:6px;font-size:12px;line-height:1.45;color:#e4e4e7;"><strong>Mix tipico: mic USB sul G1 + cassa BT sul telefono:</strong> in <a href="/" style="color:#60a5fa;">setup</a> metti microfono <strong>Jetson (locale)</strong> e altoparlante <strong>Rete/Browser</strong>, Salva. Poi apri <a href="/local" style="color:#60a5fa;">/local</a> dal <strong>telefono</strong>: registra dalla Jetson, la risposta TTS esce dal browser (cassa BT accoppiata al telefono). <strong>/client</strong> qui sotto usa invece il mic del telefono.</p>
-  <div class="step" style="margin-bottom:14px;padding:12px 14px;background:rgba(20,184,166,0.08);border-radius:10px;border:1px solid rgba(20,184,166,0.25);">
-    <label for="wakeListenToggle" style="display:flex;align-items:flex-start;gap:12px;cursor:pointer;font-size:13px;line-height:1.45;padding:8px 6px;margin:-6px;border-radius:10px;touch-action:auto;-webkit-tap-highlight-color:rgba(20,184,166,0.15);">
-      <input type="checkbox" id="wakeListenToggle" class="wake-checkbox" style="width:22px;height:22px;margin:0;flex-shrink:0;touch-action:auto;accent-color:#14b8a6;align-self:flex-start;" />
-      <span><strong>Ascolto continuo (wake word)</strong> — microfono sempre attivo: ascolto «Hey G1» / G1 / G one / Mark one; suono breve «pronto», poi parli la domanda <strong>senza</strong> ripetere la wake (chunk ~4,5 s). Il pulsante <strong>tieni premuto</strong> è sempre <strong>senza</strong> wake word.</span>
-    </label>
-    <p id="wakeListenStatus" class="hint" style="margin:8px 0 0 28px;font-size:12px;color:#71717a;">Disattivato</p>
-  </div>
-  <div id="secureContextWarn" class="step" style="display:none;border-color:rgba(251,191,36,0.4);background:rgba(251,191,36,0.08);padding:14px;">
-    <p style="margin:0 0 10px;font-size:13px;color:#fcd34d;"><strong>«Non sicuro» = stai usando HTTP.</strong> Il browser <strong>blocca solo il microfono</strong> (serve HTTPS). Tendine e checkbox dovrebbero rispondere al tocco; se no, prova il link HTTPS sotto o svuota la cache.</p>
-    <p style="margin:0 0 10px;font-size:13px;"><a id="secureHttpsLink" href="#" style="color:#5eead4;font-weight:600;word-break:break-all;">Apri versione HTTPS (porta 8081)</a></p>
-    <p style="margin:0;font-size:12px;color:#a1a1aa;">In alternativa usa &quot;Scrivi una domanda&quot; senza microfono. <a href="#" id="secureWarnMore" style="color:#14b8a6;">Altri dettagli</a></p>
-    <details id="secureWarnDetails" style="display:none;margin-top:10px;font-size:12px;color:#9ca3af;">
-      <div id="secureWarnMobile" style="display:none;">
-        <p style="margin:0 0 6px;"><b>Da telefono:</b> <a href="http://192.168.10.191:8080/client" style="color:#14b8a6;">192.168.10.191:8080/client</a> (redirect a HTTPS)</p>
-        <p style="margin:0 0 6px;">Al primo accesso: Avanzate → Procedi (certificato).</p>
-        <p style="margin:0;">Da PC (rete diversa): tunnel SSH poi localhost:8081/client</p>
-      </div>
-      <div id="secureWarnDesktop" style="display:none;">
-        <p style="margin:0 0 6px;">Tunnel: <code>ssh -L 8081:localhost:8081 lab@192.168.10.191 -N</code></p>
-        <p style="margin:0;">Poi apri <a href="http://localhost:8081/client" style="color:#14b8a6;">localhost:8081/client</a></p>
-      </div>
-    </details>
-  </div>
-  <p class="hint" id="hintAccess">Per vedere microfoni e cuffie: clicca sotto e consenti quando il browser lo chiede.</p>
 
-  <div id="allowWrap" class="step" style="display:block;">
-    <button type="button" class="btn-allow" id="btnAllow">Consenti microfono e aggiorna dispositivi</button>
-    <p id="deviceStatus">Clicca il pulsante per consentire l&apos;accesso e caricare microfoni e altoparlanti.</p>
-  </div>
-  <div id="ttsOutputWrap" class="step" style="display:none;margin-bottom:14px;padding:12px 14px;background:rgba(59,130,246,0.08);border-radius:10px;border:1px solid rgba(59,130,246,0.25);">
-    <label style="display:block;margin-bottom:6px;color:#a1a1aa;font-size:13px;"><strong>Risposta vocale (dopo Parla)</strong></label>
-    <select id="ttsPlayDest" style="padding:10px 14px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:14px;width:100%;max-width:380px;">
-      <option value="server">Ascolto sulla cassa del robot (Jetson)</option>
-      <option value="browser">Ascolto sul PC / telefono (browser)</option>
-    </select>
-    <p id="ttsServerHint" class="hint" style="margin:8px 0 0;font-size:11px;color:#71717a;">Per la cassa robot: sul Jetson apri il <strong>setup</strong> (<code>/</code>), scegli altoparlante <strong>locale</strong>, Salva, poi ricarica questa pagina. Il microfono resta quello che hai scelto sopra.</p>
-  </div>
-  <button class="btn" id="btn">Tieni premuto e parla</button>
-  <div id="recStatus" style="margin:12px 0;min-height:50px;">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-      <div style="width:120px;height:8px;background:#27272a;border-radius:4px;overflow:hidden;">
-        <div id="levelBar" style="width:0%;height:100%;background:#22c55e;transition:width 0.05s;"></div>
-      </div>
-      <span id="levelLabel" style="font-size:12px;color:#71717a;">Livello: --</span>
+  <!-- 1. ASCOLTO CONTINUO (Wake Word) -->
+  <div style="margin-bottom:20px;padding:16px;border-radius:12px;background:rgba(20,184,166,0.06);border:1px solid rgba(20,184,166,0.2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <h2 style="font-size:1.15rem;margin:0;color:#2dd4bf;">Ascolto continuo</h2>
+      <label for="wakeListenToggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">
+        <span style="font-size:12px;color:#9ca3af;" id="wakeToggleLabel">OFF</span>
+        <input type="checkbox" id="wakeListenToggle" class="wake-checkbox" style="width:22px;height:22px;margin:0;accent-color:#14b8a6;" />
+      </label>
     </div>
-    <p class="hint" id="recDebug" style="font-size:11px;color:#71717a;min-height:18px;margin:0;"></p>
+    <p id="wakeListenStatus" style="margin:0 0 10px;font-size:13px;color:#71717a;">Disattivato</p>
+    <div id="recStatus" style="min-height:30px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+        <div style="flex:1;height:16px;background:#1e1e2e;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);">
+          <div id="levelBar" style="width:0%;height:100%;background:#22c55e;transition:width 0.06s;border-radius:8px;"></div>
+        </div>
+        <span id="levelLabel" style="font-size:12px;color:#71717a;font-family:monospace;min-width:140px;">Livello: --</span>
+      </div>
+      <p class="hint" id="recDebug" style="font-size:11px;color:#71717a;min-height:16px;margin:0;"></p>
+    </div>
+    <div id="activeMicIndicator" style="margin:8px 0 0;padding:6px 10px;border-radius:6px;font-size:12px;display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.03);">
+      <span id="activeMicDot" style="width:8px;height:8px;border-radius:50%;background:#71717a;flex-shrink:0;"></span>
+      <span id="activeMicLabel" style="color:#9ca3af;">Microfono: caricamento...</span>
+    </div>
   </div>
+
+  <!-- 2. PUSH TO TALK -->
+  <div style="margin-bottom:20px;">
+    <h2 style="font-size:1.15rem;margin:0 0 10px;color:#e4e4e7;">Tieni premuto e parla</h2>
+    <button class="btn" id="btn">Tieni premuto e parla</button>
+  </div>
+
+  <!-- RISULTATO (condiviso) -->
   <div class="result" id="result"></div>
-  <div class="step" style="margin-top:16px;">
-    <label style="display:block;margin-bottom:6px;color:#a1a1aa;font-size:13px;">Scrivi una domanda (senza microfono)</label>
+
+  <!-- 3. SCRIVI -->
+  <div style="margin-top:16px;margin-bottom:16px;">
+    <h2 style="font-size:1.15rem;margin:0 0 8px;color:#e4e4e7;">Scrivi una domanda</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <input type="text" id="textInput" placeholder="Es: Che ore sono?" style="flex:1;min-width:180px;padding:10px 14px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:14px;" />
       <button type="button" id="btnText" style="padding:12px 22px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Invia</button>
     </div>
-    <p class="hint" id="textStatus" style="margin-top:6px;min-height:18px;"></p>
+    <p class="hint" id="textStatus" style="margin-top:6px;min-height:16px;"></p>
   </div>
-  <p class="hint" style="margin-top:12px;">
-    <button type="button" id="btnTest" style="padding:8px 14px;background:rgba(255,255,255,0.06);color:#9ca3af;border:1px solid rgba(255,255,255,0.08);border-radius:8px;cursor:pointer;font-size:12px;">Test pipeline</button>
-    <button type="button" id="btnSample" style="padding:8px 14px;background:rgba(255,255,255,0.06);color:#9ca3af;border:1px solid rgba(255,255,255,0.08);border-radius:8px;cursor:pointer;font-size:12px;margin-left:8px;">Test campione</button>
-    <span id="testStatus"></span>
-  </p>
+
+  <!-- CONFIG -->
+  <div id="secureContextWarn" class="step" style="display:none;border-color:rgba(251,191,36,0.4);background:rgba(251,191,36,0.08);padding:14px;">
+    <p style="margin:0 0 10px;font-size:13px;color:#fcd34d;"><strong>Serve HTTPS per il microfono browser.</strong></p>
+    <p style="margin:0 0 10px;font-size:13px;"><a id="secureHttpsLink" href="#" style="color:#5eead4;font-weight:600;">Apri versione HTTPS</a></p>
+    <p style="margin:0;font-size:12px;color:#a1a1aa;"><a href="#" id="secureWarnMore" style="color:#14b8a6;">Dettagli</a></p>
+    <details id="secureWarnDetails" style="display:none;margin-top:10px;font-size:12px;color:#9ca3af;">
+      <div id="secureWarnMobile" style="display:none;"><p style="margin:0;">Avanzate, Procedi.</p></div>
+      <div id="secureWarnDesktop" style="display:none;"><p style="margin:0;">Tunnel SSH poi localhost:8081/client</p></div>
+    </details>
+  </div>
+  <p class="hint" id="hintAccess" style="margin:0 0 6px;font-size:11px;">Per il microfono browser: consenti l'accesso.</p>
+  <div id="allowWrap" class="step" style="display:block;margin-bottom:8px;">
+    <button type="button" class="btn-allow" id="btnAllow">Consenti microfono e aggiorna dispositivi</button>
+    <p id="deviceStatus" style="font-size:11px;margin:4px 0 0;color:#52525b;">Clicca per caricare dispositivi.</p>
+  </div>
+  <div id="ttsOutputWrap" class="step" style="display:none;margin-bottom:10px;padding:10px 12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.2);">
+    <label style="display:block;margin-bottom:4px;color:#a1a1aa;font-size:12px;">Risposta vocale</label>
+    <select id="ttsPlayDest" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;width:100%;max-width:300px;">
+      <option value="server">Cassa robot (Jetson)</option>
+      <option value="browser">Browser (telefono/PC)</option>
+    </select>
+    <p id="ttsServerHint" class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;"></p>
+  </div>
+  <details style="margin-top:8px;">
+    <summary style="cursor:pointer;font-size:12px;color:#52525b;">Test & debug</summary>
+    <div style="margin-top:8px;">
+      <button type="button" id="btnTest" style="padding:8px 14px;background:rgba(255,255,255,0.06);color:#9ca3af;border:1px solid rgba(255,255,255,0.08);border-radius:8px;cursor:pointer;font-size:12px;">Test pipeline</button>
+      <button type="button" id="btnSample" style="padding:8px 14px;background:rgba(255,255,255,0.06);color:#9ca3af;border:1px solid rgba(255,255,255,0.08);border-radius:8px;cursor:pointer;font-size:12px;margin-left:8px;">Test campione</button>
+      <button type="button" id="btnMicMonitor" style="padding:8px 14px;background:rgba(255,255,255,0.06);color:#9ca3af;border:1px solid rgba(255,255,255,0.08);border-radius:8px;cursor:pointer;font-size:12px;margin-left:8px;">Monitor mic</button>
+      <span id="testStatus" style="font-size:12px;"></span>
+      <div id="micMonitorBody" style="display:none;margin-top:8px;">
+        <div style="flex:1;height:12px;background:#1e1e2e;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);margin-bottom:4px;">
+          <div id="monLevelBar" style="width:0%;height:100%;background:#22c55e;transition:width 0.06s;border-radius:6px;"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;"><span id="monMicName" style="font-size:10px;color:#71717a;">--</span><span id="monLevelInfo" style="font-size:11px;color:#9ca3af;font-family:monospace;">RMS=-- Peak=-- dB=--</span></div>
+      </div>
+    </div>
+  </details>
+  <div id="micMonitorWrap" style="display:none;"></div>
     </section>
     <section id="section-knowledge" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Knowledge</h2>
@@ -2035,9 +2423,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <section id="section-devices" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Dispositivi</h2>
   <p class="hint" style="margin-bottom:10px;"><strong>Jetson (Unitree):</strong> il server esegue una <strong>scansione</strong> (PortAudio + ALSA + USB). Le voci <em>Jetson (server)</em> sono i dispositivi collegati alla scheda audio del robot. <em>Browser</em> = microfono/casse di questo telefono o PC.</p>
-  <p class="hint" style="margin-bottom:12px;font-size:12px;">Per elenco completo e salvataggio guidato apri anche <a href="/setup" style="color:#14b8a6;">/setup</a> sullo stesso indirizzo. <strong>Parla</strong> registra dal microfono <em>Browser</em> se controlli da remoto; per usare il mic fisico sulla Jetson usa <a href="/local" style="color:#14b8a6;">/local</a> o <a href="/listen" style="color:#14b8a6;">/listen</a> dal browser sul robot.</p>
+  <p class="hint" style="margin-bottom:12px;font-size:12px;">Per elenco completo e salvataggio guidato apri anche <a href="/setup" style="color:#14b8a6;">/setup</a>. In <strong>Parla</strong>, se scegli <strong>Jetson – server</strong> qui e salvi, l&apos;ascolto è sul <strong>microfono USB del robot</strong>; se scegli <strong>Browser</strong>, l&apos;ascolto è sul telefono/PC.</p>
   <div id="devicesWrap" class="step">
-    <label style="display:block;margin-bottom:6px;">Microfono (per <strong>Parla</strong> usa una voce &quot;Browser&quot; se sei da telefono)</label>
+    <label style="display:block;margin-bottom:6px;">Microfono (<strong>Jetson</strong> = USB sul robot; <strong>Browser</strong> = questo dispositivo)</label>
     <select id="mic"><option value="">Caricamento...</option></select>
     <label style="display:block;margin-top:12px;margin-bottom:6px;">Altoparlante / cassa</label>
     <select id="speaker"><option value="">Caricamento...</option></select>
@@ -2072,8 +2460,33 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
   </div>
     </section>
   </main>
+  <header class="header">
+    <button type="button" class="hamburger" id="hamburger" aria-label="Menu">&#9776;</button>
+    <h1>G1 Talk</h1>
+  </header>
 
   <script>
+    (function(){
+      function syncMainHeaderPad(){
+        var hdr = document.querySelector('.header');
+        var main = document.querySelector('.main-content');
+        if (!hdr || !main) return;
+        var narrow = window.matchMedia('(max-width: 480px)').matches;
+        var base = narrow ? 16 : 24;
+        var h = hdr.getBoundingClientRect().height;
+        if (h < 32) {
+          requestAnimationFrame(syncMainHeaderPad);
+          return;
+        }
+        var slack = narrow ? 12 : 4;
+        main.style.paddingTop = (base + h + slack) + 'px';
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', syncMainHeaderPad);
+      else syncMainHeaderPad();
+      window.addEventListener('resize', syncMainHeaderPad);
+      window.addEventListener('orientationchange', function(){ setTimeout(syncMainHeaderPad, 200); });
+      if (window.visualViewport) window.visualViewport.addEventListener('resize', syncMainHeaderPad);
+    })();
     function audioBufferToWav(buffer){
       const nc = buffer.numberOfChannels, sr = buffer.sampleRate, len = buffer.length;
       const dataSize = len * nc * 2;
@@ -2152,29 +2565,34 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       } catch(_) { return null; }
     }
     (function(){
-      const sidebar = document.getElementById('sidebar');
-      const overlay = document.getElementById('overlay');
-      const hamburger = document.getElementById('hamburger');
-      function openMenu(){ sidebar.classList.add('open'); overlay.classList.add('visible'); }
-      function closeMenu(){ sidebar.classList.remove('open'); overlay.classList.remove('visible'); }
-      function toggleMenu(){ sidebar.classList.contains('open') ? closeMenu() : openMenu(); }
-      hamburger.addEventListener('click', function(e){ e.preventDefault(); toggleMenu(); });
-      overlay.addEventListener('click', function(e){ e.preventDefault(); closeMenu(); });
-      document.querySelectorAll('.sidebar nav a').forEach(a=>{
-        const go = (e)=>{ e.preventDefault(); closeMenu();
-          document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
-          document.querySelectorAll('.sidebar nav a').forEach(l=>l.classList.remove('active'));
-          const sec = a.dataset.section;
-          const el = document.getElementById('section-'+sec);
-          if(el){ el.classList.add('active'); a.classList.add('active'); }
-          if((sec==='soundboard'||sec==='parla') && navigator.mediaDevices){
-            const sbOut = document.getElementById('sbOutput');
-            if(sbOut && sbOut.options.length<=1 && typeof requestAndLoadDevices==='function') requestAndLoadDevices();
-          }
-          if(sec==='runsheet' && typeof loadRunSheet==='function') loadRunSheet();
-        };
-        a.addEventListener('click', go);
-      });
+      var sidebar = document.getElementById('sidebar');
+      var overlay = document.getElementById('overlay');
+      var hamburger = document.getElementById('hamburger');
+      function openMenu(){ if(sidebar) sidebar.classList.add('open'); if(overlay) overlay.classList.add('visible'); }
+      function closeMenu(){ if(sidebar) sidebar.classList.remove('open'); if(overlay) overlay.classList.remove('visible'); }
+      function toggleMenu(){ if(sidebar && sidebar.classList.contains('open')) closeMenu(); else openMenu(); }
+      if(hamburger){
+        var lastHb = 0;
+        hamburger.addEventListener('touchend', function(e){
+          e.preventDefault();
+          lastHb = Date.now();
+          toggleMenu();
+        }, {passive:false});
+        hamburger.addEventListener('click', function(e){
+          e.preventDefault();
+          if(Date.now() - lastHb < 450) return;
+          toggleMenu();
+        });
+      }
+      if(overlay) overlay.addEventListener('click', function(e){ e.preventDefault(); closeMenu(); });
+      var navLinks = document.querySelectorAll('.sidebar nav a');
+      for (var ai = 0; ai < navLinks.length; ai++) {
+        navLinks[ai].addEventListener('click', function(e){
+          e.preventDefault();
+          var sec = this.getAttribute('data-section');
+          if (sec && typeof window.g1ActivateClientSection === 'function') window.g1ActivateClientSection(sec);
+        });
+      }
       closeMenu();
       document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') closeMenu(); });
     })();
@@ -2183,6 +2601,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (g) g.textContent = location.origin + '/client';
     })();
     const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
+    const wsParlaUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/parla';
+    let wsParla = null;
+    let recordingServerJetson = false;
     const MAX_REC_SEC = 20;
     /* PTT: un filo più lungo prima dell'invio (meno frasi troncate). */
     const MIN_REC_MS = 1200;
@@ -2191,6 +2612,32 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let _serverDevicesCache = { microphones: [], speakers: [], hardware_probe: null };
     function escapeHtmlDevices(s){
       return String(s||'').replace(/&/g,'&amp;').replace(/\u003c/g,'&lt;').replace(/"/g,'&quot;');
+    }
+    function updateActiveMicIndicator(){
+      const dot = document.getElementById('activeMicDot');
+      const lbl = document.getElementById('activeMicLabel');
+      if (!dot || !lbl) return;
+      const micSel = document.getElementById('mic');
+      const val = micSel ? micSel.value : '';
+      const opt = micSel ? micSel.options[micSel.selectedIndex] : null;
+      const name = opt ? opt.textContent : '';
+      const isLocal = val && String(val).indexOf('local_') === 0;
+      const isBrowser = val && String(val).indexOf('webmic_') === 0;
+      const wt = document.getElementById('wakeListenToggle');
+      const listening = wt && wt.checked;
+      if (isLocal) {
+        dot.style.background = listening ? '#22c55e' : '#14b8a6';
+        dot.style.boxShadow = listening ? '0 0 6px #22c55e' : 'none';
+        lbl.innerHTML = '<strong style="color:#2dd4bf;">Jetson USB</strong> — ' + escapeHtmlDevices(name) + (listening ? ' <span style="color:#22c55e;">(ascolto attivo)</span>' : '');
+      } else if (isBrowser) {
+        dot.style.background = listening ? '#22c55e' : '#3b82f6';
+        dot.style.boxShadow = listening ? '0 0 6px #22c55e' : 'none';
+        lbl.innerHTML = '<strong style="color:#60a5fa;">Browser</strong> — ' + escapeHtmlDevices(name) + (listening ? ' <span style="color:#22c55e;">(ascolto attivo)</span>' : '');
+      } else {
+        dot.style.background = '#71717a';
+        dot.style.boxShadow = 'none';
+        lbl.innerHTML = '<span style="color:#71717a;">Nessun microfono selezionato</span>';
+      }
     }
     function micForBrowserCapture(){
       const v = document.getElementById('mic') && document.getElementById('mic').value;
@@ -2254,6 +2701,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let isRecording = false, pendingStop = false, currentStream = null;
     let wakeStream = null, wakeRawStream = null, wakeListenPending = false;
     let wakeListenActive = false, wakeMimeType = '', wakeActiveMr = null;
+    let wsListenServer = null, wakeServerMode = false;
     let wakeCommandMode = false, wakeCommandIdleTimer = null;
     let wakeAudioInFlight = false, wakeQueuedBlob = null;
     let wakeLevelCtx = null, wakeAnalyser = null, wakeLevelSampleInterval = null;
@@ -2500,6 +2948,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       scheduleNextWakeSliceIfListening = function(){};
       stopWakeLevelMeter();
       clearTtsPlaybackQueue();
+      stopWakeServerListener();
       try {
         if (wakeActiveMr && wakeActiveMr.state !== 'inactive') wakeActiveMr.stop();
       } catch(_){}
@@ -2514,19 +2963,130 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       resetWakeCommandMode();
       wakeQueuedBlob = null;
       wakeAudioInFlight = false;
+      updateActiveMicIndicator();
+    }
+    var wsLevelMonitor = null;
+    function startLevelMonitor(){
+      if (wsLevelMonitor) return;
+      var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsLevelMonitor = new WebSocket(proto + '//' + location.host + '/ws/mic-level');
+      var bar = document.getElementById('levelBar');
+      var lbl = document.getElementById('levelLabel');
+      var dbg = document.getElementById('recDebug');
+      wsLevelMonitor.onmessage = function(ev){
+        try {
+          var d = JSON.parse(ev.data);
+          if (d.type === 'info') {
+            if (dbg) { dbg.textContent = 'Mic Jetson: ' + d.name; dbg.style.color = '#14b8a6'; }
+          } else if (d.type === 'level') {
+            var pct = Math.max(0, Math.min(100, ((d.db + 60) / 60) * 100));
+            if (bar) {
+              bar.style.width = pct.toFixed(1) + '%';
+              bar.style.background = d.peak > 0.5 ? '#ef4444' : d.rms > 0.02 ? '#22c55e' : d.rms > 0.005 ? '#eab308' : '#52525b';
+            }
+            if (lbl) lbl.textContent = d.rms > 0.01 ? 'Audio: ' + (pct|0) + '% (RMS ' + d.rms.toFixed(3) + ')' : 'Silenzio (RMS ' + d.rms.toFixed(4) + ')';
+          } else if (d.type === 'error') {
+            if (lbl) lbl.textContent = 'Errore mic: ' + (d.data || '?');
+          }
+        } catch(_){}
+      };
+      wsLevelMonitor.onclose = function(){ wsLevelMonitor = null; if (bar) bar.style.width = '0%'; if (lbl) lbl.textContent = 'Livello: --'; };
+      wsLevelMonitor.onerror = function(){ try { wsLevelMonitor.close(); } catch(_){} wsLevelMonitor = null; };
+    }
+    function stopLevelMonitor(){
+      if (wsLevelMonitor) { try { wsLevelMonitor.close(); } catch(_){} wsLevelMonitor = null; }
+      var bar = document.getElementById('levelBar');
+      var lbl = document.getElementById('levelLabel');
+      if (bar) bar.style.width = '0%';
+      if (lbl) lbl.textContent = 'Livello: --';
+    }
+    function stopWakeServerListener(){
+      wakeServerMode = false;
+      if (wsListenServer) {
+        try { wsListenServer.close(); } catch(_){}
+        wsListenServer = null;
+      }
+      stopLevelMonitor();
+    }
+    function startWakeServerListener(){
+      wakeServerMode = true;
+      var wsListenUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/listen';
+      wsListenServer = new WebSocket(wsListenUrl);
+      var st = document.getElementById('wakeListenStatus');
+      wsListenServer.onopen = function(){
+        if (st) st.textContent = 'In ascolto per «Hey G1» (mic Jetson)…';
+        updateActiveMicIndicator();
+        startLevelMonitor();
+      };
+      wsListenServer.onmessage = function(ev){
+        try {
+          var msg = JSON.parse(ev.data);
+          if (msg.type === 'error') {
+            if (st) st.textContent = 'Errore server: ' + (msg.data || '?');
+            stopWakeServerListener();
+            var el = document.getElementById('wakeListenToggle');
+            if (el) el.checked = false;
+            return;
+          }
+          if (msg.type === 'status') {
+            if (st) st.textContent = msg.data || 'In ascolto…';
+            return;
+          }
+          if (msg.type === 'response' && msg.data) {
+            var d = msg.data;
+            if (d.wake_miss) return;
+            if (d.wake_ack) { playWakeChime(); if (st) st.textContent = 'Ti ascolto…'; return; }
+            if (d.response) {
+              var resEl = document.getElementById('result');
+              if (resEl) resEl.innerHTML = '<div class="ok"><strong>Tu:</strong> ' + (d.text||'').replace(/</g,'&lt;') + '<br><strong>G1:</strong> ' + (d.response||'').replace(/</g,'&lt;') + '</div>';
+            }
+            if (d.audio_base64) {
+              enqueueTtsPlayback(d.audio_base64, function(){ if (st) st.textContent = 'In ascolto per «Hey G1» (mic Jetson)…'; });
+            }
+          }
+        } catch(_){}
+      };
+      wsListenServer.onclose = function(){
+        wakeServerMode = false;
+        wsListenServer = null;
+        stopLevelMonitor();
+        var el = document.getElementById('wakeListenToggle');
+        if (el && el.checked) {
+          if (st) st.textContent = 'Connessione persa. Riattiva per riprovare.';
+          el.checked = false;
+        }
+        updateActiveMicIndicator();
+      };
+      wsListenServer.onerror = function(){
+        if (st) st.textContent = 'Errore connessione WebSocket listen.';
+        stopWakeServerListener();
+        var el = document.getElementById('wakeListenToggle');
+        if (el) el.checked = false;
+        updateActiveMicIndicator();
+      };
     }
     async function startWakeRecorder(){
       const el = document.getElementById('wakeListenToggle');
-      if (!el || !el.checked || !navigator.mediaDevices) return;
+      if (!el || !el.checked) return;
       if (isRecording) return;
       stopWakeRecorder();
-      const micId = document.getElementById('mic').value;
+      const micId = document.getElementById('mic') ? document.getElementById('mic').value : '';
+      if (micId && String(micId).indexOf('local_') === 0) {
+        startWakeServerListener();
+        return;
+      }
+      if (!navigator.mediaDevices) {
+        const st = document.getElementById('wakeListenStatus');
+        if (st) st.textContent = 'MediaDevices non disponibile (serve HTTPS).';
+        el.checked = false;
+        return;
+      }
       try {
         wakeRawStream = await navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micForBrowserCapture()));
         startWakeSpeechEnhancer();
       } catch(e) {
         const st = document.getElementById('wakeListenStatus');
-        if (st) st.textContent = 'Microfono non disponibile per l\\'ascolto continuo.';
+        if (st) st.textContent = 'Microfono non disponibile per ascolto continuo.';
         el.checked = false;
         return;
       }
@@ -2597,6 +3157,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           const st = document.getElementById('wakeListenStatus');
           if (st) st.textContent = 'Disattivato';
         }
+        var wtl = document.getElementById('wakeToggleLabel');
+        if (wtl) wtl.textContent = wakeListenToggleEl.checked ? 'ON' : 'OFF';
       };
     }
 
@@ -2629,6 +3191,72 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
 
 
+    function onWsPipelineMessage(e){
+      let d;
+      try { d = JSON.parse(e.data); } catch(_) { document.getElementById('result').innerHTML = '<div class="warn">Errore risposta server</div>'; return; }
+      if(d.type==='response'){
+        stopThinkingFeedback();
+        const r = d.data;
+        let deferWakeDone = false;
+        try {
+          if (wakeListenPending) {
+            wakeListenPending = false;
+            if (r.wake_miss) {
+              btn.disabled = false;
+              return;
+            }
+            if (r.wake_ack) {
+              playWakeChime();
+              wakeCommandMode = true;
+              startWakeCommandIdleTimer();
+              const wst = document.getElementById('wakeListenStatus');
+              if (wst) wst.textContent = 'Ti ascolto… parla pure.';
+              btn.disabled = false;
+              deferWakeDone = true;
+              setTimeout(function(){ onWakeResponseDone(); }, 320);
+              return;
+            }
+            if (!r.response && r.message) {
+              const wst = document.getElementById('wakeListenStatus');
+              if (wakeCommandMode && wst) wst.textContent = 'Ti ascolto… (parla 1–2 sec più forte)';
+              else if (wst) wst.textContent = 'In ascolto per «Hey G1»…';
+              document.getElementById('result').innerHTML = '<div class="warn">'+r.message+'</div>';
+              btn.disabled = false;
+              return;
+            }
+          }
+          btn.disabled = false;
+          recordingServerJetson = false;
+          document.getElementById('recDebug').textContent = r.text ? '' : (r.message || '');
+          document.getElementById('recDebug').style.color = r.message ? '#f59e0b' : '#71717a';
+          const msg = r.message ? '<div class="warn">'+r.message+'</div>' : '';
+          const dur = r.duration_ms ? ' <span style="color:#71717a;font-size:12px;">('+r.duration_ms+' ms)</span>' : '';
+          document.getElementById('result').innerHTML = msg + '<div><b>Hai detto:</b> '+(r.text||'')+'</div><div><b>Risposta:</b> '+(r.response||'')+dur+'</div>';
+          const hasTts = lastPlayOn === 'browser' && r.audio_base64 && String(r.audio_base64).length > 50;
+          if (hasTts) {
+            deferWakeDone = true;
+            enqueueTtsPlayback(r.audio_base64, onWakeResponseDone);
+          }
+          const wst = document.getElementById('wakeListenStatus');
+          if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) wst.textContent = 'In ascolto per «Hey G1»…';
+          if (wakeCommandMode && !r.wake_ack && r.wake_miss !== true && (String(r.text||'').trim() || String(r.response||'').trim())) {
+            startWakeCommandIdleTimer();
+          }
+        } finally {
+          if (!deferWakeDone) onWakeResponseDone();
+        }
+      } else if(d.type==='error'){
+        stopThinkingFeedback();
+        clearTtsPlaybackQueue();
+        wakeAudioInFlight = false;
+        wakeQueuedBlob = null;
+        btn.disabled = false;
+        recordingServerJetson = false;
+        document.getElementById('result').innerHTML = '<div class="warn">Errore: '+ (d.data || '')+'</div>';
+      } else if(d.type==='play' && d.data){
+        enqueueTtsPlayback(d.data, null);
+      }
+    }
     function connect(){
       ws = new WebSocket(wsUrl);
       ws.onopen = () => {
@@ -2636,70 +3264,66 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         document.getElementById('recDebug').textContent = 'WebSocket OK';
       };
       ws.onclose = () => { setTimeout(connect, 3000); document.getElementById('result').innerHTML = '<div class="warn">Riconnessione...</div>'; document.getElementById('recDebug').textContent = 'WebSocket disconnesso'; };
-      ws.onmessage = (e) => {
-        let d;
-        try { d = JSON.parse(e.data); } catch(_) { document.getElementById('result').innerHTML = '<div class="warn">Errore risposta server</div>'; return; }
-        if(d.type==='response'){
-          stopThinkingFeedback();
-          const r = d.data;
-          let deferWakeDone = false;
-          try {
-            if (wakeListenPending) {
-              wakeListenPending = false;
-              if (r.wake_miss) {
-                btn.disabled = false;
-                return;
-              }
-              if (r.wake_ack) {
-                playWakeChime();
-                wakeCommandMode = true;
-                startWakeCommandIdleTimer();
-                const wst = document.getElementById('wakeListenStatus');
-                if (wst) wst.textContent = 'Ti ascolto… parla pure.';
-                btn.disabled = false;
-                deferWakeDone = true;
-                setTimeout(function(){ onWakeResponseDone(); }, 320);
-                return;
-              }
-              if (!r.response && r.message) {
-                const wst = document.getElementById('wakeListenStatus');
-                if (wakeCommandMode && wst) wst.textContent = 'Ti ascolto… (parla 1–2 sec più forte)';
-                else if (wst) wst.textContent = 'In ascolto per «Hey G1»…';
-                document.getElementById('result').innerHTML = '<div class="warn">'+r.message+'</div>';
-                btn.disabled = false;
-                return;
-              }
-            }
-            btn.disabled = false;
-            document.getElementById('recDebug').textContent = r.text ? '' : (r.message || '');
-            document.getElementById('recDebug').style.color = r.message ? '#f59e0b' : '#71717a';
-            const msg = r.message ? '<div class="warn">'+r.message+'</div>' : '';
-            const dur = r.duration_ms ? ' <span style="color:#71717a;font-size:12px;">('+r.duration_ms+' ms)</span>' : '';
-            document.getElementById('result').innerHTML = msg + '<div><b>Hai detto:</b> '+(r.text||'')+'</div><div><b>Risposta:</b> '+(r.response||'')+dur+'</div>';
-            const hasTts = lastPlayOn === 'browser' && r.audio_base64 && String(r.audio_base64).length > 50;
-            if (hasTts) {
-              deferWakeDone = true;
-              enqueueTtsPlayback(r.audio_base64, onWakeResponseDone);
-            }
-            const wst = document.getElementById('wakeListenStatus');
-            if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) wst.textContent = 'In ascolto per «Hey G1»…';
-            if (wakeCommandMode && !r.wake_ack && r.wake_miss !== true && (String(r.text||'').trim() || String(r.response||'').trim())) {
-              startWakeCommandIdleTimer();
-            }
-          } finally {
-            if (!deferWakeDone) onWakeResponseDone();
-          }
-        } else if(d.type==='error'){
-          stopThinkingFeedback();
-          clearTtsPlaybackQueue();
-          wakeAudioInFlight = false;
-          wakeQueuedBlob = null;
-          btn.disabled = false;
-          document.getElementById('result').innerHTML = '<div class="warn">Errore: '+ (d.data || '')+'</div>';
-        } else if(d.type==='play' && d.data){
-          enqueueTtsPlayback(d.data, null);
-        }
-      };
+      ws.onmessage = onWsPipelineMessage;
+    }
+    function ensureParlaWs(){
+      return new Promise(function(resolve, reject){
+        if (wsParla && wsParla.readyState === WebSocket.OPEN) return resolve();
+        try {
+          wsParla = new WebSocket(wsParlaUrl);
+          wsParla.onmessage = onWsPipelineMessage;
+          wsParla.onerror = function(){ reject(new Error('ws parla')); };
+          const to = setTimeout(function(){ reject(new Error('timeout ws parla')); }, 10000);
+          wsParla.onopen = function(){ clearTimeout(to); resolve(); };
+        } catch(err) { reject(err); }
+      });
+    }
+    async function startRecServerPtt(){
+      if (isRecording) return;
+      wakeListenPending = false;
+      stopWakeRecorder();
+      const spkVal = document.getElementById('speaker') ? document.getElementById('speaker').value : '';
+      const ttsEl = document.getElementById('ttsPlayDest');
+      const wantServerTts = ttsEl && ttsEl.value === 'server';
+      if (wantServerTts) { lastPlayOn = 'server'; lastSinkId = null; } else {
+        lastPlayOn = 'browser';
+        lastSinkId = (spkVal && spkVal.startsWith('browser_') && spkVal !== 'browser_default') ? spkVal.replace('browser_','') : null;
+      }
+      try {
+        await ensureParlaWs();
+      } catch(e) {
+        document.getElementById('result').innerHTML = '<div class="warn">Connessione WebSocket «Parla robot» fallita. Verifica microfono locale in <a href="/" style="color:#14b8a6">setup</a> e ricarica.</div>';
+        return;
+      }
+      recordingServerJetson = true;
+      isRecording = true;
+      pendingStop = false;
+      btn.classList.add('recording');
+      document.getElementById('levelBar').style.width = '60%';
+      document.getElementById('levelBar').style.background = '#14b8a6';
+      document.getElementById('levelLabel').textContent = 'Ingresso: Jetson USB (mic sul robot)';
+      document.getElementById('recDebug').textContent = 'Registrazione dal microfono sul robot…';
+      document.getElementById('recDebug').style.color = '#22c55e';
+      updateActiveMicIndicator();
+      recStartTime = Date.now();
+      var pulseTick = 0;
+      recDurationInterval = setInterval(function(){
+        const s = ((Date.now()-recStartTime)/1000).toFixed(1);
+        document.getElementById('recDebug').textContent = 'Registrazione Jetson: '+s+' sec';
+        pulseTick++;
+        var w = 40 + 30 * Math.abs(Math.sin(pulseTick * 0.25));
+        document.getElementById('levelBar').style.width = w.toFixed(0)+'%';
+      }, 150);
+      recTimeout = setTimeout(function(){ stopRec(); }, MAX_REC_SEC * 1000);
+      try {
+        wsParla.send(JSON.stringify({type:'start'}));
+      } catch(err) {
+        recordingServerJetson = false;
+        isRecording = false;
+        btn.classList.remove('recording');
+        clearAllIntervals();
+        document.getElementById('result').innerHTML = '<div class="warn">Invio start fallito.</div>';
+      }
     }
     connect();
     (function loadServerTtsConfig(){
@@ -2786,6 +3410,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         });
         micHtml += '</optgroup>';
         micSel.innerHTML = micHtml;
+        micSel.onchange = function(){ updateActiveMicIndicator(); };
 
         const ss = (serverData.speakers || []).filter(function(s){
           return s && (s.type === 'local' || (s.value && String(s.value).indexOf('local_') === 0));
@@ -2840,7 +3465,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (cfg.speaker && cfg.speaker.value) {
             try { spkSel.value = cfg.speaker.value; } catch(_){}
           }
-        }).catch(function(){});
+          updateActiveMicIndicator();
+        }).catch(function(){ updateActiveMicIndicator(); });
       } catch(e) {
         micSel.innerHTML = '<option value="">Errore: '+escapeHtmlDevices(e.message)+'</option>';
         spkSel.innerHTML = '<option value="browser_default">Riproduci qui</option>';
@@ -2897,10 +3523,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         loadDevices();
         requestAndLoadDevices();
       } else if (isSecure) {
-        /* Da IP: loadDevices subito; poi permesso mic così Chrome mostra i nomi reali (prima sono vuoti/generici). */
         loadDevices();
         requestAndLoadDevices();
+      } else {
+        loadDevices();
       }
+    } else {
+      loadDevices();
     }
 
     let knowledgeEntries = {};
@@ -2959,17 +3588,28 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         }).catch(function(e){ alert('Cassa robot: ' + (e.message || String(e))); });
         return;
       }
-      let b64 = null, fmt = 'mp3';
-      if(mode==='clean' && s.audio_base64_clean && s.audio_base64_clean.length>50){ b64 = s.audio_base64_clean; fmt = s.format_clean||'mp3'; }
-      else if(s.audio_base64 && s.audio_base64.length>50){ b64 = s.audio_base64; fmt = s.format||'mp3'; }
-      if(!b64 && mode==='clean' && s.audio_base64 && s.audio_base64.length>50){ b64 = s.audio_base64; fmt = s.format||'mp3'; }
-      if(!b64 && s.audio_base64_clean && s.audio_base64_clean.length>50){ b64 = s.audio_base64_clean; fmt = s.format_clean||'mp3'; }
-      if(!b64) return;
-      const a = new Audio('data:'+sbMimeForFmt(fmt)+';base64,'+b64);
-      const sbOut = document.getElementById('sbOutput');
-      const sinkId = (sbOut && sbOut.value && sbOut.value !== 'default') ? sbOut.value : null;
-      if(sinkId && typeof a.setSinkId === 'function') { try { a.setSinkId(sinkId); } catch(_){} }
-      a.play();
+      function playFromData(sd){
+        let b64 = null, fmt = 'mp3';
+        if(mode==='clean' && sd.audio_base64_clean && sd.audio_base64_clean.length>50){ b64 = sd.audio_base64_clean; fmt = sd.format_clean||'mp3'; }
+        else if(sd.audio_base64 && sd.audio_base64.length>50){ b64 = sd.audio_base64; fmt = sd.format||'mp3'; }
+        if(!b64 && mode==='clean' && sd.audio_base64 && sd.audio_base64.length>50){ b64 = sd.audio_base64; fmt = sd.format||'mp3'; }
+        if(!b64 && sd.audio_base64_clean && sd.audio_base64_clean.length>50){ b64 = sd.audio_base64_clean; fmt = sd.format_clean||'mp3'; }
+        if(!b64) return;
+        const a = new Audio('data:'+sbMimeForFmt(fmt)+';base64,'+b64);
+        const sbOut = document.getElementById('sbOutput');
+        const sinkId = (sbOut && sbOut.value && sbOut.value !== 'default') ? sbOut.value : null;
+        if(sinkId && typeof a.setSinkId === 'function') { try { a.setSinkId(sinkId); } catch(_){} }
+        a.play();
+      }
+      if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
+        playFromData(s);
+        return;
+      }
+      if (typeof slotIndex !== 'number') return;
+      fetch('/api/soundboard-slot/'+slotIndex).then(function(r){
+        if (!r.ok) return Promise.reject(new Error('HTTP '+r.status));
+        return r.json();
+      }).then(playFromData).catch(function(e){ alert('Soundboard browser: '+(e.message||String(e))); });
     }
     const sbDefaultIcons = ['🎤','🔊','📢','🎵','🎶','🎧','🎭','🚀','⭐','💡','🤝','☕','🎬','📷','🚪','🎁','✨','🏢','👋','🙏'];
     function sbIconAt(i){ return sbDefaultIcons[i % sbDefaultIcons.length]; }
@@ -2983,8 +3623,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const grid = document.getElementById('soundboardGrid');
       if (!grid) return;
       grid.innerHTML = soundboardSlots.map((s,i)=>{
-        const hasR = !!(s.audio_base64 && s.audio_base64.length > 50);
-        const hasN = !!(s.audio_base64_clean && s.audio_base64_clean.length > 50);
+        const hasR = (typeof s.has_robot === 'boolean') ? s.has_robot : !!(s.audio_base64 && s.audio_base64.length > 50);
+        const hasN = (typeof s.has_clean === 'boolean') ? s.has_clean : !!(s.audio_base64_clean && s.audio_base64_clean.length > 50);
         const hasAudio = hasR || hasN;
         const border = hasAudio ? '2px solid #14b8a6' : '1px solid rgba(255,255,255,0.08)';
         const bg = hasAudio ? 'rgba(20,184,166,0.08)' : 'rgba(255,255,255,0.05)';
@@ -3014,6 +3654,49 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         });
       });
     }
+    window.renderSoundboard = renderSoundboard;
+    function sbSetLoadErr(msg){
+      const e = document.getElementById('soundboardLoadErr');
+      if (!e) return;
+      if (msg) { e.style.display = 'block'; e.textContent = msg; }
+      else { e.style.display = 'none'; e.textContent = ''; }
+    }
+    function sbApplyLitePayload(d){
+      sbSetLoadErr('');
+      if (d && d.slots && d.slots.length) { soundboardSlots = d.slots; }
+      if (typeof d.text_max_len === 'number' && d.text_max_len > 0) { sbTextMax = d.text_max_len; const mx = document.getElementById('sbModalCharMax'); if(mx) mx.textContent = sbTextMax; }
+      renderSoundboard();
+      const sbpd = document.getElementById('sbPlayDest');
+      if (sbpd && !sbpd._sbVisBound) { sbpd._sbVisBound = true; sbpd.addEventListener('change', updateSbBrowserRowVisibility); }
+      updateSbBrowserRowVisibility();
+    }
+    function sbLoadLiteSlots(){
+      return fetch('/api/soundboard?lite=1').then(function(r){
+        if (!r.ok) return Promise.reject(new Error('HTTP '+r.status));
+        return r.json();
+      }).then(sbApplyLitePayload).catch(function(err){
+        sbSetLoadErr('Elenco slot dal server non disponibile ('+(err && err.message ? err.message : 'rete')+'). I pulsanti sotto restano usabili; torna su Sound o ricarica per riprovare.');
+      });
+    }
+    soundboardSlots = Array.from({length: 20}, function(_, i){
+      return { icon: sbIconAt(i), text: 'Comando '+(i+1), has_robot: false, has_clean: false };
+    });
+    renderSoundboard();
+    sbLoadLiteSlots();
+    (function(){
+      var prev = window.g1ActivateClientSection;
+      if (typeof prev !== 'function') return;
+      window.g1ActivateClientSection = function(sec){
+        prev(sec);
+        if (sec === 'soundboard') {
+          setTimeout(function(){
+            if (!soundboardSlots.length) { sbLoadLiteSlots(); }
+            else if (typeof window.renderSoundboard === 'function') { window.renderSoundboard(); }
+          }, 0);
+        }
+        return false;
+      };
+    })();
     function updateSbModalStatus(){
       const st = document.getElementById('sbModalAudioStatus');
       if(!st) return;
@@ -3028,14 +3711,26 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('sbModalIcon').value = s.icon || sbIconAt(idx);
       document.getElementById('sbModalText').value = s.text || 'Comando '+(idx+1);
       document.getElementById('sbModalText').setAttribute('maxlength', String(sbTextMax));
-      sbEditAudio = s.audio_base64 || null;
-      sbEditFmt = s.format || 'webm';
-      sbEditAudioClean = s.audio_base64_clean || null;
-      sbEditFmtClean = s.format_clean || 'mp3';
       sbEditAudioRaw = null;
-      updateSbModalStatus();
-      updateSbCharCount();
+      function applyFull(full){
+        sbEditAudio = full.audio_base64 || null;
+        sbEditFmt = full.format || 'webm';
+        sbEditAudioClean = full.audio_base64_clean || null;
+        sbEditFmtClean = full.format_clean || 'mp3';
+        updateSbModalStatus();
+        updateSbCharCount();
+      }
       document.getElementById('sbModal').style.display = 'flex';
+      if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
+        applyFull(s);
+        return;
+      }
+      var st = document.getElementById('sbModalAudioStatus');
+      if (st) st.innerHTML = 'Caricamento audio…';
+      sbEditAudio = null; sbEditFmt = 'webm'; sbEditAudioClean = null; sbEditFmtClean = 'mp3';
+      fetch('/api/soundboard-slot/'+idx).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(applyFull).catch(function(e){
+        if (st) st.innerHTML = 'Errore: '+(e.message||String(e));
+      });
     }
     const sbModalTextEl = document.getElementById('sbModalText');
     if (sbModalTextEl) { sbModalTextEl.oninput = updateSbCharCount; }
@@ -3045,7 +3740,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (sbEditIdx < 0) return;
       const icon = (document.getElementById('sbModalIcon').value || '🎤').trim().substring(0,4);
       const text = (document.getElementById('sbModalText').value || 'Comando '+(sbEditIdx+1)).trim().substring(0, sbTextMax);
-      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3'})}).then(r=>r.json()).then(()=>{ fetch('/api/soundboard').then(r=>r.json()).then(d=>{ soundboardSlots=d.slots||[]; renderSoundboard(); }); });
+      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3'})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
     };
     document.getElementById('sbModalSynth').onclick = async ()=>{
@@ -3119,8 +3814,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     };
     ['sbRing','sbBit','sbDist'].forEach(id=>{
       const el = document.getElementById(id);
+      if (!el) return;
       const spanId = id==='sbRing'?'sbRingVal':(id==='sbBit'?'sbBitVal':'sbDistVal');
-      el.oninput = ()=>{ document.getElementById(spanId).textContent = el.value; };
+      el.oninput = ()=>{ const sp = document.getElementById(spanId); if (sp) sp.textContent = el.value; };
     });
     document.getElementById('sbModalTts').onclick = async ()=>{
       if (!sbEditAudio || sbEditAudio.length < 100) { alert('Serve prima un audio (registra o importa)'); return; }
@@ -3143,18 +3839,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       } catch(e) { alert('Errore: '+e.message); }
       btn.disabled = false;
     };
-    document.getElementById('sbOutputRefresh').onclick = () => { if (typeof requestAndLoadDevices === 'function') requestAndLoadDevices(); };
-    fetch('/api/soundboard').then(r=>r.json()).then(d=>{
-      soundboardSlots=d.slots||[];
-      if (typeof d.text_max_len === 'number' && d.text_max_len > 0) { sbTextMax = d.text_max_len; const mx = document.getElementById('sbModalCharMax'); if(mx) mx.textContent = sbTextMax; }
-      renderSoundboard();
-      const sbpd = document.getElementById('sbPlayDest');
-      if (sbpd && !sbpd._sbVisBound) { sbpd._sbVisBound = true; sbpd.addEventListener('change', updateSbBrowserRowVisibility); }
-      updateSbBrowserRowVisibility();
-    }).catch(function(){
-      const grid = document.getElementById('soundboardGrid');
-      if (grid) grid.innerHTML = '<p class="hint" style="grid-column:1/-1;color:#f87171;">Soundboard: impossibile caricare /api/soundboard (rete o server).</p>';
-    });
+    var sbOutRef = document.getElementById('sbOutputRefresh');
+    if (sbOutRef) sbOutRef.onclick = () => { if (typeof requestAndLoadDevices === 'function') requestAndLoadDevices(); };
     function escAttr(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/\u003c/g,'&lt;'); }
     function loadRunSheet(){
       fetch('/api/run-sheet').then(r=>r.json()).then(d=>{
@@ -3316,28 +4002,26 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       function onRecStopLegacy(ev){ if(!isRecording) return; ev.preventDefault(); stopRec(); }
       btn.onmousedown = btn.ontouchstart = onRecStartLegacy;
       btn.onmouseup = btn.ontouchend = btn.ontouchcancel = onRecStopLegacy;
-      document.addEventListener('mouseup', onRecStopLegacy);
-      document.addEventListener('touchend', onRecStopLegacy, { passive: false });
+      /* Niente listener su document: touchend/mouseup globali con passive:false possono interferire con select/tap altrove (browser vecchi). */
     }
 
     async function startRec(){
       if(isRecording) return;
       wakeListenPending = false;
       stopWakeRecorder();
+      const micSelVal = document.getElementById('mic').value;
+      if (micSelVal && micSelVal.indexOf('local_') === 0) {
+        await startRecServerPtt();
+        return;
+      }
       isRecording = true;
       pendingStop = false;
-      const micSelVal = document.getElementById('mic').value;
       const spkVal = document.getElementById('speaker').value;
       const ttsEl = document.getElementById('ttsPlayDest');
       const wantServerTts = ttsEl && ttsEl.value === 'server';
       if (wantServerTts && (serverTtsDeviceId === null || isNaN(serverTtsDeviceId))) {
         isRecording = false;
         document.getElementById('result').innerHTML = '<div class="warn">Per sentire la risposta sulla cassa: sul Jetson apri il setup (<strong>/</strong>), scegli un altoparlante <strong>locale</strong>, Salva, poi ricarica questa pagina.</div>';
-        return;
-      }
-      if (micForBrowserCapture() === null && micSelVal && micSelVal.indexOf('local_') === 0) {
-        isRecording = false;
-        document.getElementById('result').innerHTML = '<div class="warn">Microfono <strong>Jetson</strong> selezionato: da telefono/PC il browser non può usarlo. Scegli un microfono nella sezione <strong>Browser</strong> oppure apri <a href="/local" style="color:#14b8a6;">/local</a> sul robot.</div>';
         return;
       }
       if (wantServerTts) {
@@ -3426,6 +4110,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     function stopRec(){
       if(!isRecording) return;
       pendingStop = true;
+      if (recordingServerJetson) {
+        clearAllIntervals();
+        btn.classList.remove('recording');
+        recordingServerJetson = false;
+        isRecording = false;
+        if (wsParla && wsParla.readyState === WebSocket.OPEN) {
+          try { wsParla.send(JSON.stringify({type:'stop'})); } catch(_){}
+        }
+        document.getElementById('recDebug').textContent = 'Elaborazione (audio dal robot)…';
+        document.getElementById('recDebug').style.color = '#3b82f6';
+        startThinkingFeedback();
+        return;
+      }
       clearAllIntervals();
       btn.classList.remove('recording');
       if(mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused')){
@@ -3474,6 +4171,77 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs){ regs.forEach(function(r){ r.unregister(); }); }).catch(function(){});
     }
+
+    /* ---- Live Mic Monitor (WebSocket /ws/mic-level) ---- */
+    (function(){
+      var monWs = null;
+      var monActive = false;
+      var btnMon = document.getElementById('btnMicMonitor');
+      var monBody = document.getElementById('micMonitorBody');
+      var monBar = document.getElementById('monLevelBar');
+      var monInfo = document.getElementById('monLevelInfo');
+      var monName = document.getElementById('monMicName');
+      if (!btnMon) return;
+
+      function startMonitor() {
+        if (monWs) { try { monWs.close(); } catch(_){} }
+        var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        monWs = new WebSocket(proto + '//' + location.host + '/ws/mic-level');
+        monActive = true;
+        btnMon.textContent = 'Stop';
+        btnMon.style.background = '#ef4444';
+        monBody.style.display = 'block';
+        monInfo.textContent = 'Connessione...';
+
+        monWs.onmessage = function(ev) {
+          try {
+            var d = JSON.parse(ev.data);
+            if (d.type === 'info') {
+              monName.textContent = 'Mic: [' + d.device + '] ' + d.name + '  rate=' + d.rate;
+            } else if (d.type === 'level') {
+              var pct = Math.max(0, Math.min(100, ((d.db + 60) / 60) * 100));
+              monBar.style.width = pct.toFixed(1) + '%';
+              if (d.peak > 0.5) {
+                monBar.style.background = '#ef4444';
+              } else if (d.rms > 0.02) {
+                monBar.style.background = '#22c55e';
+              } else if (d.rms > 0.005) {
+                monBar.style.background = '#eab308';
+              } else {
+                monBar.style.background = '#52525b';
+              }
+              monInfo.textContent = 'RMS=' + d.rms.toFixed(4) + '  Peak=' + d.peak.toFixed(4) + '  dB=' + d.db.toFixed(1);
+            } else if (d.type === 'error') {
+              monInfo.textContent = 'Errore: ' + d.data;
+              monBar.style.width = '0%';
+            }
+          } catch(_){}
+        };
+        monWs.onclose = function() {
+          monActive = false;
+          btnMon.textContent = 'Avvia';
+          btnMon.style.background = '#3b82f6';
+        };
+        monWs.onerror = function() {
+          monInfo.textContent = 'Errore connessione';
+        };
+      }
+
+      function stopMonitor() {
+        monActive = false;
+        if (monWs) { try { monWs.close(); } catch(_){} monWs = null; }
+        btnMon.textContent = 'Avvia';
+        btnMon.style.background = '#3b82f6';
+        monBar.style.width = '0%';
+        monInfo.textContent = 'RMS=-- Peak=-- dB=--';
+        monBody.style.display = 'none';
+      }
+
+      btnMon.onclick = function() {
+        if (monActive) stopMonitor();
+        else startMonitor();
+      };
+    })();
   </script>
 </body>
 </html>

@@ -1,9 +1,9 @@
 # Avvia tutto: server + tunnel + apre il browser
 # Doppio click o: .\AVVIA.ps1
-# Jetson: $env:G1_SSH_HOST="unitree@192.168.123.164"; $env:G1_REMOTE_PATH="/home/unitree/G1-TalkModule-OpenAiAPI"
+# Jetson: alias SSH in config, es. $env:G1_SSH_HOST="jetson-g1"
 
-$sshHost = if ($env:G1_SSH_HOST) { $env:G1_SSH_HOST } else { "lab@192.168.10.191" }
-$remote = if ($env:G1_REMOTE_PATH) { $env:G1_REMOTE_PATH } else { "/home/lab/G1-TalkModule-OpenAiAPI" }
+$sshHost = if ($env:G1_SSH_HOST) { $env:G1_SSH_HOST } else { "jetson-g1" }
+$remote = if ($env:G1_REMOTE_PATH) { $env:G1_REMOTE_PATH } else { "/home/unitree/G1-TalkModule-OpenAiAPI" }
 $url = "http://localhost:8081/client"
 
 Write-Host ""

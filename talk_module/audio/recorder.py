@@ -1,6 +1,7 @@
 """
 Registrazione audio da microfono.
 Usa sounddevice (PortAudio) - compatibile ARM.
+Usa InputStream persistente per compatibilità PulseAudio (no lock esclusivi ALSA).
 """
 
 import io
@@ -13,7 +14,6 @@ import soundfile as sf
 from talk_module.audio.device_utils import get_device_supporting_input
 from talk_module.config import settings
 
-# Sample rate da provare (molti USB non supportano 16kHz)
 _RATES_TO_TRY = (16000, 44100, 48000, 22050, 32000)
 
 
@@ -43,9 +43,18 @@ class AudioRecorder:
             device_id or settings.microphone_device_id,
             sample_rate or settings.sample_rate,
         )
-        # Priorità: device default (USB spesso 44100/48000) > config
         self.sample_rate = sample_rate or settings.sample_rate or _get_device_sample_rate(self.device_id)
         self.channels = channels
+
+    def _open_stream(self, rate: int, chunk_samples: int):
+        """Open a persistent InputStream (works with PulseAudio and ALSA)."""
+        return sd.InputStream(
+            device=self.device_id,
+            channels=self.channels,
+            samplerate=rate,
+            blocksize=chunk_samples,
+            dtype="float32",
+        )
 
     def record_until_stop(self, stop_check, chunk_duration: float = 0.3, min_duration: float = 0.5) -> bytes:
         """Registra finché stop_check() ritorna True. Push-to-talk."""
@@ -56,10 +65,10 @@ class AudioRecorder:
                 self.sample_rate = try_rate
                 chunk_samples = int(chunk_duration * try_rate)
                 buffer = []
-                while not stop_check():
-                    rec = sd.rec(chunk_samples, samplerate=try_rate, channels=self.channels, device=self.device_id, dtype="float32")
-                    sd.wait()
-                    buffer.append(rec.squeeze())
+                with self._open_stream(try_rate, chunk_samples) as stream:
+                    while not stop_check():
+                        data, _ = stream.read(chunk_samples)
+                        buffer.append(data.squeeze())
                 if not buffer:
                     return b""
                 audio = np.concatenate(buffer)
@@ -74,23 +83,25 @@ class AudioRecorder:
         return b""
 
     def record_fixed_duration(self, duration_seconds: float) -> bytes:
-        """Registra per una durata fissa. Prova più sample rate se -9997 (Invalid sample rate)."""
-        # Prova prima il rate del device, poi altri comuni
+        """Registra per una durata fissa."""
         preferred = _get_device_sample_rate(self.device_id)
         rates = (preferred, self.sample_rate) + tuple(r for r in _RATES_TO_TRY if r not in (preferred, self.sample_rate))
         last_err = None
         for try_rate in rates:
             try:
-                recording = sd.rec(
-                    int(duration_seconds * try_rate),
-                    samplerate=try_rate,
-                    channels=self.channels,
-                    device=self.device_id,
-                    dtype="float32",
-                )
-                sd.wait()
+                total_samples = int(duration_seconds * try_rate)
+                chunk_samples = int(0.1 * try_rate)
+                buffer = []
+                collected = 0
+                with self._open_stream(try_rate, chunk_samples) as stream:
+                    while collected < total_samples:
+                        to_read = min(chunk_samples, total_samples - collected)
+                        data, _ = stream.read(to_read)
+                        buffer.append(data.squeeze())
+                        collected += len(data)
                 self.sample_rate = try_rate
-                return self._to_wav_bytes(recording.squeeze())
+                audio = np.concatenate(buffer)
+                return self._to_wav_bytes(audio)
             except sd.PortAudioError as e:
                 last_err = e
                 if "-9997" in str(e) or "Invalid sample rate" in str(e):
@@ -98,10 +109,14 @@ class AudioRecorder:
                 raise
         raise last_err or sd.PortAudioError("Nessun sample rate supportato")
 
+    VOLUME_BOOST = 1.5
+
     def _to_wav_bytes(self, audio: np.ndarray, sample_rate: Optional[int] = None) -> bytes:
-        """Converte numpy array in bytes WAV."""
+        """Converte numpy array in bytes WAV con boost volume."""
         buf = io.BytesIO()
         audio_flat = audio.squeeze().astype(np.float32)
+        if self.VOLUME_BOOST != 1.0:
+            audio_flat = np.clip(audio_flat * self.VOLUME_BOOST, -1.0, 1.0)
         rate = sample_rate or self.sample_rate
         sf.write(buf, audio_flat, rate, format="WAV")
         return buf.getvalue()
@@ -143,35 +158,45 @@ class AudioRecorder:
         in_speech = False
         total_dur = 0.0
         chunk_samples = int(chunk_dur * rate)
+        _log_count = 0
 
-        while stop_check is None or not stop_check():
-            rec = sd.rec(chunk_samples, samplerate=rate, channels=self.channels, device=self.device_id, dtype="float32")
-            sd.wait()
-            chunk = rec.squeeze()
-            rms = float(np.sqrt(np.mean(chunk**2)))
-            total_dur += chunk_dur
+        print(f"[Recorder] Started: device={self.device_id} rate={rate} "
+              f"threshold={threshold} silence_needed={silence_chunks_needed}ch", flush=True)
 
-            if rms > threshold:
-                in_speech = True
-                silence_count = 0
-                buffer.append(chunk)
-            else:
-                if in_speech:
+        with self._open_stream(rate, chunk_samples) as stream:
+            while stop_check is None or not stop_check():
+                data, _ = stream.read(chunk_samples)
+                chunk = data.squeeze()
+                rms = float(np.sqrt(np.mean(chunk ** 2)))
+                total_dur += chunk_dur
+                _log_count += 1
+
+                if _log_count <= 5 or _log_count % 40 == 0 or (rms > threshold and not in_speech):
+                    print(f"[Rec] #{_log_count} rms={rms:.4f} speech={in_speech} "
+                          f"sil={silence_count} buf={len(buffer)}", flush=True)
+
+                if rms > threshold:
+                    in_speech = True
+                    silence_count = 0
                     buffer.append(chunk)
-                    silence_count += 1
-                    if silence_count >= silence_chunks_needed:
-                        if buffer and len(buffer) > 2:
-                            audio = np.concatenate(buffer)
-                            yield self._to_wav_bytes(audio, rate)
-                        buffer = []
-                        silence_count = 0
-                        in_speech = False
-                        total_dur = 0
                 else:
-                    pass
+                    if in_speech:
+                        buffer.append(chunk)
+                        silence_count += 1
+                        if silence_count >= silence_chunks_needed:
+                            if buffer and len(buffer) > 2:
+                                audio = np.concatenate(buffer)
+                                dur = len(audio) / rate
+                                print(f"[Rec] YIELD {len(buffer)} chunks {dur:.1f}s", flush=True)
+                                yield self._to_wav_bytes(audio, rate)
+                            buffer = []
+                            silence_count = 0
+                            in_speech = False
+                            total_dur = 0
 
-            if total_dur >= max_dur and buffer:
-                audio = np.concatenate(buffer)
-                yield self._to_wav_bytes(audio, rate)
-                buffer = []
-                total_dur = 0
+                if total_dur >= max_dur and buffer:
+                    audio = np.concatenate(buffer)
+                    print(f"[Rec] YIELD max_dur {len(buffer)} chunks", flush=True)
+                    yield self._to_wav_bytes(audio, rate)
+                    buffer = []
+                    total_dur = 0

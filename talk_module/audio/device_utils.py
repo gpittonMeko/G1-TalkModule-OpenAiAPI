@@ -357,6 +357,91 @@ def bluetooth_control_device(action: str, mac: str) -> tuple[bool, str]:
         return False, "Timeout: dispositivo spento, fuori portata, o richiede PIN sul telefono/cassa"
 
 
+def _find_pulse_portaudio_index() -> Optional[int]:
+    """Find the 'pulse' or 'default' input device in PortAudio (for PulseAudio routing)."""
+    import sounddevice as sd
+    for i, d in enumerate(sd.query_devices()):
+        if d.get("max_input_channels", 0) > 0 and d.get("name", "").strip().lower() == "pulse":
+            return i
+    for i, d in enumerate(sd.query_devices()):
+        if d.get("max_input_channels", 0) > 0 and d.get("name", "").strip().lower() == "default":
+            return i
+    return None
+
+
+def _set_pulse_default_source_usb() -> bool:
+    """On Linux, set PulseAudio default source to USB mic (allows shared access)."""
+    if sys.platform != "linux":
+        return False
+    try:
+        out, _ = _run_text(["pactl", "list", "sources", "short"])
+        for line in (out or "").splitlines():
+            lower = line.lower()
+            if "usb" in lower and "monitor" not in lower:
+                src_name = line.split("\t")[1] if "\t" in line else line.split()[1]
+                subprocess.run(["pactl", "set-default-source", src_name],
+                               capture_output=True, timeout=3)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def resolve_configured_microphone_index(mic_cfg: Optional[dict]) -> Optional[int]:
+    """
+    Indice PortAudio per il microfono salvato in config/audio_devices.json.
+    Se device_id non è valido o non ha ingresso, cerca per nome o primo dispositivo USB.
+    Su Linux usa PulseAudio per evitare lock esclusivi ALSA.
+    """
+    if not mic_cfg or mic_cfg.get("type") != "local":
+        return None
+
+    # On Linux with PulseAudio: always prefer routing through PulseAudio
+    # to avoid ALSA exclusive locks that block all other audio processes
+    if sys.platform == "linux":
+        pulse_idx = _find_pulse_portaudio_index()
+        if pulse_idx is not None:
+            _set_pulse_default_source_usb()
+            print(f"[Audio] Using PulseAudio device (index={pulse_idx}) for shared mic access", flush=True)
+            return pulse_idx
+
+    raw = mic_cfg.get("device_id")
+    try:
+        want = int(raw) if raw is not None and str(raw).strip() != "" else None
+    except (TypeError, ValueError):
+        want = None
+    import sounddevice as sd
+
+    if want is not None:
+        try:
+            dev = sd.query_devices(want)
+            if dev.get("max_input_channels", 0) > 0:
+                return want
+        except Exception:
+            pass
+    hint = (mic_cfg.get("name") or "").strip().lower()
+    hint_compact = re.sub(r"\s*\([^)]*\)\s*$", "", hint).strip()
+    mics = list_microphones(physical_only=False)
+    for d in mics:
+        if d.get("input_channels", 0) <= 0:
+            continue
+        n = (d.get("name") or "").lower()
+        if hint and (hint in n or (hint_compact and hint_compact in n) or n in hint):
+            return d.get("index")
+    if hint_compact:
+        toks = [t for t in re.split(r"[^a-z0-9]+", hint_compact) if len(t) >= 4]
+        for d in mics:
+            if d.get("input_channels", 0) <= 0:
+                continue
+            n = (d.get("name") or "").lower()
+            if any(t in n for t in toks):
+                return d.get("index")
+    for d in mics:
+        if d.get("device_type") == "usb" and d.get("input_channels", 0) > 0:
+            return d.get("index")
+    return get_default_input_device()
+
+
 def get_default_input_device() -> Optional[int]:
     """Ritorna l'indice del microfono di default."""
     import sounddevice as sd
@@ -371,7 +456,8 @@ def get_default_input_device() -> Optional[int]:
 
 
 def get_device_supporting_input(device_id: Optional[int], sample_rate: int) -> int | None:
-    """Ritorna un device_id valido per input (microfono)."""
+    """Ritorna un device_id valido per input (microfono).
+    Su Linux preferisce PulseAudio per evitare lock ALSA esclusivi."""
     import sounddevice as sd
     if device_id is not None:
         try:
@@ -380,4 +466,10 @@ def get_device_supporting_input(device_id: Optional[int], sample_rate: int) -> i
                 return device_id
         except Exception:
             pass
+    # Fallback: PulseAudio on Linux
+    if sys.platform == "linux":
+        pulse_idx = _find_pulse_portaudio_index()
+        if pulse_idx is not None:
+            _set_pulse_default_source_usb()
+            return pulse_idx
     return get_default_input_device()

@@ -1,9 +1,9 @@
 # Copia, riavvia server, avvia tunnel - tutto in uno
 # Uso: .\avvia_tutto.ps1
-# Jetson: $env:G1_SSH_HOST="unitree@192.168.123.164"; $env:G1_REMOTE_PATH="/home/unitree/G1-TalkModule-OpenAiAPI"
+# Jetson: $env:G1_SSH_HOST="jetson-g1" se l’alias non è il default
 
-$sshHost = if ($env:G1_SSH_HOST) { $env:G1_SSH_HOST } else { "lab@192.168.10.191" }
-$remote = if ($env:G1_REMOTE_PATH) { $env:G1_REMOTE_PATH } else { "/home/lab/G1-TalkModule-OpenAiAPI" }
+$sshHost = if ($env:G1_SSH_HOST) { $env:G1_SSH_HOST } else { "jetson-g1" }
+$remote = if ($env:G1_REMOTE_PATH) { $env:G1_REMOTE_PATH } else { "/home/unitree/G1-TalkModule-OpenAiAPI" }
 
 Write-Host "1. Copia web_app.py..." -ForegroundColor Yellow
 scp -o ConnectTimeout=10 "$PSScriptRoot\talk_module\web_app.py" "${sshHost}:${remote}/talk_module/web_app.py"

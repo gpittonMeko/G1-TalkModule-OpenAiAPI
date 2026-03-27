@@ -1,20 +1,22 @@
 # Deploy modifiche sul server Linux (AI Accelerator, Jetson unitree, ecc.)
 # Uso: .\deploy.ps1
 # Override senza editare il file (PowerShell):
-#   $env:G1_SSH_HOST="unitree@192.168.123.164"
+#   $env:G1_SSH_HOST="jetson-g1"   # alias in ~/.ssh/config (es. Host jetson-g1 → User unitree, HostName …)
 #   $env:G1_REMOTE_PATH="/home/unitree/G1-TalkModule-OpenAiAPI"
 #   $env:G1_PUBLIC_IP="192.168.123.164"
 #   $env:G1_SSH_KEY="C:\path\to\id_ed25519_jetson"   # consigliato se non usi ssh-agent
 #   $env:G1_SKIP_OPENSSL="1"   # opzionale: salta generate_ssl_cert (se i certificati ci sono gia)
+#   $env:G1_SKIP_STRIP_CRLF="1"   # opzionale: salta sed CRLF su scripts/*.sh (se quel passaggio si blocca)
+#   $env:G1_SKIP_SOUNDBOARD_JSON="1"   # NON copiare soundboard.json: evita di sovrascrivere sul Jetson i suoni (base64) con una copia PC vuota/vecchia
 #   .\deploy.ps1
 #
 # Se lo script "si ferma" su [1]: scp sta aspettando password o conferma host (primo collegamento).
 # Usa una chiave (-i / G1_SSH_KEY) o apri una finestra e accetta il fingerprint. BatchMode evita loop infiniti.
 
-$sshHost = if ($env:G1_SSH_HOST) { $env:G1_SSH_HOST } else { "lab@192.168.10.191" }
+$sshHost = if ($env:G1_SSH_HOST) { $env:G1_SSH_HOST } else { "jetson-g1" }
 $root = $PSScriptRoot
-$remote = if ($env:G1_REMOTE_PATH) { $env:G1_REMOTE_PATH } else { "/home/lab/G1-TalkModule-OpenAiAPI" }
-$publicIp = if ($env:G1_PUBLIC_IP) { $env:G1_PUBLIC_IP } else { "192.168.10.191" }
+$remote = if ($env:G1_REMOTE_PATH) { $env:G1_REMOTE_PATH } else { "/home/unitree/G1-TalkModule-OpenAiAPI" }
+$publicIp = if ($env:G1_PUBLIC_IP) { $env:G1_PUBLIC_IP } else { "192.168.123.164" }
 
 # Opzioni SSH comuni: timeout, niente prompt password in batch (fallisce subito se manca la chiave)
 $sshKeyArgs = @()
@@ -34,6 +36,9 @@ $sshCommon = $sshKeyArgs + @(
     "-o", "ServerAliveCountMax=6",
     "-o", "TCPKeepAlive=yes"
 )
+# -n: stdin da /dev/null — senza questo ssh spesso resta in attesa e lo script sembra bloccato (PowerShell / console).
+# Non usare -n su scp: solo sulle invocazioni ssh sotto.
+$sshExec = $sshCommon + @("-n")
 
 Write-Host "Deploy G1 Talk Module su $sshHost" -ForegroundColor Cyan
 if ($env:G1_SSH_KEY) { Write-Host "  Chiave: $($env:G1_SSH_KEY)" -ForegroundColor Gray }
@@ -75,13 +80,17 @@ scp @sshCommon `
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [2] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
-Write-Host "  [2b] soundboard.json (audio, ~5MB)..." -NoNewline
-scp @sshCommon -C -o ServerAliveInterval=30 -o ServerAliveCountMax=120 "$root\config\soundboard.json" "${sshHost}:${remote}/config/"
-if ($LASTEXITCODE -eq 0) { Write-Host " OK" -ForegroundColor Green } else { Write-Host " ERRORE scp $LASTEXITCODE" -ForegroundColor Red }
+if ($env:G1_SKIP_SOUNDBOARD_JSON -eq "1") {
+    Write-Host "  [2b] soundboard.json... saltato (G1_SKIP_SOUNDBOARD_JSON=1, suono resta quello sul server)" -ForegroundColor Gray
+} else {
+    Write-Host "  [2b] soundboard.json (audio, ~5MB)..." -NoNewline
+    scp @sshCommon -C -o ServerAliveInterval=30 -o ServerAliveCountMax=120 "$root\config\soundboard.json" "${sshHost}:${remote}/config/"
+    if ($LASTEXITCODE -eq 0) { Write-Host " OK" -ForegroundColor Green } else { Write-Host " ERRORE scp $LASTEXITCODE" -ForegroundColor Red }
+}
 
 # Installa dipendenze (duckduckgo-search per quick_lookup)
 Write-Host "  [3] Dipendenze (max 180s)..." -NoNewline
-ssh @sshCommon $sshHost "cd $remote && timeout 180 .venv/bin/pip install -q ddgs imageio-ffmpeg"
+ssh @sshExec $sshHost "cd $remote && timeout 180 .venv/bin/pip install -q ddgs imageio-ffmpeg"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE pip $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
@@ -93,20 +102,26 @@ if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [3b] $LASTEXIT
 Write-Host " OK" -ForegroundColor Green
 # Windows spesso salva .sh con CRLF: su bash Linux rompe "set" e path. Normalizza sul server.
 Write-Host "       sed CRLF su script..." -NoNewline
-# Bash vuole 's/\r$//': in PowerShell "$" dentro le doppie virgolette rompe il comando (sed resta aperto → sembra che aspetti Invio).
-ssh @sshCommon $sshHost ('cd ' + $remote + ' && sed -i ''s/\r$//'' scripts/*.sh 2>/dev/null; true')
-Write-Host " OK" -ForegroundColor Green
+if ($env:G1_SKIP_STRIP_CRLF -eq "1") {
+    Write-Host " saltato (G1_SKIP_STRIP_CRLF=1)" -ForegroundColor Gray
+} else {
+    # `$ in doppie virgolette: solo per bash remoto. Un solo argomento remoto (niente bash -lc annidato: rompe le " su "$f").
+    $stripCrlfRemote = "cd `"$remote`" && for f in scripts/*.sh; do [ -f `"`$f`" ] && sed -i 's/\r`$//' `"`$f`"; done; exit 0"
+    ssh @sshExec -T $sshHost $stripCrlfRemote
+    if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE sed CRLF $LASTEXITCODE" -ForegroundColor Yellow }
+    Write-Host " OK" -ForegroundColor Green
+}
 # Certificati SSL: non rilanciare openssl se i file ci sono gia (evita "blocco" percepito fino a 120s)
 if ($env:G1_SKIP_OPENSSL -eq "1") {
     Write-Host "       openssl: saltato (G1_SKIP_OPENSSL=1)" -ForegroundColor Gray
 } else {
     Write-Host "       openssl certificati..." -NoNewline
-    ssh @sshCommon -T $sshHost "cd $remote && test -f config/certs/key.pem && test -f config/certs/cert.pem"
+    ssh @sshExec -T $sshHost "cd $remote && test -f config/certs/key.pem && test -f config/certs/cert.pem"
     if ($LASTEXITCODE -eq 0) {
         Write-Host " OK (gia presenti, skip openssl)" -ForegroundColor Green
     } else {
         Write-Host " creazione (max 90s, niente output fino a fine)..." -ForegroundColor DarkGray
-        ssh @sshCommon -T $sshHost "cd $remote && (command -v timeout >/dev/null 2>&1 && timeout 90 env TALK_PUBLIC_HOST=$publicIp bash scripts/generate_ssl_cert.sh || env TALK_PUBLIC_HOST=$publicIp bash scripts/generate_ssl_cert.sh)"
+        ssh @sshExec -T $sshHost "cd $remote && (command -v timeout >/dev/null 2>&1 && timeout 90 env TALK_PUBLIC_HOST=$publicIp bash scripts/generate_ssl_cert.sh || env TALK_PUBLIC_HOST=$publicIp bash scripts/generate_ssl_cert.sh)"
         $certCode = $LASTEXITCODE
         if ($certCode -eq 124) {
             Write-Host " TIMEOUT openssl dopo 90s. Usa certificati esistenti o: `$env:G1_SKIP_OPENSSL='1'" -ForegroundColor Yellow
@@ -125,6 +140,7 @@ $keyPathResolved = if ($env:G1_SSH_KEY) { $env:G1_SSH_KEY.Trim().Trim('"') } els
 $job = Start-Job -ScriptBlock {
     param($h, $r, $keyPath)
     $args = @(
+        "-n",
         "-o", "ConnectTimeout=15",
         "-o", "ServerAliveInterval=5",
         "-o", "ServerAliveCountMax=10",

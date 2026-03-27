@@ -1,0 +1,165 @@
+{
+  "source_mtime_ns": 1774006278972243900,
+  "slots": [
+    {
+      "icon": "\ud83d\udc4b",
+      "text": "WELCOME \u2014 accredito",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83d\udcdd",
+      "text": "WELCOME \u2014 registrazione",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83e\udde5",
+      "text": "WELCOME \u2014 guardaroba",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\u2615",
+      "text": "COFFEE \u2014 accoglienza",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83e\udd16",
+      "text": "Tipologia 1 \u2014 presentazione G1",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83d\ude04",
+      "text": "Tipologia 1 \u2014 scherzo / chiusura",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83c\udfad",
+      "text": "SALA \u2014 posto, evento inizia",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83e\ude91",
+      "text": "SALA \u2014 accomodatevi",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83c\udfac",
+      "text": "SALA \u2014 fondo palco / coreografia",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83c\udfa4",
+      "text": "STAMPA \u2014 G1_A colleghi",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83d\udcda",
+      "text": "STAMPA \u2014 storia McKinsey",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83c\udfe2",
+      "text": "STAMPA \u2014 sede Italia",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83d\udc65",
+      "text": "SALA \u2014 interazione multipla",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83d\udd0a",
+      "text": "SALA \u2014 messaggio inizio (operatore)",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83e\udd1d",
+      "text": "WELCOME \u2014 saluto singolo",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83c\udf81",
+      "text": "DEFLUSSO \u2014 regalo",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83d\udcf1",
+      "text": "DEFLUSSO \u2014 QR omaggio",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83d\udeaa",
+      "text": "DEFLUSSO \u2014 uscita accredito",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\ud83d\udee1\ufe0f",
+      "text": "DEMO \u2014 presenza operatori",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    },
+    {
+      "icon": "\u2728",
+      "text": "Chiusura \u2014 ringraziamento",
+      "format": "wav",
+      "format_clean": "wav",
+      "has_robot": true,
+      "has_clean": true
+    }
+  ]
+}
