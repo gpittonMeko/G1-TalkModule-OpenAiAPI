@@ -44,6 +44,8 @@ Assistente vocale per robot **Unitree G1**: parli → STT → GPT → TTS → ri
 |-----------|-------------|
 | `UNITREE_ROBOT_IP` | IP del robot per "dare la mano", "saluta" |
 
+**Jetson (DDS + LocoClient)**: vedi [docs/JETSON_UNITREE_SDK.md](docs/JETSON_UNITREE_SDK.md) e `scripts/install_unitree_sdk_jetson.sh`.
+
 ---
 
 ## Struttura progetto
@@ -66,7 +68,7 @@ G1-TalkModule-OpenAiAPI/
 ├── scripts/
 │   ├── restart_server.sh
 │   └── robot_action.sh     # (opzionale) script azioni custom
-├── docs/                   # Documentazione
+├── docs/                   # Documentazione (es. JETSON_UNITREE_SDK.md)
 ├── avvia.ps1               # Avvio da Windows
 ├── avvia_ai_accelerator.sh  # Avvio server
 ├── requirements.txt

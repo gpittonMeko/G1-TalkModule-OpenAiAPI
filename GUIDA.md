@@ -104,6 +104,8 @@ bash scripts/restart_server.sh
 
 Poi apri **http://&lt;IP&gt;:8081/client** (o localhost:8081 con tunnel).
 
+Sul **Jetson del G1**, per DDS (braccia + locomozione / LocoClient): dopo `install.sh` esegui anche `bash scripts/install_unitree_sdk_jetson.sh` — guida **[docs/JETSON_UNITREE_SDK.md](docs/JETSON_UNITREE_SDK.md)**.
+
 ---
 
 ## Struttura dopo l’installazione

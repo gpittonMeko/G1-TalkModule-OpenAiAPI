@@ -61,13 +61,21 @@ Su alcune immagini Jetson il PPA non è supportato: in quel caso usa un’immagi
 
    oppure `bash scripts/generate_ssl_cert.sh 192.168.123.164`
 
-5. Avvio:
+5. **Unitree SDK2 (G1 braccia + LocoClient)** — necessario per joystick / Ready / Walk e azioni braccia via DDS sul Jetson:
+
+   ```bash
+   bash scripts/install_unitree_sdk_jetson.sh
+   ```
+
+   Dettagli, limiti PyPI aarch64 e patch: **[docs/JETSON_UNITREE_SDK.md](JETSON_UNITREE_SDK.md)**.
+
+6. Avvio:
 
    ```bash
    bash scripts/restart_server.sh
    ```
 
-6. Test: `curl -k https://127.0.0.1:8081/api/health` — dal PC: `https://192.168.123.164:8081/client`
+7. Test: `curl -k https://127.0.0.1:8081/api/health` — dal PC: `https://192.168.123.164:8081/client`
 
 Da Windows, senza modificare gli script, puoi impostare:
 
@@ -144,3 +152,4 @@ Oppure: `.\avvia.ps1` (tutto in uno)
 - **Connection refused**: verifica server con `curl http://192.168.10.191:8081/api/health`
 - **Microfono**: usa localhost (tunnel), non IP diretto
 - **Nessun testo**: parla 1-2 sec, prova `STT_PROVIDER=groq`
+- **“Installa unitree_sdk2_python / LocoClient”** sul Jetson: vedi [JETSON_UNITREE_SDK.md](JETSON_UNITREE_SDK.md) e `scripts/install_unitree_sdk_jetson.sh`; dopo aggiornamenti SDK, `bash scripts/restart_server.sh`

@@ -35,7 +35,7 @@ UNITREE_ROBOT_IP=192.168.123.161
 
 1. **Robot in sport mode**: L1+A sul telecomando (non debug mode)
 2. **Firmware**: v1.3.0+ per ShakeHand/WaveHand
-3. **SDK** (opzionale): `pip install unitree_sdk2_python`
+3. **SDK sul Jetson** (braccia + locomozione `LocoClient`): non è un semplice `pip install` su aarch64. Usa lo script e la guida **[JETSON_UNITREE_SDK.md](JETSON_UNITREE_SDK.md)** (`scripts/install_unitree_sdk_jetson.sh`).
 
 ## Script personalizzato
 

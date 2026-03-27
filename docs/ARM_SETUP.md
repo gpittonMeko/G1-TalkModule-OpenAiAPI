@@ -1,5 +1,9 @@
 # Setup ARM - Jetson Orin NX, Raspberry Pi, Linux ARM
 
+## Jetson G1: Unitree SDK (robot)
+
+Per controllo braccia e locomozione via DDS: **[JETSON_UNITREE_SDK.md](JETSON_UNITREE_SDK.md)** (`scripts/install_unitree_sdk_jetson.sh`).
+
 ## Obbligatorio: PortAudio per microfoni e altoparlanti locali
 
 Su **Jetson Orin NX** (robot G1) e ogni macchina con audio locale:

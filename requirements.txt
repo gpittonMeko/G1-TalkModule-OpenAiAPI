@@ -1,5 +1,9 @@
 # G1 Talk Module - Dependencies
 # Python 3.10+ | ARM-compatible (Jetson, AI Accelerator, ecc.)
+# Robot DDS + LocoClient (Jetson): scripts/install_unitree_sdk_jetson.sh (not on PyPI as a single wheel for aarch64)
+#
+# Snapshot completo dell'ambiente pip su una macchina: requirements-machine.txt
+# (rigenera con scripts/export_dependencies.ps1 o .sh)
 
 openai>=1.0.0
 groq>=0.4.0
