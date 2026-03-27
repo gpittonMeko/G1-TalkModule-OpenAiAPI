@@ -351,6 +351,11 @@ self.addEventListener('activate', () => self.clients.claim());
         host = request.url.hostname or "192.168.10.191"
         return HTMLResponse(LAUNCHER_TEMPLATE.format(host=host, base=base))
 
+    @app.get("/robot-control", response_class=HTMLResponse)
+    def robot_control_page():
+        """Pagina telecomando robot: joystick + gesti braccia G1."""
+        return ROBOT_CONTROL_TEMPLATE
+
     @app.get("/local")
     @app.get("/listen")
     @app.get("/local-fetch")
@@ -971,12 +976,44 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.get("/api/robot-actions")
     def api_get_robot_actions():
-        """Lista azioni robot (config/robot_actions.json)."""
+        """Lista azioni robot (config/robot_actions.json + arm actions G1)."""
         try:
-            from talk_module.robot_actions import _load_robot_actions, ROBOT_ACTIONS_PATH
-            return {"path": str(ROBOT_ACTIONS_PATH), "entries": _load_robot_actions()}
+            from talk_module.robot_actions import _load_robot_actions, ROBOT_ACTIONS_PATH, get_arm_actions_list
+            return {
+                "path": str(ROBOT_ACTIONS_PATH),
+                "entries": _load_robot_actions(),
+                "arm_actions": get_arm_actions_list(),
+            }
         except Exception as e:
-            return {"path": "", "entries": {}, "error": str(e)}
+            return {"path": "", "entries": {}, "arm_actions": [], "error": str(e)}
+
+    @app.post("/api/robot-action")
+    def api_execute_robot_action(data: dict = Body(...)):
+        """Esegue azione braccio G1 (action_id int o nome)."""
+        action_id = data.get("action_id")
+        robot_ip = data.get("robot_ip") or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+        if action_id is None:
+            raise HTTPException(400, "action_id richiesto")
+        try:
+            from talk_module.robot_actions import execute_robot_action
+            ok, msg = execute_robot_action(action_id, robot_ip=robot_ip)
+            return {"ok": ok, "message": msg}
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
+    @app.post("/api/robot-move")
+    def api_robot_move(data: dict = Body(...)):
+        """Comando movimento G1: vx, vy, vyaw."""
+        vx = float(data.get("vx", 0))
+        vy = float(data.get("vy", 0))
+        vyaw = float(data.get("vyaw", 0))
+        robot_ip = data.get("robot_ip") or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+        try:
+            from talk_module.robot_actions import send_move_command
+            ok, msg = send_move_command(vx, vy, vyaw, robot_ip=robot_ip)
+            return {"ok": ok, "message": msg}
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
 
     @app.get("/api/config")
     def api_get_config():
@@ -1666,6 +1703,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <p style="margin:8px 0;"><a href="/local" style="display:inline-block;padding:12px 20px;background:#14b8a6;color:#0c0e14;border-radius:8px;text-decoration:none;font-weight:600;">Parla</a> <span class="hint">— Tieni premuto, parla, rilascia. Mic e cuffie sull’AI Accelerator.</span></p>
     <p style="margin:8px 0;"><a href="/listen" style="display:inline-block;padding:12px 20px;background:#14b8a6;color:#0c0e14;border-radius:8px;text-decoration:none;font-weight:600;">Ascolto</a> <span class="hint">— Di’ «Hey G1» + domanda. Mic e cuffie sull’AI Accelerator.</span></p>
     <p style="margin:8px 0;"><a href="/client" style="display:inline-block;padding:12px 20px;background:rgba(255,255,255,0.1);color:#e8eaed;border-radius:8px;text-decoration:none;font-weight:600;">Client rete</a> <span class="hint">— Apri su telefono/tablet: userai mic e cuffie di quel dispositivo.</span></p>
+    <p style="margin:8px 0;"><a href="/robot-control" style="display:inline-block;padding:12px 20px;background:rgba(99,102,241,0.2);color:#a5b4fc;border-radius:8px;text-decoration:none;font-weight:600;">Robot Control</a> <span class="hint">— Joystick + gesti braccia G1 (192.168.123.161).</span></p>
   </div>
 
   <script>
@@ -2194,6 +2232,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <button type="button" class="client-tab" data-section="knowledge" onclick="return window.g1ActivateClientSection('knowledge')"><span class="ct-ic" aria-hidden="true">&#128214;</span><span>Know</span></button>
       <button type="button" class="client-tab" data-section="devices" onclick="return window.g1ActivateClientSection('devices')"><span class="ct-ic" aria-hidden="true">&#128268;</span><span>I/O</span></button>
       <button type="button" class="client-tab" data-section="info" onclick="return window.g1ActivateClientSection('info')"><span class="ct-ic" aria-hidden="true">&#8505;</span><span>Info</span></button>
+      <a href="/robot-control" class="client-tab" style="text-decoration:none;"><span class="ct-ic" aria-hidden="true">&#127918;</span><span>Robot</span></a>
     </nav>
     <script>
     (function(){
@@ -4441,6 +4480,269 @@ LISTEN_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+ROBOT_CONTROL_TEMPLATE = """<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>G1 Robot Control</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{height:100%;overflow:hidden;background:#0c0e14;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;touch-action:none;user-select:none;-webkit-user-select:none;}
+.top-bar{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#18181b;border-bottom:1px solid #27272a;height:44px;flex-shrink:0;}
+.top-bar h1{font-size:15px;font-weight:700;color:#14b8a6;}
+.top-bar .status{font-size:11px;color:#71717a;}
+.top-bar .status.ok{color:#22c55e;}
+.top-bar .status.err{color:#ef4444;}
+.top-bar a{color:#5eead4;text-decoration:none;font-size:12px;}
+.container{display:flex;flex-direction:column;height:calc(100% - 44px);}
+.actions-area{flex:1;overflow-y:auto;padding:8px;-webkit-overflow-scrolling:touch;}
+.section-label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#71717a;margin:8px 0 6px 4px;font-weight:600;}
+.gesture-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px;}
+.gesture-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:10px 4px;background:#1e1e2e;border:1px solid #27272a;border-radius:10px;color:#e4e4e7;font-size:10px;text-align:center;cursor:pointer;transition:background 0.15s,border-color 0.15s;min-height:64px;-webkit-tap-highlight-color:transparent;}
+.gesture-btn:active,.gesture-btn.active{background:#14b8a620;border-color:#14b8a6;}
+.gesture-btn .g-icon{font-size:22px;line-height:1;}
+.gesture-btn .g-label{font-size:9px;line-height:1.2;color:#a1a1aa;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.gesture-btn.release{border-color:#ef444440;background:#ef444410;}
+.gesture-btn.release:active{background:#ef444430;border-color:#ef4444;}
+.gesture-btn.special{border-color:#6366f140;background:#6366f110;}
+.gesture-btn.special:active{background:#6366f130;border-color:#6366f1;}
+.joystick-area{flex-shrink:0;display:flex;align-items:center;justify-content:center;gap:16px;padding:10px 12px 16px;background:#111318;border-top:1px solid #27272a;}
+.joy-wrap{position:relative;width:160px;height:160px;flex-shrink:0;}
+.joy-base{position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle,#1e1e2e 0%,#18181b 100%);border:2px solid #27272a;}
+.joy-stick{position:absolute;width:60px;height:60px;border-radius:50%;background:radial-gradient(circle,#2dd4bf 0%,#14b8a6 100%);box-shadow:0 0 12px #14b8a640;left:50%;top:50%;transform:translate(-50%,-50%);transition:none;pointer-events:none;}
+.joy-info{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#71717a;font-family:monospace;}
+.joy-info span{color:#e4e4e7;}
+.speed-wrap{display:flex;flex-direction:column;gap:4px;align-items:flex-start;}
+.speed-wrap label{font-size:10px;color:#71717a;}
+.speed-wrap input[type=range]{width:100px;accent-color:#14b8a6;}
+.quick-btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
+.quick-btn{padding:8px 14px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+.quick-btn:active{background:#14b8a630;border-color:#14b8a6;}
+#robotIp{width:140px;padding:6px 8px;background:#1e1e2e;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:12px;font-family:monospace;}
+.log-area{max-height:60px;overflow-y:auto;padding:4px 8px;font-size:10px;color:#52525b;font-family:monospace;line-height:1.4;}
+.log-area .ok{color:#22c55e;}.log-area .err{color:#ef4444;}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <h1>G1 Robot Control</h1>
+  <div style="display:flex;align-items:center;gap:8px;">
+    <label style="font-size:10px;color:#71717a;">IP:</label>
+    <input id="robotIp" value="192.168.123.161" />
+    <span id="connStatus" class="status">--</span>
+    <a href="/client">Client</a>
+  </div>
+</div>
+<div class="container">
+  <div class="actions-area">
+    <div class="section-label">Gesti braccia</div>
+    <div class="gesture-grid" id="gestureGrid"></div>
+    <div class="section-label">Comandi rapidi</div>
+    <div class="quick-btns">
+      <button class="quick-btn" onclick="sendAction(99)">Rilascia braccia</button>
+      <button class="quick-btn" onclick="sendMove(0,0,0)">STOP</button>
+    </div>
+    <div class="log-area" id="logArea"></div>
+  </div>
+  <div class="joystick-area">
+    <div class="joy-wrap" id="joyWrap">
+      <div class="joy-base"></div>
+      <div class="joy-stick" id="joyStick"></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div class="joy-info">
+        <div>vx: <span id="jVx">0.00</span></div>
+        <div>vy: <span id="jVy">0.00</span></div>
+        <div>vyaw: <span id="jVyaw">0.00</span></div>
+      </div>
+      <div class="speed-wrap">
+        <label>Velocit&agrave; max</label>
+        <input type="range" id="speedMax" min="0.1" max="1.5" step="0.1" value="0.5" />
+        <span style="font-size:11px;color:#a1a1aa;" id="speedLabel">0.5 m/s</span>
+      </div>
+      <div class="speed-wrap">
+        <label>Rotazione max</label>
+        <input type="range" id="yawMax" min="0.2" max="2.0" step="0.1" value="0.8" />
+        <span style="font-size:11px;color:#a1a1aa;" id="yawLabel">0.8 rad/s</span>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var ROBOT_IP_KEY = 'g1_robot_ip';
+  var ipEl = document.getElementById('robotIp');
+  var saved = localStorage.getItem(ROBOT_IP_KEY);
+  if (saved) ipEl.value = saved;
+  ipEl.addEventListener('change', function(){ localStorage.setItem(ROBOT_IP_KEY, ipEl.value.trim()); });
+
+  var ARM_ACTIONS = [
+    {id:27, icon:'\\u{1F91D}', label:'Stretta di mano'},
+    {id:26, icon:'\\u{1F596}', label:'Saluto alto'},
+    {id:25, icon:'\\u{1F44B}', label:'Ciao (viso)'},
+    {id:15, icon:'\\u{1F64C}', label:'Mani in alto'},
+    {id:23, icon:'\\u261D\\uFE0F',  label:'Mano dx su'},
+    {id:18, icon:'\\u270B',   label:'High Five'},
+    {id:19, icon:'\\u{1F917}', label:'Abbraccio'},
+    {id:17, icon:'\\u{1F44F}', label:'Applauso'},
+    {id:20, icon:'\\u2764\\uFE0F',  label:'Cuore'},
+    {id:21, icon:'\\u{1F49C}', label:'Cuore dx'},
+    {id:22, icon:'\\u{1F645}', label:'No / Rifiuto'},
+    {id:24, icon:'\\u274C',   label:'Braccia X'},
+    {id:11, icon:'\\u{1F48B}', label:'Bacio (2 mani)'},
+    {id:12, icon:'\\u{1F618}', label:'Bacio'},
+  ];
+
+  var grid = document.getElementById('gestureGrid');
+  ARM_ACTIONS.forEach(function(a){
+    var btn = document.createElement('button');
+    btn.className = 'gesture-btn';
+    btn.innerHTML = '<span class="g-icon">'+a.icon+'</span><span class="g-label">'+a.label+'</span>';
+    btn.addEventListener('click', function(){ sendAction(a.id); });
+    grid.appendChild(btn);
+  });
+
+  var logEl = document.getElementById('logArea');
+  function log(msg, cls){
+    var d = document.createElement('div');
+    d.className = cls || '';
+    d.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+    logEl.appendChild(d);
+    if (logEl.children.length > 30) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  window.sendAction = function(actionId){
+    var ip = ipEl.value.trim();
+    log('Action ' + actionId + ' -> ' + ip);
+    fetch('/api/robot-action', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action_id: actionId, robot_ip: ip})
+    }).then(function(r){ return r.json(); }).then(function(d){
+      if (d.ok) { log('OK: ' + (d.message||''), 'ok'); setStatus('ok'); }
+      else { log('ERRORE: ' + (d.message||''), 'err'); setStatus('err'); }
+    }).catch(function(e){ log('Rete: ' + e, 'err'); setStatus('err'); });
+  };
+
+  window.sendMove = function(vx, vy, vyaw){
+    var ip = ipEl.value.trim();
+    fetch('/api/robot-move', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({vx:vx, vy:vy, vyaw:vyaw, robot_ip:ip})
+    }).then(function(r){ return r.json(); }).then(function(d){
+      if (d.ok) setStatus('ok');
+      else setStatus('err');
+    }).catch(function(e){ setStatus('err'); });
+  };
+
+  function setStatus(s){
+    var el = document.getElementById('connStatus');
+    el.className = 'status ' + s;
+    el.textContent = s === 'ok' ? 'OK' : s === 'err' ? 'ERR' : '--';
+  }
+
+  // Joystick touch
+  var joyWrap = document.getElementById('joyWrap');
+  var joyStick = document.getElementById('joyStick');
+  var jVx = document.getElementById('jVx');
+  var jVy = document.getElementById('jVy');
+  var jVyaw = document.getElementById('jVyaw');
+  var speedSlider = document.getElementById('speedMax');
+  var yawSlider = document.getElementById('yawMax');
+  var speedLabel = document.getElementById('speedLabel');
+  var yawLabel = document.getElementById('yawLabel');
+  speedSlider.addEventListener('input', function(){ speedLabel.textContent = parseFloat(this.value).toFixed(1) + ' m/s'; });
+  yawSlider.addEventListener('input', function(){ yawLabel.textContent = parseFloat(this.value).toFixed(1) + ' rad/s'; });
+
+  var joyActive = false, joyId = null;
+  var curVx = 0, curVy = 0, curVyaw = 0;
+  var moveInterval = null;
+
+  function getJoyCenter(){
+    var r = joyWrap.getBoundingClientRect();
+    return {x: r.left + r.width/2, y: r.top + r.height/2, radius: r.width/2 - 30};
+  }
+
+  function updateJoy(cx, cy){
+    var c = getJoyCenter();
+    var dx = cx - c.x;
+    var dy = cy - c.y;
+    var dist = Math.sqrt(dx*dx + dy*dy);
+    var maxR = c.radius;
+    if (dist > maxR) { dx = dx/dist*maxR; dy = dy/dist*maxR; dist = maxR; }
+    joyStick.style.transform = 'translate(calc(-50% + '+dx+'px), calc(-50% + '+dy+'px))';
+    var norm = dist / maxR;
+    var sMax = parseFloat(speedSlider.value);
+    var yMax = parseFloat(yawSlider.value);
+    // Y-axis (up) = forward (vx positive), X-axis (right) = rotation (vyaw negative = turn right)
+    curVx = -dy / maxR * sMax;
+    curVy = 0;
+    curVyaw = -dx / maxR * yMax;
+    curVx = Math.round(curVx * 100) / 100;
+    curVyaw = Math.round(curVyaw * 100) / 100;
+    jVx.textContent = curVx.toFixed(2);
+    jVy.textContent = curVy.toFixed(2);
+    jVyaw.textContent = curVyaw.toFixed(2);
+  }
+
+  function resetJoy(){
+    joyStick.style.transform = 'translate(-50%,-50%)';
+    curVx = 0; curVy = 0; curVyaw = 0;
+    jVx.textContent = '0.00'; jVy.textContent = '0.00'; jVyaw.textContent = '0.00';
+    sendMove(0, 0, 0);
+    if (moveInterval) { clearInterval(moveInterval); moveInterval = null; }
+  }
+
+  function startSending(){
+    if (moveInterval) return;
+    moveInterval = setInterval(function(){
+      if (Math.abs(curVx) > 0.01 || Math.abs(curVy) > 0.01 || Math.abs(curVyaw) > 0.01) {
+        sendMove(curVx, curVy, curVyaw);
+      }
+    }, 200);
+  }
+
+  joyWrap.addEventListener('touchstart', function(e){
+    e.preventDefault();
+    var t = e.changedTouches[0];
+    joyId = t.identifier;
+    joyActive = true;
+    updateJoy(t.clientX, t.clientY);
+    startSending();
+  }, {passive:false});
+
+  joyWrap.addEventListener('touchmove', function(e){
+    e.preventDefault();
+    for (var i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === joyId) {
+        updateJoy(e.changedTouches[i].clientX, e.changedTouches[i].clientY);
+        break;
+      }
+    }
+  }, {passive:false});
+
+  joyWrap.addEventListener('touchend', function(e){
+    for (var i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === joyId) { joyActive = false; joyId = null; resetJoy(); break; }
+    }
+  });
+  joyWrap.addEventListener('touchcancel', function(){ joyActive = false; joyId = null; resetJoy(); });
+
+  // Mouse fallback (desktop)
+  var mouseDown = false;
+  joyWrap.addEventListener('mousedown', function(e){ mouseDown = true; updateJoy(e.clientX, e.clientY); startSending(); e.preventDefault(); });
+  document.addEventListener('mousemove', function(e){ if (mouseDown) updateJoy(e.clientX, e.clientY); });
+  document.addEventListener('mouseup', function(){ if (mouseDown) { mouseDown = false; resetJoy(); } });
+})();
+</script>
+</body>
+</html>
+"""
+
+
 def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False, ssl_keyfile: str | None = None, ssl_certfile: str | None = None):
     if not HAS_FASTAPI:
         print("Installa: pip install fastapi uvicorn")
@@ -4475,6 +4777,7 @@ def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False,
     print("  Ascolto Hey G1: /listen")
     print("  Parla (push): /local")
     print("  Client rete: /client")
+    print("  Robot Control (joystick+gesti): /robot-control")
     if ssl_keyfile:
         print("  Da telefono (stessa rete): https://192.168.10.191:8081/client")
     uvicorn.run(app, host=host, port=port, ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)

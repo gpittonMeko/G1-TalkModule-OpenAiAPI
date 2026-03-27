@@ -1,139 +1,167 @@
 <!DOCTYPE html>
-
 <html lang="it">
-
 <head>
-
-  <meta charset="UTF-8">
-
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-
-  <meta name="theme-color" content="#14b8a6">
-
-  <meta name="apple-mobile-web-app-capable" content="yes">
-
-  <title>G1 Talk - Connetti</title>
-
-  <style>
-
-    * { box-sizing: border-box; }
-
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: linear-gradient(160deg, #0c0e14 0%, #141922 100%); color: #e8eaed; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
-
-    h1 { font-size: 1.5rem; margin-bottom: 8px; }
-
-    .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 24px; max-width: 360px; width: 100%; }
-
-    label { display: block; font-size: 13px; color: #9ca3af; margin-bottom: 6px; }
-
-    input[type="text"] { width: 100%; padding: 14px 16px; border-radius: 10px; border: 2px solid #3f3f46; background: #27272a; color: #fff; font-size: 16px; margin-bottom: 16px; }
-
-    input:focus { outline: none; border-color: #14b8a6; }
-
-    .presets { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-
-    .preset { padding: 10px 16px; background: rgba(20,184,166,0.15); color: #14b8a6; border: 1px solid rgba(20,184,166,0.3); border-radius: 8px; cursor: pointer; font-size: 13px; }
-
-    .preset:hover, .preset:active { background: rgba(20,184,166,0.25); }
-
-    .btn { width: 100%; padding: 16px; background: #14b8a6; color: #0c0e14; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; }
-
-    .btn:hover, .btn:active { background: #0d9488; }
-
-    .hint { font-size: 12px; color: #71717a; margin-top: 16px; line-height: 1.5; text-align: left; max-width: 360px; }
-
-    .chk { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
-
-    .chk input { width: auto; margin: 0; }
-
-    details.hint summary { cursor: pointer; color: #14b8a6; font-weight: 600; list-style: none; }
-
-    details.hint summary::-webkit-details-marker { display: none; }
-
-    .guide { background: rgba(20,184,166,0.08); border: 1px solid rgba(20,184,166,0.22); border-radius: 12px; padding: 12px 14px; margin-bottom: 20px; max-width: 360px; font-size: 12px; line-height: 1.45; color: #a1a1aa; }
-
-    .guide strong { color: #e4e4e7; }
-
-  </style>
-
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0c0e14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>G1 Talk</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;background:#0c0e14;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);min-height:100vh;}
+h1{font-size:1.6rem;margin-bottom:4px;color:#14b8a6;}
+.sub{font-size:13px;color:#71717a;margin-bottom:16px;}
+.card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;max-width:380px;width:100%;}
+label{display:block;font-size:12px;color:#9ca3af;margin-bottom:4px;}
+input[type=text]{width:100%;padding:14px 16px;border-radius:10px;border:2px solid #3f3f46;background:#27272a;color:#fff;font-size:16px;margin-bottom:10px;-webkit-appearance:none;}
+input:focus{outline:none;border-color:#14b8a6;}
+.presets{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;}
+.preset{padding:8px 14px;background:rgba(20,184,166,0.12);color:#14b8a6;border:1px solid rgba(20,184,166,0.3);border-radius:8px;cursor:pointer;font-size:12px;-webkit-tap-highlight-color:transparent;}
+.preset:active{background:rgba(20,184,166,0.3);}
+.chk{display:flex;align-items:center;gap:8px;margin-bottom:12px;}
+.chk input{width:auto;margin:0;accent-color:#14b8a6;}
+.chk label{margin:0;font-size:13px;color:#a1a1aa;}
+.btn{width:100%;padding:16px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;font-size:16px;font-weight:700;cursor:pointer;-webkit-tap-highlight-color:transparent;margin-bottom:8px;}
+.btn:active{background:#0d9488;}
+.btn-sec{width:100%;padding:14px;background:rgba(99,102,241,0.15);color:#a5b4fc;border:1px solid rgba(99,102,241,0.3);border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent;margin-bottom:8px;}
+.btn-sec:active{background:rgba(99,102,241,0.3);}
+.status{text-align:center;font-size:12px;color:#71717a;margin-top:8px;min-height:18px;}
+.status.ok{color:#22c55e;}
+.status.err{color:#ef4444;}
+.guide{background:rgba(20,184,166,0.06);border:1px solid rgba(20,184,166,0.18);border-radius:12px;padding:12px;margin-bottom:16px;max-width:380px;font-size:11px;line-height:1.45;color:#71717a;}
+.guide strong{color:#a1a1aa;}
+.mic-status{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:8px;margin-bottom:12px;font-size:12px;}
+.mic-status.pending{background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);color:#fcd34d;}
+.mic-status.granted{background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);color:#22c55e;}
+.mic-status.denied{background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#ef4444;}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.mic-status.pending .dot{background:#fbbf24;}
+.mic-status.granted .dot{background:#22c55e;}
+.mic-status.denied .dot{background:#ef4444;}
+</style>
 </head>
-
 <body>
+<h1>G1 Talk</h1>
+<p class="sub">Assistente vocale robot Unitree G1</p>
 
-  <h1>G1 Talk</h1>
+<div class="guide">
+  <strong>Setup:</strong> server attivo sul G1 (<code>restart_server.sh</code>). Stesso WiFi del robot. Mic wireless collegato al telefono = funziona come mic di sistema.
+  <strong>Cassa BT:</strong> associala in Impostazioni Android.
+</div>
 
-  <p style="color:#9ca3af;font-size:14px;margin-bottom:12px;">Launcher → stessa app del browser</p>
+<div id="micStatus" class="mic-status pending">
+  <span class="dot"></span>
+  <span id="micText">Microfono: verifica...</span>
+  <button type="button" id="micBtn" style="margin-left:auto;padding:6px 12px;background:rgba(255,255,255,0.1);color:#e4e4e7;border:1px solid rgba(255,255,255,0.15);border-radius:6px;font-size:11px;cursor:pointer;display:none;">Consenti</button>
+</div>
 
-  <div class="guide">
-
-    <strong>Prima</strong> il modulo deve girare sul robot: <code>bash scripts/restart_server.sh</code> sul G1.<br><br>
-
-    Questa app inserisce solo l’IP e apre <strong>/client</strong> (soundboard, parla, tempi…). Voce e IA = server sul G1.<br><br>
-
-    <strong>Cassa Bluetooth:</strong> Impostazioni Android → associa l’altoparlante; l’audio del sistema va sulla cassa.
-
+<div class="card">
+  <label>IP del server (G1 / Jetson)</label>
+  <input type="text" id="ip" placeholder="192.168.123.161" inputmode="decimal" />
+  <div class="presets">
+    <button type="button" class="preset" onclick="setIp('192.168.123.161')">Robot G1</button>
+    <button type="button" class="preset" onclick="setIp('192.168.10.191')">AI Accel.</button>
+    <button type="button" class="preset" onclick="setIp('192.168.123.164')">Jetson</button>
   </div>
-
-  <div class="card">
-
-    <label>IP del server</label>
-
-    <input type="text" id="ip" placeholder="192.168.123.161" />
-
-    <div class="presets">
-
-      <button type="button" class="preset" onclick="setIp('192.168.123.161')">Robot G1</button>
-
-      <button type="button" class="preset" onclick="setIp('192.168.10.191')">AI Accelerator</button>
-
-    </div>
-
-    <div class="chk">
-
-      <input type="checkbox" id="https" checked />
-
-      <label for="https" style="margin:0;">Usa HTTPS (serve per microfono)</label>
-
-    </div>
-
-    <button type="button" class="btn" onclick="connect()">Connetti</button>
-
+  <div class="chk">
+    <input type="checkbox" id="https" checked />
+    <label for="https">HTTPS (necessario per microfono)</label>
   </div>
+  <button type="button" class="btn" onclick="goTo('client')">Connetti (Parla + Soundboard)</button>
+  <button type="button" class="btn-sec" onclick="goTo('robot-control')">Robot Control (Joystick + Gesti)</button>
+  <p class="status" id="status"></p>
+</div>
 
-  <p class="hint" style="margin-top:14px;">
+<p style="margin-top:14px;font-size:11px;color:#52525b;text-align:center;">
+  WiFi robot &rarr; inserisci IP &rarr; Connetti<br>
+  <span id="lastUrl" style="font-size:10px;color:#3f3f46;"></span>
+</p>
 
-    WiFi del robot o stessa rete del server → IP (es. <code>ip a</code> sul G1) → Connetti.
+<script>
+(function(){
+  var KEY = 'g1_last_ip';
+  var ipEl = document.getElementById('ip');
+  var statusEl = document.getElementById('status');
+  var saved = localStorage.getItem(KEY);
+  ipEl.value = saved || '192.168.123.161';
 
-  </p>
+  window.setIp = function(ip){ ipEl.value = ip; };
 
-  <script>
+  window.goTo = function(page){
+    var ip = ipEl.value.trim().replace(/^https?:\/\//,'').split('/')[0].split(':')[0];
+    if (!ip) { alert('Inserisci l\'IP'); return; }
+    var useHttps = document.getElementById('https').checked;
+    var proto = useHttps ? 'https' : 'http';
+    var url = proto + '://' + ip + ':8081/' + page;
+    localStorage.setItem(KEY, ip);
+    statusEl.textContent = 'Connessione a ' + ip + '...';
+    statusEl.className = 'status';
+    // Probe server with timeout before navigating
+    var ctrl = new AbortController();
+    var timer = setTimeout(function(){ ctrl.abort(); }, 4000);
+    fetch(proto + '://' + ip + ':8081/api/health', {signal: ctrl.signal, mode: 'no-cors'})
+      .then(function(){ clearTimeout(timer); window.location.href = url; })
+      .catch(function(){
+        clearTimeout(timer);
+        statusEl.textContent = 'Server non raggiungibile. Navigazione comunque...';
+        statusEl.className = 'status err';
+        setTimeout(function(){ window.location.href = url; }, 800);
+      });
+  };
 
-    (function(){ var s = localStorage.getItem('g1_last_ip'); if(s) document.getElementById('ip').value = s; else document.getElementById('ip').value = '192.168.123.161'; })();
+  // Mic permission check
+  var micStatusEl = document.getElementById('micStatus');
+  var micTextEl = document.getElementById('micText');
+  var micBtnEl = document.getElementById('micBtn');
 
-    function setIp(ip){ document.getElementById('ip').value = ip; }
-
-    function connect(){
-
-      var ip = document.getElementById('ip').value.trim().replace(/^https?:\/\//,'').split('/')[0].split(':')[0];
-
-      if(!ip){ alert('Inserisci l\'IP'); return; }
-
-      var useHttps = document.getElementById('https').checked;
-
-      var proto = useHttps ? 'https' : 'http';
-
-      var url = proto + '://' + ip + ':8081/client';
-
-      localStorage.setItem('g1_last_ip', ip);
-
-      window.location.href = url;
-
+  function checkMic(){
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      micStatusEl.className = 'mic-status denied';
+      micTextEl.textContent = 'Microfono: API non disponibile (serve HTTPS)';
+      return;
     }
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({name:'microphone'}).then(function(r){
+        if (r.state === 'granted') {
+          micStatusEl.className = 'mic-status granted';
+          micTextEl.textContent = 'Microfono: autorizzato';
+        } else if (r.state === 'denied') {
+          micStatusEl.className = 'mic-status denied';
+          micTextEl.textContent = 'Microfono: negato (apri Impostazioni App)';
+        } else {
+          micStatusEl.className = 'mic-status pending';
+          micTextEl.textContent = 'Microfono: da autorizzare';
+          micBtnEl.style.display = 'inline-block';
+        }
+      }).catch(function(){ requestMic(); });
+    } else {
+      micBtnEl.style.display = 'inline-block';
+      micTextEl.textContent = 'Microfono: tocca Consenti';
+    }
+  }
 
-  </script>
+  function requestMic(){
+    navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+      stream.getTracks().forEach(function(t){ t.stop(); });
+      micStatusEl.className = 'mic-status granted';
+      micTextEl.textContent = 'Microfono: autorizzato';
+      micBtnEl.style.display = 'none';
+    }).catch(function(e){
+      micStatusEl.className = 'mic-status denied';
+      micTextEl.textContent = 'Microfono: ' + (e.name || e.message || 'negato');
+    });
+  }
 
+  micBtnEl.addEventListener('click', requestMic);
+  setTimeout(checkMic, 300);
+
+  // Show last URL
+  var lastIp = localStorage.getItem(KEY);
+  if (lastIp) {
+    document.getElementById('lastUrl').textContent = 'Ultimo: https://' + lastIp + ':8081/client';
+  }
+})();
+</script>
 </body>
-
 </html>
-
-
