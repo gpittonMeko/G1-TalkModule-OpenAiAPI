@@ -66,6 +66,9 @@ def _read_soundboard_lite_fast() -> list[dict] | None:
         slots = data.get("slots")
         if not isinstance(slots, list) or len(slots) != SOUNDBOARD_SLOT_COUNT:
             return None
+        # Sidecar vecchio senza robot_arm: rigenera da soundboard.json al prossimo GET lite
+        if slots and isinstance(slots[0], dict) and "robot_arm" not in slots[0]:
+            return None
         return slots
     except Exception:
         return None
@@ -643,6 +646,8 @@ self.addEventListener('activate', () => self.clients.claim());
                     "format": "webm",
                     "audio_base64_clean": "",
                     "format_clean": "mp3",
+                    "robot_arm": "",
+                    "robot_loco": "",
                 }
                 for i in range(n)
             ]
@@ -661,6 +666,8 @@ self.addEventListener('activate', () => self.clients.claim());
                         "format": "webm",
                         "audio_base64_clean": "",
                         "format_clean": "mp3",
+                        "robot_arm": "",
+                        "robot_loco": "",
                     }
                 )
             for i in range(len(slots)):
@@ -671,6 +678,8 @@ self.addEventListener('activate', () => self.clients.claim());
                 s.setdefault("format", "webm")
                 s.setdefault("audio_base64_clean", "")
                 s.setdefault("format_clean", "mp3")
+                s.setdefault("robot_arm", "")
+                s.setdefault("robot_loco", "")
             out = slots[:n]
             _soundboard_cache = (mtime_ns, out)
             return out
@@ -684,6 +693,8 @@ self.addEventListener('activate', () => self.clients.claim());
                     "format": "webm",
                     "audio_base64_clean": "",
                     "format_clean": "mp3",
+                    "robot_arm": "",
+                    "robot_loco": "",
                 }
                 for i in range(n)
             ]
@@ -702,6 +713,8 @@ self.addEventListener('activate', () => self.clients.claim());
                     "format_clean": s.get("format_clean") or "mp3",
                     "has_robot": len(ar) > 50,
                     "has_clean": len(ac) > 50,
+                    "robot_arm": str(s.get("robot_arm") or ""),
+                    "robot_loco": str(s.get("robot_loco") or ""),
                 }
             )
         return lite
@@ -761,6 +774,8 @@ self.addEventListener('activate', () => self.clients.claim());
             "format": s.get("format") or "webm",
             "audio_base64_clean": s.get("audio_base64_clean") or "",
             "format_clean": s.get("format_clean") or "mp3",
+            "robot_arm": str(s.get("robot_arm") or ""),
+            "robot_loco": str(s.get("robot_loco") or ""),
         }
 
     @app.get("/api/run-sheet")
@@ -839,6 +854,9 @@ self.addEventListener('activate', () => self.clients.claim());
             clean_b64 = audio_b64
             clean_fmt = fmt
         txt = str(data.get("text", "")).strip()[:SOUNDBOARD_TEXT_MAX_LEN] or f"Comando {slot+1}"
+        prev = slots[slot] if slot < len(slots) else {}
+        ra = data.get("robot_arm")
+        rl = data.get("robot_loco")
         slots[slot] = {
             "icon": str(data.get("icon", "🎤"))[:4],
             "text": txt,
@@ -846,6 +864,8 @@ self.addEventListener('activate', () => self.clients.claim());
             "format": fmt,
             "audio_base64_clean": clean_b64,
             "format_clean": clean_fmt if clean_b64 else "mp3",
+            "robot_arm": str(ra if ra is not None else (prev.get("robot_arm") or "")),
+            "robot_loco": str(rl if rl is not None else (prev.get("robot_loco") or "")),
         }
         try:
             SOUNDBOARD_PATH.write_text(json.dumps({"slots": slots}, indent=2), encoding="utf-8")
@@ -935,6 +955,22 @@ self.addEventListener('activate', () => self.clients.claim());
             raise HTTPException(400, "Base64 non valido")
         if len(raw) < 80:
             raise HTTPException(400, "Audio troppo corto")
+        arm = str(s.get("robot_arm") or "").strip()
+        loco = str(s.get("robot_loco") or "").strip()
+        if arm or loco:
+            try:
+                from talk_module.robot_actions import (
+                    execute_g1_loco_command,
+                    execute_robot_action,
+                    loco_command_requires_confirm,
+                )
+
+                if arm:
+                    execute_robot_action(arm)
+                if loco and not loco_command_requires_confirm(loco):
+                    execute_g1_loco_command(loco)
+            except Exception as e:
+                print(f"[soundboard-play-local] robot: {e}", flush=True)
         from talk_module.audio import AudioPlayer
 
         try:
@@ -2428,6 +2464,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <option value="browser">Browser (telefono/PC)</option>
     </select>
     <p id="ttsServerHint" class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;"></p>
+    <p class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;">Con <strong>Browser</strong>: stessa uscita della Soundboard. Per <strong>Bluetooth</strong>, in Soundboard scegli esplicitamente la cassa BT in <strong>Riproduci su</strong> (o l&apos;altoparlante browser in Dispositivi); con «Predefinito» su Android l&apos;audio può finire sull&apos;auricolare.</p>
   </div>
   <details style="margin-top:8px;">
     <summary style="cursor:pointer;font-size:12px;color:#52525b;">Test & debug</summary>
@@ -2694,6 +2731,104 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let ttsPlaybackQueue = [];
     let ttsPlaybackBusy = false;
     const TTS_BEFORE_PLAY_GAP_MS = 180;
+    function _sbLabelLooksLikePhoneEarpiece(lab) {
+      var s = String(lab || '').toLowerCase();
+      if (!String(lab || '').trim()) return true;
+      return /earpiece|receiver|auricolare|ear piece|phone call|chiamat|communication|comunicaz|built-?in|built in|handset|phone speaker|altoparlante.{0,16}(telefono|phone|interno|device)/i.test(s);
+    }
+    function _sbLabelLooksLikeBluetoothOrExternal(lab) {
+      var s = String(lab || '').toLowerCase();
+      if (_sbLabelLooksLikePhoneEarpiece(lab)) return false;
+      if (/bluetooth|\bbt\b|wireless|airpods|cuffie|headphone|headset|usb audio|hdmi|dock|car audio|automotive/i.test(s)) return true;
+      return false;
+    }
+    /**
+     * Uscita browser per Parla + soundboard: esplicito su #sbOutput; se «Predefinito», stesso device di #speaker
+     * se browser_*; altrimenti sceglie tra le opzioni un'uscita BT/esterna (evita auricolare Android con label vuota).
+     */
+    function pickFallbackBrowserSinkIdFromOutputOptions() {
+      var sbOut = document.getElementById('sbOutput');
+      if (!sbOut || !sbOut.options) return null;
+      var bestBt = null, bestLabeled = null;
+      for (var i = 0; i < sbOut.options.length; i++) {
+        var o = sbOut.options[i];
+        if (!o.value || o.value === 'default') continue;
+        var lab = o.text || o.label || '';
+        if (_sbLabelLooksLikePhoneEarpiece(lab)) continue;
+        if (_sbLabelLooksLikeBluetoothOrExternal(lab)) { bestBt = o.value; break; }
+        if (String(lab).trim()) bestLabeled = bestLabeled || o.value;
+      }
+      return bestBt || bestLabeled || null;
+    }
+    function resolveBrowserPlaybackSinkIdLikeSoundboard() {
+      var sbOut = document.getElementById('sbOutput');
+      if (sbOut && sbOut.value && sbOut.value !== 'default') return sbOut.value;
+      var spk = document.getElementById('speaker');
+      if (spk) {
+        var v = spk.value;
+        if (v && v.indexOf('browser_') === 0 && v !== 'browser_default')
+          return v.replace(/^browser_/, '');
+      }
+      return pickFallbackBrowserSinkIdFromOutputOptions();
+    }
+    function applySinkThenPlay(audio, sinkId) {
+      var p = Promise.resolve();
+      if (sinkId && audio.setSinkId) {
+        p = audio.setSinkId(sinkId).catch(function() { return Promise.resolve(); });
+      }
+      return p.then(function() { return audio.play(); });
+    }
+    function sbFireSlotRobotIfConfigured(sd) {
+      if (!sd) return;
+      var arm = (sd.robot_arm && String(sd.robot_arm).trim()) || '';
+      var loco = (sd.robot_loco && String(sd.robot_loco).trim()) || '';
+      if (!arm && !loco) return;
+      var ip = '192.168.123.161';
+      try {
+        var ls = localStorage.getItem('g1_robot_ip');
+        if (ls && ls.trim()) ip = ls.trim();
+      } catch(_) {}
+      if (arm) {
+        fetch('/api/robot-action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ action_id: arm, robot_ip: ip }) }).catch(function(){});
+      }
+      if (loco) {
+        fetch('/api/robot-loco', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ command: loco, robot_ip: ip }) }).catch(function(){});
+      }
+    }
+    function syncSbOutputFromSpeaker() {
+      var spk = document.getElementById('speaker');
+      var sbOut = document.getElementById('sbOutput');
+      if (!spk || !sbOut) return;
+      var v = spk.value;
+      if (v && v.indexOf('browser_') === 0 && v !== 'browser_default') {
+        var id = v.replace(/^browser_/, '');
+        for (var i = 0; i < sbOut.options.length; i++) {
+          if (sbOut.options[i].value === id) { sbOut.selectedIndex = i; return; }
+        }
+      }
+      try { sbOut.value = 'default'; } catch(_){}
+    }
+    function syncSpeakerFromSbOutput() {
+      var spk = document.getElementById('speaker');
+      var sbOut = document.getElementById('sbOutput');
+      if (!spk || !sbOut) return;
+      var id = sbOut.value;
+      if (!id || id === 'default') {
+        lastSinkId = null;
+        var cur = spk.value;
+        if (cur && cur.indexOf('browser_') === 0 && cur !== 'browser_default') {
+          for (var k = 0; k < spk.options.length; k++) {
+            if (spk.options[k].value === 'browser_default') { spk.selectedIndex = k; return; }
+          }
+        }
+        return;
+      }
+      lastSinkId = id;
+      var want = 'browser_' + id;
+      for (var j = 0; j < spk.options.length; j++) {
+        if (spk.options[j].value === want) { spk.selectedIndex = j; return; }
+      }
+    }
     function enqueueTtsPlayback(b64, onPlaybackFullyEnded) {
       if (!b64 || String(b64).length < 30) {
         if (onPlaybackFullyEnded) onPlaybackFullyEnded();
@@ -2710,7 +2845,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       setTimeout(function() {
         try {
           const audio = new Audio('data:audio/mpeg;base64,' + item.b64);
-          if (lastSinkId && audio.setSinkId) { try { audio.setSinkId(lastSinkId); } catch(_){} }
+          var ttsSink = resolveBrowserPlaybackSinkIdLikeSoundboard();
           audio.onended = function() {
             ttsPlaybackBusy = false;
             if (item.onEnded) item.onEnded();
@@ -2721,7 +2856,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             if (item.onEnded) item.onEnded();
             pumpTtsPlaybackQueue();
           };
-          audio.play().catch(function() {
+          applySinkThenPlay(audio, ttsSink).catch(function() {
             ttsPlaybackBusy = false;
             if (item.onEnded) item.onEnded();
             pumpTtsPlaybackQueue();
@@ -3261,9 +3396,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const spkVal = document.getElementById('speaker') ? document.getElementById('speaker').value : '';
       const ttsEl = document.getElementById('ttsPlayDest');
       const wantServerTts = ttsEl && ttsEl.value === 'server';
-      if (wantServerTts) { lastPlayOn = 'server'; lastSinkId = null; } else {
+      if (wantServerTts) {
+        lastPlayOn = 'server';
+        lastSinkId = null;
+      } else {
         lastPlayOn = 'browser';
         lastSinkId = (spkVal && spkVal.startsWith('browser_') && spkVal !== 'browser_default') ? spkVal.replace('browser_','') : null;
+        syncSbOutputFromSpeaker();
       }
       try {
         await ensureParlaWs();
@@ -3416,12 +3555,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         spkSel.onchange = function(){
           const v = spkSel.value;
           lastSinkId = (v && v.indexOf('browser_') === 0 && v !== 'browser_default') ? v.replace(/^browser_/, '') : null;
+          syncSbOutputFromSpeaker();
+          updateActiveMicIndicator();
         };
         const sbOut = document.getElementById('sbOutput');
         if (sbOut) {
           sbOut.innerHTML = '<option value="default">Predefinito</option>' + spks.map(function(s,i){
             return '<option value="'+s.deviceId+'">'+escapeHtmlDevices(s.label || ('Output '+(i+1)))+'</option>';
           }).join('');
+          sbOut.onchange = function(){ syncSpeakerFromSbOutput(); updateActiveMicIndicator(); };
         }
         const nJet = sm.length + ss.length;
         statusEl.textContent = nJet ? ('Jetson: '+sm.length+' mic, '+ss.length+' uscite · Browser: '+mics.length+'/'+spks.length) : ('Browser: '+mics.length+' mic · Server: nessun locale (controlla PortAudio sulla Jetson)');
@@ -3441,13 +3583,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (cfg.speaker && cfg.speaker.value) {
             try { spkSel.value = cfg.speaker.value; } catch(_){}
           }
+          var vsp = spkSel.value;
+          lastSinkId = (vsp && vsp.indexOf('browser_') === 0 && vsp !== 'browser_default') ? vsp.replace(/^browser_/, '') : null;
+          syncSbOutputFromSpeaker();
           updateActiveMicIndicator();
         }).catch(function(){ updateActiveMicIndicator(); });
       } catch(e) {
         micSel.innerHTML = '<option value="">Errore: '+escapeHtmlDevices(e.message)+'</option>';
         spkSel.innerHTML = '<option value="browser_default">Riproduci qui</option>';
         const sbOut = document.getElementById('sbOutput');
-        if (sbOut) sbOut.innerHTML = '<option value="default">Predefinito</option>';
+        if (sbOut) {
+          sbOut.innerHTML = '<option value="default">Predefinito</option>';
+          sbOut.onchange = function(){ syncSpeakerFromSbOutput(); updateActiveMicIndicator(); };
+        }
         statusEl.textContent = 'Errore lettura dispositivi.';
       }
     }
@@ -3568,11 +3716,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if(sd.audio_base64_clean && sd.audio_base64_clean.length>50){ b64 = sd.audio_base64_clean; fmt = sd.format_clean||'mp3'; }
         else if(sd.audio_base64 && sd.audio_base64.length>50){ b64 = sd.audio_base64; fmt = sd.format||'mp3'; }
         if(!b64) return;
+        sbFireSlotRobotIfConfigured(sd);
         const a = new Audio('data:'+sbMimeForFmt(fmt)+';base64,'+b64);
-        const sbOut = document.getElementById('sbOutput');
-        const sinkId = (sbOut && sbOut.value && sbOut.value !== 'default') ? sbOut.value : null;
-        if(sinkId && typeof a.setSinkId === 'function') { try { a.setSinkId(sinkId); } catch(_){} }
-        a.play();
+        const sinkId = resolveBrowserPlaybackSinkIdLikeSoundboard();
+        applySinkThenPlay(a, sinkId).catch(function(){});
       }
       if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
         playFromData(s);
@@ -3883,8 +4030,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           document.getElementById('result').innerHTML = '<div><b>Hai scritto:</b> '+(d.text||'')+'</div><div><b>Risposta:</b> '+(d.response||'')+' <span style="color:#71717a;font-size:12px;">('+(d.duration_ms||0)+' ms)</span></div>';
           if (d.audio_base64) {
             const a = new Audio('data:audio/mpeg;base64,'+d.audio_base64);
-            if(lastSinkId && a.setSinkId){ try { a.setSinkId(lastSinkId); } catch(_){} }
-            a.play();
+            applySinkThenPlay(a, resolveBrowserPlaybackSinkIdLikeSoundboard()).catch(function(){});
           }
         }
       } catch (e) {
@@ -3912,8 +4058,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           document.getElementById('result').innerHTML = '<div><b>Hai detto:</b> '+(d.text||'')+'</div><div><b>Risposta:</b> '+(d.response||'')+'</div>';
           if (d.audio_base64) {
             const a = new Audio('data:audio/mpeg;base64,'+d.audio_base64);
-            if(lastSinkId && a.setSinkId){ try { a.setSinkId(lastSinkId); } catch(_){} }
-            a.play();
+            applySinkThenPlay(a, resolveBrowserPlaybackSinkIdLikeSoundboard()).catch(function(){});
           }
         } else {
           status.textContent = ' '+(d.error||'');
@@ -3981,6 +4126,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       } else {
         lastPlayOn = 'browser';
         lastSinkId = (spkVal && spkVal.startsWith('browser_') && spkVal !== 'browser_default') ? spkVal.replace('browser_','') : null;
+        syncSbOutputFromSpeaker();
       }
       const deviceId = wantServerTts ? serverTtsDeviceId : null;
       try {
