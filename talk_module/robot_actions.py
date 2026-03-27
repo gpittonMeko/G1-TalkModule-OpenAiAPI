@@ -40,7 +40,20 @@ G1_ARM_ACTIONS: dict[int, dict] = {
 _NAME_TO_ID = {v["name"]: k for k, v in G1_ARM_ACTIONS.items()}
 
 _sdk_client = None
+_loco_client = None
+_dds_inited = False
 _sdk_lock = threading.Lock()
+
+
+def _ensure_dds_init() -> None:
+    """Inizializza DDS una sola volta (condivisa tra braccia e locomozione G1)."""
+    global _dds_inited
+    if _dds_inited:
+        return
+    from unitree_sdk2py.core.channel import ChannelFactory
+
+    ChannelFactory.Instance().Init(0, "eth0")
+    _dds_inited = True
 
 
 def _load_robot_actions() -> dict:
@@ -134,8 +147,8 @@ def _do_arm_action(action_id: int, robot_ip: str) -> tuple[bool, str]:
         from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
 
         with _sdk_lock:
+            _ensure_dds_init()
             if _sdk_client is None:
-                ChannelFactory.Instance().Init(0, "eth0")
                 _sdk_client = G1ArmActionClient()
                 _sdk_client.Init()
                 _sdk_client.SetTimeout(10.0)
@@ -166,20 +179,26 @@ def _do_arm_action_http(action_id: int, robot_ip: str) -> tuple[bool, str]:
 
 
 def send_move_command(vx: float, vy: float, vyaw: float, robot_ip: Optional[str] = None) -> tuple[bool, str]:
-    """Invia comando Move (locomozione) via SDK o HTTP. vx=avanti/indietro, vy=laterale, vyaw=rotazione."""
+    """G1: velocità via LocoClient.Move (vx avanti, vy laterale, vyaw rad/s)."""
     ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+    global _loco_client
     try:
-        from unitree_sdk2py.go2.sport.sport_client import SportClient
-        from unitree_sdk2py.core.channel import ChannelFactory
-        sc = SportClient()
-        sc.Init()
-        sc.Move(vx, vy, vyaw)
+        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+
+        with _sdk_lock:
+            _ensure_dds_init()
+            if _loco_client is None:
+                _loco_client = LocoClient()
+                _loco_client.SetTimeout(10.0)
+                _loco_client.Init()
+            _loco_client.Move(float(vx), float(vy), float(vyaw))
         return True, "ok"
     except ImportError:
         pass
     except Exception as e:
-        return False, f"SDK move error: {e}"
+        return False, f"G1 Move: {e}"
     import urllib.request
+
     url = f"http://{ip}:8081/api/sport/request"
     params = json.dumps({"x": vx, "y": vy, "z": vyaw})
     payload = json.dumps({"api_id": 1008, "parameter": params}).encode()
@@ -188,4 +207,55 @@ def send_move_command(vx: float, vy: float, vyaw: float, robot_ip: Optional[str]
         with urllib.request.urlopen(req, timeout=3) as resp:
             return True, resp.read().decode()[:200]
     except Exception as e:
-        return False, f"move fallback HTTP: {e}"
+        return False, f"move HTTP fallback: {e}"
+
+
+def execute_g1_loco_command(command: str, robot_ip: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Comandi locomozione G1 (LocoClient, es. g1_loco_client_example.py):
+      ready → HighStand (posa eretta / pronto)
+      walk  → Move(0.28, 0, 0) passo avanti (stesso schema SDK)
+      stop_walk → Move(0, 0, 0)
+    """
+    ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+    cmd = (command or "").strip().lower()
+
+    if SCRIPT_ACTIONS_PATH.exists() and os.access(SCRIPT_ACTIONS_PATH, os.X_OK):
+        try:
+            r = subprocess.run(
+                [str(SCRIPT_ACTIONS_PATH), f"loco_{cmd}", ip],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=str(SCRIPT_ACTIONS_PATH.parent),
+            )
+            if r.returncode == 0:
+                return True, "ok"
+        except Exception:
+            pass
+
+    global _loco_client
+    try:
+        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+
+        with _sdk_lock:
+            _ensure_dds_init()
+            if _loco_client is None:
+                _loco_client = LocoClient()
+                _loco_client.SetTimeout(10.0)
+                _loco_client.Init()
+            if cmd in ("ready", "pronto", "high_stand"):
+                _loco_client.HighStand()
+            elif cmd in ("low_stand", "basso"):
+                _loco_client.LowStand()
+            elif cmd in ("walk", "cammina", "avanti"):
+                _loco_client.Move(0.28, 0.0, 0.0)
+            elif cmd in ("stop_walk", "stop", "ferma"):
+                _loco_client.Move(0.0, 0.0, 0.0)
+            else:
+                return False, f"Comando locomozione sconosciuto: {command}"
+        return True, "ok"
+    except ImportError:
+        return False, "Installa unitree_sdk2_python con modulo G1 LocoClient"
+    except Exception as e:
+        return False, str(e)

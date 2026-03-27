@@ -1014,6 +1014,20 @@ self.addEventListener('activate', () => self.clients.claim());
         except Exception as e:
             return {"ok": False, "message": str(e)}
 
+    @app.post("/api/robot-loco")
+    def api_robot_loco(data: dict = Body(...)):
+        """Comandi locomozione G1: command = ready | walk | stop_walk | low_stand."""
+        cmd = str(data.get("command", "") or "").strip()
+        robot_ip = data.get("robot_ip") or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+        if not cmd:
+            raise HTTPException(400, "command richiesto (es. ready, walk)")
+        try:
+            from talk_module.robot_actions import execute_g1_loco_command
+            ok, msg = execute_g1_loco_command(cmd, robot_ip=robot_ip)
+            return {"ok": ok, "message": msg}
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
     @app.get("/api/config")
     def api_get_config():
         return load_device_config()
@@ -4386,15 +4400,16 @@ ROBOT_CONTROL_TEMPLATE = """<!DOCTYPE html>
 <title>G1 Robot Control</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
-html,body{height:100%;overflow:hidden;background:#0c0e14;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;touch-action:none;user-select:none;-webkit-user-select:none;}
-.top-bar{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#18181b;border-bottom:1px solid #27272a;height:44px;flex-shrink:0;}
+html,body{min-height:100%;background:#0c0e14;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y;}
+body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
+.top-bar{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#18181b;border-bottom:1px solid #27272a;min-height:44px;position:sticky;top:0;z-index:20;flex-shrink:0;}
 .top-bar h1{font-size:15px;font-weight:700;color:#14b8a6;}
 .top-bar .status{font-size:11px;color:#71717a;}
 .top-bar .status.ok{color:#22c55e;}
 .top-bar .status.err{color:#ef4444;}
 .top-bar a{color:#5eead4;text-decoration:none;font-size:12px;}
-.container{display:flex;flex-direction:column;height:calc(100% - 44px);}
-.actions-area{flex:1;overflow-y:auto;padding:8px;-webkit-overflow-scrolling:touch;}
+.container{display:block;padding:8px 8px 20px;}
+.actions-area{padding:0 0 8px;}
 .section-label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#71717a;margin:8px 0 6px 4px;font-weight:600;}
 .gesture-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px;}
 .gesture-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:10px 4px;background:#1e1e2e;border:1px solid #27272a;border-radius:10px;color:#e4e4e7;font-size:10px;text-align:center;cursor:pointer;transition:background 0.15s,border-color 0.15s;min-height:64px;-webkit-tap-highlight-color:transparent;}
@@ -4405,8 +4420,8 @@ html,body{height:100%;overflow:hidden;background:#0c0e14;color:#e4e4e7;font-fami
 .gesture-btn.release:active{background:#ef444430;border-color:#ef4444;}
 .gesture-btn.special{border-color:#6366f140;background:#6366f110;}
 .gesture-btn.special:active{background:#6366f130;border-color:#6366f1;}
-.joystick-area{flex-shrink:0;display:flex;align-items:center;justify-content:center;gap:16px;padding:10px 12px 16px;background:#111318;border-top:1px solid #27272a;}
-.joy-wrap{position:relative;width:160px;height:160px;flex-shrink:0;}
+.joystick-area{display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap;padding:14px 12px 20px;margin-top:8px;background:#111318;border:1px solid #27272a;border-radius:12px;touch-action:manipulation;}
+.joy-wrap{position:relative;width:160px;height:160px;flex-shrink:0;touch-action:none;}
 .joy-base{position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle,#1e1e2e 0%,#18181b 100%);border:2px solid #27272a;}
 .joy-stick{position:absolute;width:60px;height:60px;border-radius:50%;background:radial-gradient(circle,#2dd4bf 0%,#14b8a6 100%);box-shadow:0 0 12px #14b8a640;left:50%;top:50%;transform:translate(-50%,-50%);transition:none;pointer-events:none;}
 .joy-info{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#71717a;font-family:monospace;}
@@ -4417,6 +4432,8 @@ html,body{height:100%;overflow:hidden;background:#0c0e14;color:#e4e4e7;font-fami
 .quick-btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
 .quick-btn{padding:8px 14px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent;}
 .quick-btn:active{background:#14b8a630;border-color:#14b8a6;}
+.quick-btn.loco{background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.35);color:#86efac;}
+.quick-btn.loco:active{background:rgba(34,197,94,0.28);}
 #robotIp{width:140px;padding:6px 8px;background:#1e1e2e;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:12px;font-family:monospace;}
 .log-area{max-height:60px;overflow-y:auto;padding:4px 8px;font-size:10px;color:#52525b;font-family:monospace;line-height:1.4;}
 .log-area .ok{color:#22c55e;}.log-area .err{color:#ef4444;}
@@ -4436,10 +4453,17 @@ html,body{height:100%;overflow:hidden;background:#0c0e14;color:#e4e4e7;font-fami
   <div class="actions-area">
     <div class="section-label">Gesti braccia</div>
     <div class="gesture-grid" id="gestureGrid"></div>
-    <div class="section-label">Comandi rapidi</div>
+    <div class="section-label">Locomozione (sport mode)</div>
     <div class="quick-btns">
-      <button class="quick-btn" onclick="sendAction(99)">Rilascia braccia</button>
-      <button class="quick-btn" onclick="sendMove(0,0,0)">STOP</button>
+      <button type="button" class="quick-btn loco" onclick="sendLoco('ready')">Ready</button>
+      <button type="button" class="quick-btn loco" onclick="sendLoco('walk')">Walk</button>
+      <button type="button" class="quick-btn loco" onclick="sendLoco('stop_walk')">Stop walk</button>
+      <button type="button" class="quick-btn loco" onclick="sendLoco('low_stand')">Low stand</button>
+    </div>
+    <div class="section-label">Braccia / sicurezza</div>
+    <div class="quick-btns">
+      <button type="button" class="quick-btn" onclick="sendAction(99)">Rilascia braccia</button>
+      <button type="button" class="quick-btn" onclick="sendMove(0,0,0)">STOP vel.</button>
     </div>
     <div class="log-area" id="logArea"></div>
   </div>
@@ -4534,6 +4558,19 @@ html,body{height:100%;overflow:hidden;background:#0c0e14;color:#e4e4e7;font-fami
       if (d.ok) setStatus('ok');
       else setStatus('err');
     }).catch(function(e){ setStatus('err'); });
+  };
+
+  window.sendLoco = function(command){
+    var ip = ipEl.value.trim();
+    log('Loco ' + command + ' -> ' + ip);
+    fetch('/api/robot-loco', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: command, robot_ip: ip})
+    }).then(function(r){ return r.json(); }).then(function(d){
+      if (d.ok) { log('Loco OK: ' + (d.message||''), 'ok'); setStatus('ok'); }
+      else { log('Loco ERR: ' + (d.message||''), 'err'); setStatus('err'); }
+    }).catch(function(e){ log('Loco rete: ' + e, 'err'); setStatus('err'); });
   };
 
   function setStatus(s){
