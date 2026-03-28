@@ -47,6 +47,8 @@ SOUNDBOARD_SLOT_COUNT = 20
 SOUNDBOARD_TEXT_MAX_LEN = 280
 # soundboard.json può essere ~20MB: una sola lettura parse in RAM finché il file non cambia (mtime).
 _soundboard_cache: tuple[int, list[dict]] | None = None
+# Una sola riproduzione soundboard sulla cassa Jetson alla volta (evita sovrapposizioni).
+_soundboard_local_play_lock = threading.Lock()
 
 
 def _invalidate_soundboard_cache() -> None:
@@ -858,7 +860,7 @@ self.addEventListener('activate', () => self.clients.claim());
         ra = data.get("robot_arm")
         rl = data.get("robot_loco")
         slots[slot] = {
-            "icon": str(data.get("icon", "🎤"))[:4],
+            "icon": str(data.get("icon", "🎤")).strip()[:20],
             "text": txt,
             "audio_base64": audio_b64,
             "format": fmt,
@@ -921,6 +923,70 @@ self.addEventListener('activate', () => self.clients.claim());
             inp.unlink(missing_ok=True)
             out.unlink(missing_ok=True)
 
+    def _soundboard_wav_boost(wav_bytes: bytes) -> bytes:
+        """Guadagno lineare su PCM (ffmpeg); alimiter evita clipping duro. SOUNDBOARD_PLAYBACK_GAIN in .env (default 1.32)."""
+        try:
+            g = float(os.getenv("SOUNDBOARD_PLAYBACK_GAIN", "1.32"))
+        except ValueError:
+            g = 1.32
+        if g <= 1.02 or not wav_bytes or len(wav_bytes) < 100:
+            return wav_bytes
+        g = min(max(g, 1.0), 2.2)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fin:
+            fin.write(wav_bytes)
+            inp = Path(fin.name)
+        out = inp.with_suffix(".sb_boost.wav")
+        try:
+            af = f"volume={g:.4f},alimiter=limit=0.97"
+            r = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(inp),
+                    "-af",
+                    af,
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "44100",
+                    "-ac",
+                    "2",
+                    str(out),
+                ],
+                capture_output=True,
+                timeout=120,
+            )
+            if r.returncode == 0 and out.exists() and out.stat().st_size > 100:
+                return out.read_bytes()
+            r2 = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(inp),
+                    "-af",
+                    f"volume={g:.4f}",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "44100",
+                    "-ac",
+                    "2",
+                    str(out),
+                ],
+                capture_output=True,
+                timeout=120,
+            )
+            if r2.returncode == 0 and out.exists() and out.stat().st_size > 100:
+                return out.read_bytes()
+        except Exception:
+            pass
+        finally:
+            inp.unlink(missing_ok=True)
+            out.unlink(missing_ok=True)
+        return wav_bytes
+
     @app.post("/api/soundboard-play-local")
     def api_soundboard_play_local(data: dict = Body(...)):
         """Riproduce uno slot audio sulla cassa del Jetson (sounddevice + device_id dal setup)."""
@@ -982,13 +1048,15 @@ self.addEventListener('activate', () => self.clients.claim());
 
         try:
             wav_bytes = _soundboard_bytes_to_wav_playable(raw, fmt)
+            wav_bytes = _soundboard_wav_boost(wav_bytes)
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(500, f"Decodifica audio: {e!s}")
         p = AudioPlayer(device_id=int(dev_id))
-        if not p.play_bytes(wav_bytes, format_hint="wav"):
-            raise HTTPException(500, "Riproduzione fallita. Verifica PortAudio e il dispositivo in setup.")
+        with _soundboard_local_play_lock:
+            if not p.play_bytes(wav_bytes, format_hint="wav"):
+                raise HTTPException(500, "Riproduzione fallita. Verifica PortAudio e il dispositivo in setup.")
         return {"ok": True}
 
     @app.post("/api/soundboard-synth")
@@ -1124,10 +1192,7 @@ self.addEventListener('activate', () => self.clients.claim());
         _thr.Thread(target=_fire, daemon=True).start()
         return ((rm.response or "").strip() or "Ok")
 
-    WAKE_STT_PROMPT = (
-        "Hey G1. Ehi G1. G1, dimmi pure. Hey G1, che ora è. "
-        "Hey G1, saluta. Hey G1, dai la mano. G One."
-    )
+    WAKE_STT_PROMPT = "Italiano. Trascrivi solo parole effettivamente pronunciate."
 
     def _stt_and_wake_check(audio_bytes: bytes, format_hint: str = "webm") -> dict:
         """STT + wake word detection. Always returns wake_ack on any wake detection
@@ -1147,6 +1212,16 @@ self.addEventListener('activate', () => self.clients.claim());
             if not raw_text or not raw_text.strip():
                 return {"text": raw_text or "", "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
             rest, wkind = _find_wake_and_rest(raw_text)
+            txt_clean = raw_text.strip()
+            # Anti-hallucination: reject wake if transcript is suspiciously short
+            # or matches known Whisper ghost patterns (no real speech)
+            _GHOST = ("hey g1", "ehi g1", "g1", "g one", "gi one", "hey g one", "hey g 1")
+            if wkind != "miss" and txt_clean.lower().rstrip(".,;!? ") in _GHOST and len(txt_clean) < 12:
+                print(f"[Wake] REJECT reason=ghost_hallucination raw={raw_text!r} ({_ms()}ms)", flush=True)
+                return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
+            if wkind != "miss" and len(txt_clean) < 3:
+                print(f"[Wake] REJECT reason=too_short raw={raw_text!r} ({_ms()}ms)", flush=True)
+                return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
             print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r} ({_ms()}ms)", flush=True)
             if wkind == "miss":
                 return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
@@ -1348,7 +1423,12 @@ self.addEventListener('activate', () => self.clients.claim());
                         if resp == NOT_FOUND:
                             resp = None  # fallback a LLM
                 if not resp:
-                    resp = llm.chat(prompt.strip())
+                    resp = llm.chat(
+                        prompt.strip(),
+                        use_history=False,
+                        model=settings.llm_text_model,
+                        max_tokens=384,
+                    )
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             return {
                 "text": prompt.strip(),
@@ -2492,6 +2572,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </select>
     <button type="button" id="sbOutputRefresh" style="padding:6px 12px;font-size:12px;background:rgba(255,255,255,0.08);color:#9ca3af;border:1px solid rgba(255,255,255,0.1);border-radius:8px;cursor:pointer;">Aggiorna</button>
   </div>
+  <div style="margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;max-width:520px;">
+    <label for="sbGainSlider" style="font-size:12px;color:#9ca3af;">Volume soundboard (browser, guadagno digitale):</label>
+    <input type="range" id="sbGainSlider" min="0.5" max="3" step="0.05" value="1.35" style="flex:1;min-width:140px;max-width:220px;accent-color:#14b8a6;" />
+    <span id="sbGainLabel" style="font-size:12px;color:#a1a1aa;font-family:monospace;min-width:44px;">1.35×</span>
+  </div>
   <p id="soundboardLoadErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;grid-column:1/-1;"></p>
   <div id="soundboardScroll">
   <div id="soundboardGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;"></div>
@@ -2603,12 +2688,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       </div>
       </div>
     </details>
-  </div>
-
-  <!-- 2. PUSH TO TALK -->
-  <div style="margin-bottom:20px;">
-    <h2 style="font-size:1.15rem;margin:0 0 10px;color:#e4e4e7;">Tieni premuto e parla</h2>
-    <button class="btn" id="btn">Tieni premuto e parla</button>
   </div>
 
   <!-- VOLUME CASSA -->
@@ -2918,6 +2997,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let wsListenServer = null, wakeServerMode = false;
     let wakeCommandMode = false, wakeCommandIdleTimer = null;
     let wakeAudioInFlight = false, wakeQueuedBlob = null;
+    let listenServerWakeLatched = false;
     let wakeLevelCtx = null, wakeAnalyser = null, wakeLevelSampleInterval = null;
     let wakeSlicePeak = 0;
     /** Default soglia voce (0-255 FFT); override con slider e localStorage g1_wake_voice_threshold. */
@@ -3082,6 +3162,73 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         p = audio.setSinkId(sinkId).catch(function() { return Promise.resolve(); });
       }
       return p.then(function() { return audio.play(); });
+    }
+    let sbBrowserCtx = null, sbBrowserSource = null, sbBrowserAudioEl = null;
+    function sbStopSoundboardPlayback(){
+      try {
+        try { if (sbBrowserSource) { sbBrowserSource.stop(); sbBrowserSource.disconnect(); } } catch(_){}
+        sbBrowserSource = null;
+        try { if (sbBrowserCtx) { sbBrowserCtx.close().catch(function(){}); } } catch(_){}
+        sbBrowserCtx = null;
+        if (sbBrowserAudioEl) { try { sbBrowserAudioEl.pause(); sbBrowserAudioEl.removeAttribute('src'); sbBrowserAudioEl.load(); } catch(_){} }
+        sbBrowserAudioEl = null;
+      } catch(_){}
+    }
+    function getSoundboardBrowserGain(){
+      try {
+        var v = parseFloat(localStorage.getItem('g1_soundboard_gain'));
+        if (!isNaN(v) && v >= 0.35 && v <= 3.5) return v;
+      } catch(_){}
+      return 1.35;
+    }
+    function setSoundboardBrowserGain(v){
+      try { localStorage.setItem('g1_soundboard_gain', String(v)); } catch(_){}
+    }
+    function playSoundboardBrowser(b64, fmt){
+      sbStopSoundboardPlayback();
+      if (!b64 || String(b64).length < 50) return;
+      var mime = sbMimeForFmt(fmt);
+      var gain = getSoundboardBrowserGain();
+      var sinkId = resolveBrowserPlaybackSinkIdLikeSoundboard();
+      var bin = atob(String(b64));
+      var buf = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      var ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+      var ctxOpts = {};
+      if (sinkId) { try { ctxOpts.sinkId = sinkId; } catch(_){} }
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) {
+        var a0 = new Audio('data:'+mime+';base64,'+b64);
+        sbBrowserAudioEl = a0;
+        applySinkThenPlay(a0, sinkId).catch(function(){});
+        a0.onended = function(){ sbBrowserAudioEl = null; };
+        return;
+      }
+      var ctx;
+      try { ctx = new Ctx(ctxOpts); } catch(_) { ctx = new Ctx(); }
+      sbBrowserCtx = ctx;
+      if (ctx.resume) ctx.resume();
+      ctx.decodeAudioData(ab, function(decoded){
+        if (!sbBrowserCtx || sbBrowserCtx !== ctx) return;
+        var src = ctx.createBufferSource();
+        src.buffer = decoded;
+        var gn = ctx.createGain();
+        gn.gain.value = gain;
+        src.connect(gn);
+        gn.connect(ctx.destination);
+        sbBrowserSource = src;
+        src.onended = function(){
+          sbBrowserSource = null;
+          if (sbBrowserCtx === ctx) { try { ctx.close().catch(function(){}); } catch(_){} sbBrowserCtx = null; }
+        };
+        src.start(0);
+      }, function(){
+        sbBrowserCtx = null;
+        var a1 = new Audio('data:'+mime+';base64,'+b64);
+        sbBrowserAudioEl = a1;
+        applySinkThenPlay(a1, sinkId).catch(function(){});
+        a1.onended = function(){ sbBrowserAudioEl = null; };
+      });
     }
     function sbFireSlotRobotIfConfigured(sd) {
       if (!sd) return;
@@ -3342,21 +3489,30 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (!Ctx) return;
         const ctx = new Ctx();
         if (ctx.resume) ctx.resume();
-        var vol = 0.35;
-        var o1 = ctx.createOscillator(); var g1 = ctx.createGain();
-        o1.type = 'sine'; o1.frequency.value = 660;
-        g1.gain.setValueAtTime(vol, ctx.currentTime);
-        g1.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
-        o1.connect(g1); g1.connect(ctx.destination);
-        o1.start(ctx.currentTime); o1.stop(ctx.currentTime + 0.15);
-        var o2 = ctx.createOscillator(); var g2 = ctx.createGain();
-        o2.type = 'sine'; o2.frequency.value = 880;
-        g2.gain.setValueAtTime(0.01, ctx.currentTime);
-        g2.gain.setValueAtTime(vol, ctx.currentTime + 0.12);
-        g2.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
-        o2.connect(g2); g2.connect(ctx.destination);
-        o2.start(ctx.currentTime + 0.12); o2.stop(ctx.currentTime + 0.35);
-        setTimeout(function(){ ctx.close().catch(function(){}); }, 500);
+        const t0 = ctx.currentTime;
+        const master = ctx.createGain();
+        master.gain.value = 0.78;
+        master.connect(ctx.destination);
+        function wakeNote(freq, delay, dur, peak){
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = 'triangle';
+          o.frequency.value = freq;
+          g.gain.setValueAtTime(0.0001, t0 + delay);
+          g.gain.exponentialRampToValueAtTime(Math.max(0.08, peak), t0 + delay + 0.035);
+          g.gain.exponentialRampToValueAtTime(0.0001, t0 + delay + dur);
+          o.connect(g);
+          g.connect(master);
+          o.start(t0 + delay);
+          o.stop(t0 + delay + dur + 0.03);
+        }
+        /* Arpeggio maggiore con nona (C-E-G + D alta): tono chiaro, “jazz / positivo” */
+        wakeNote(523.25, 0.0, 0.2, 0.52);
+        wakeNote(659.25, 0.1, 0.2, 0.55);
+        wakeNote(783.99, 0.2, 0.2, 0.58);
+        wakeNote(1174.66, 0.3, 0.26, 0.5);
+        wakeNote(1046.5, 0.42, 0.16, 0.38);
+        setTimeout(function(){ ctx.close().catch(function(){}); }, 950);
       } catch(_){}
     }
     function resetWakeCommandMode(){
@@ -3427,21 +3583,22 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     function onWakeResponseDone(){
       if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
       wakeAudioInFlight = false;
-      if (wakeQueuedBlob && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) {
-        const b = wakeQueuedBlob;
+      if (wakeQueuedBlob && wakeQueuedBlob.blob && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) {
+        const q = wakeQueuedBlob;
         wakeQueuedBlob = null;
-        trySendWakeChunk(b);
+        trySendWakeChunk(q.blob, q.skipWake);
       }
       scheduleNextWakeSliceIfListening();
     }
     let wakeResponseTimeout = null;
-    function trySendWakeChunk(blob){
+    function trySendWakeChunk(blob, skipWakeForBlob){
       if (!blob || blob.size < WS_AUDIO_MIN_BYTES) { scheduleNextWakeSliceIfListening(); return; }
       if (!document.getElementById('wakeListenToggle').checked) return;
       if (isRecording) { scheduleNextWakeSliceIfListening(); return; }
       if (!ws || ws.readyState !== WebSocket.OPEN) { scheduleNextWakeSliceIfListening(); return; }
+      var sk = (typeof skipWakeForBlob === 'boolean') ? skipWakeForBlob : !!wakeCommandMode;
       if (wakeAudioInFlight) {
-        wakeQueuedBlob = blob;
+        wakeQueuedBlob = { blob: blob, skipWake: sk };
         return;
       }
       wakeAudioInFlight = true;
@@ -3460,8 +3617,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       fr.onload = function(){
         const b64 = arrayBufferToBase64(fr.result);
         try {
-          if (wakeCommandMode) { stopListeningHum(); playStopChime(); startThinkingFeedback(); }
-          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: wakeCommandMode });
+          if (sk) { stopListeningHum(); playStopChime(); startThinkingFeedback(); }
+          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: sk });
         } catch(_){
           wakeListenPending = false;
           wakeAudioInFlight = false;
@@ -3537,6 +3694,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     function stopWakeServerListener(){
       wakeServerMode = false;
+      listenServerWakeLatched = false;
       if (wsListenServer) {
         try { wsListenServer.close(); } catch(_){}
         wsListenServer = null;
@@ -3549,6 +3707,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       wsListenServer = new WebSocket(wsListenUrl);
       var st = document.getElementById('wakeListenStatus');
       wsListenServer.onopen = function(){
+        listenServerWakeLatched = false;
         if (st) st.textContent = 'In ascolto per «Hey G1» (mic Jetson)…';
         updateActiveMicIndicator();
         startLevelMonitor();
@@ -3571,11 +3730,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             var d = msg.data;
             if (d.wake_miss) return;
             if (d.wake_ack) {
+              if (listenServerWakeLatched) return;
+              listenServerWakeLatched = true;
               playWakeChime();
               if (st) st.textContent = 'Dì Hey G1 + domanda';
               if (d.audio_base64) { enqueueTtsPlayback(d.audio_base64, function(){ if (st) st.textContent = 'In ascolto per «Hey G1» (mic Jetson)…'; }); }
               return;
             }
+            listenServerWakeLatched = false;
             if (d.response) {
               var resEl = document.getElementById('result');
               if (resEl) resEl.innerHTML = '<div class="ok"><strong>Tu:</strong> ' + (d.text||'').replace(/</g,'&lt;') + '<br><strong>G1:</strong> ' + (d.response||'').replace(/</g,'&lt;') + '</div>';
@@ -3692,10 +3854,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           const blob = new Blob(ch, { type: wakeMimeType });
           if (!isCmd) {
             scheduleNextWakeSliceIfListening();
-            if (blob.size >= WS_AUDIO_MIN_BYTES) trySendWakeChunk(blob);
+            if (blob.size >= WS_AUDIO_MIN_BYTES) trySendWakeChunk(blob, false);
           } else {
             const voiced = !wakeAnalyser || wakeSlicePeak >= getWakeVoiceThreshold();
-            if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob);
+            if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob, true);
             else scheduleNextWakeSliceIfListening();
           }
         };
@@ -3748,7 +3910,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('hintAccess').style.display = 'none';
       document.getElementById('allowWrap').style.display = 'none';
       document.getElementById('devicesWrap').style.display = 'none';
-      document.getElementById('btn').disabled = true;
+      var _b = document.getElementById('btn'); if (_b) _b.disabled = true;
       document.getElementById('recStatus').style.display = 'none';
       document.getElementById('result').innerHTML = '';
     }
@@ -3779,10 +3941,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             if (r.wake_miss) {
               var sttTxt = String(r.text||'').trim();
               wakeLog(sttTxt ? 'STT: "'+sttTxt+'" \u2192 miss (no wake word)' : 'silenzio / no speech', '#71717a');
-              btn.disabled = false;
+              if (btn) btn.disabled = false;
               return;
             }
             if (r.wake_ack) {
+              if (wakeCommandMode) {
+                wakeListenPending = false;
+                if (btn) btn.disabled = false;
+                return;
+              }
               wakeDiscardCurrentSlice = true;
               wakeQueuedBlob = null;
               _wakeSliceScheduled = false;
@@ -3793,7 +3960,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               playWakeChime();
               wakeCommandMode = true;
               startWakeCommandIdleTimer();
-              btn.disabled = false;
+              if (btn) btn.disabled = false;
               var wst = document.getElementById('wakeListenStatus');
               if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
               setTimeout(function(){ startListeningHum(); }, 250);
@@ -3804,12 +3971,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               const wst = document.getElementById('wakeListenStatus');
               if (wst) wst.textContent = wakeCommandMode ? 'Ti ascolto\u2026' : 'In ascolto per \u00abHey G1\u00bb\u2026';
               document.getElementById('result').innerHTML = '<div class="warn">'+r.message+'</div>';
-              btn.disabled = false;
+              if (btn) btn.disabled = false;
               return;
             }
             if (r.text) wakeLog('CMD: "'+String(r.text||'')+'" \u2192 risposta', '#14b8a6');
           }
-          btn.disabled = false;
+          if (btn) btn.disabled = false;
           recordingServerJetson = false;
           document.getElementById('recDebug').textContent = r.text ? '' : (r.message || '');
           document.getElementById('recDebug').style.color = r.message ? '#f59e0b' : '#71717a';
@@ -3829,14 +3996,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (!deferWakeDone) onWakeResponseDone();
         }
       } else if(d.type==='wake_chime'){
-        playWakeChime();
-        wakeLog('Hey G1 rilevato, elaboro...', '#22c55e');
+        if (!wakeCommandMode) { playWakeChime(); wakeLog('Hey G1 rilevato, elaboro...', '#22c55e'); }
       } else if(d.type==='error'){
         stopThinkingFeedback();
         clearTtsPlaybackQueue();
         wakeAudioInFlight = false;
         wakeQueuedBlob = null;
-        btn.disabled = false;
+        if (btn) btn.disabled = false;
         recordingServerJetson = false;
         document.getElementById('result').innerHTML = '<div class="warn">Errore: '+ (d.data || '')+'</div>';
       } else if(d.type==='play' && d.data){
@@ -3888,7 +4054,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       recordingServerJetson = true;
       isRecording = true;
       pendingStop = false;
-      btn.classList.add('recording');
+      if (btn) btn.classList.add('recording');
       document.getElementById('levelBar').style.width = '60%';
       document.getElementById('levelBar').style.background = '#14b8a6';
       document.getElementById('levelLabel').textContent = 'Ingresso: Jetson USB (mic sul robot)';
@@ -3910,7 +4076,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       } catch(err) {
         recordingServerJetson = false;
         isRecording = false;
-        btn.classList.remove('recording');
+        if (btn) btn.classList.remove('recording');
         clearAllIntervals();
         document.getElementById('result').innerHTML = '<div class="warn">Invio start fallito.</div>';
       }
@@ -4134,6 +4300,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (sl) sl.addEventListener('input', function(){ syncAll(parseFloat(sl.value)); });
       if (sl2) sl2.addEventListener('input', function(){ syncAll(parseFloat(sl2.value)); });
     })();
+    (function(){
+      var sbg = document.getElementById('sbGainSlider');
+      var sbl = document.getElementById('sbGainLabel');
+      if (sbg) {
+        var gv = getSoundboardBrowserGain();
+        sbg.value = String(Math.min(3, Math.max(0.5, gv)));
+        if (sbl) sbl.textContent = parseFloat(sbg.value).toFixed(2) + '\u00d7';
+        sbg.addEventListener('input', function(){
+          var v = parseFloat(sbg.value);
+          if (!isNaN(v)) { setSoundboardBrowserGain(v); if (sbl) sbl.textContent = v.toFixed(2) + '\u00d7'; }
+        });
+      }
+    })();
     if (navigator.mediaDevices) {
       if (isLocalhost) {
         loadDevices();
@@ -4209,9 +4388,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         else if(sd.audio_base64 && sd.audio_base64.length>50){ b64 = sd.audio_base64; fmt = sd.format||'mp3'; }
         if(!b64) return;
         sbFireSlotRobotIfConfigured(sd);
-        const a = new Audio('data:'+sbMimeForFmt(fmt)+';base64,'+b64);
-        const sinkId = resolveBrowserPlaybackSinkIdLikeSoundboard();
-        applySinkThenPlay(a, sinkId).catch(function(){});
+        playSoundboardBrowser(b64, fmt);
       }
       if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
         var arm0 = (s.robot_arm && String(s.robot_arm).trim()) || '';
@@ -4367,7 +4544,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     document.getElementById('sbModalCancel').onclick = closeSbModal;
     document.getElementById('sbModalSave').onclick = ()=>{
       if (sbEditIdx < 0) return;
-      const icon = (document.getElementById('sbModalIcon').value || '🎤').trim().substring(0,4);
+      const icon = (document.getElementById('sbModalIcon').value || '🎤').trim().substring(0,20);
       const text = (document.getElementById('sbModalText').value || 'Comando '+(sbEditIdx+1)).trim().substring(0, sbTextMax);
       fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3'})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
@@ -4584,6 +4761,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     };
 
     const btn = document.getElementById('btn');
+    if (btn) {
     function onRecStart(e){
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       e.preventDefault();
@@ -4600,7 +4778,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (e.pointerId != null) btn.releasePointerCapture(e.pointerId);
       } catch (_) {}
     }
-    /* Pointer Events + setPointerCapture: niente listener su document (non bloccano select/tendine sul resto della pagina). */
     if (window.PointerEvent) {
       btn.addEventListener('pointerdown', onRecStart);
       btn.addEventListener('pointerup', onRecStop);
@@ -4610,7 +4787,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       function onRecStopLegacy(ev){ if(!isRecording) return; ev.preventDefault(); stopRec(); }
       btn.onmousedown = btn.ontouchstart = onRecStartLegacy;
       btn.onmouseup = btn.ontouchend = btn.ontouchcancel = onRecStopLegacy;
-      /* Niente listener su document: touchend/mouseup globali con passive:false possono interferire con select/tap altrove (browser vecchi). */
+    }
     }
 
     async function startRec(){
@@ -4656,7 +4833,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           clearAllIntervals();
           document.getElementById('levelBar').style.width = '0%';
           document.getElementById('levelLabel').textContent = 'Livello: --';
-          btn.classList.remove('recording');
+          if (btn) btn.classList.remove('recording');
           isRecording = false;
           if(currentStream){ currentStream.getTracks().forEach(t=>t.stop()); currentStream=null; }
           const dur = Date.now() - recStartTime;
@@ -4675,7 +4852,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         mediaRecorder.onerror = (e) => {
           clearAllIntervals();
           isRecording = false;
-          btn.classList.remove('recording');
+          if (btn) btn.classList.remove('recording');
           document.getElementById('recDebug').textContent = 'Errore registrazione: '+e.error;
           document.getElementById('recDebug').style.color = '#dc2626';
         };
@@ -4705,7 +4882,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('levelLabel').textContent = pct > 5 ? 'Ti sento! ('+pct+'%)' : 'Livello: '+pct+'%';
           }, 80);
         } catch(_){}
-        btn.classList.add('recording');
+        if (btn) btn.classList.add('recording');
         document.getElementById('recDebug').textContent = 'Registrazione: 0.0 sec';
         recTimeout = setTimeout(() => { stopRec(); }, MAX_REC_SEC * 1000);
       } catch(err) {
@@ -4724,7 +4901,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       pendingStop = true;
       if (recordingServerJetson) {
         clearAllIntervals();
-        btn.classList.remove('recording');
+        if (btn) btn.classList.remove('recording');
         recordingServerJetson = false;
         isRecording = false;
         if (wsParla && wsParla.readyState === WebSocket.OPEN) {
@@ -4736,7 +4913,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         return;
       }
       clearAllIntervals();
-      btn.classList.remove('recording');
+      if (btn) btn.classList.remove('recording');
       if(mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused')){
         try { mediaRecorder.requestData(); mediaRecorder.stop(); } catch(_){}
       } else if(currentStream){
@@ -4762,14 +4939,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if(blob.size < WS_AUDIO_MIN_BYTES){
         document.getElementById('recDebug').textContent = 'Audio troppo corto ('+(blob.size/1024).toFixed(1)+' KB). Tieni premuto 1-2 secondi.';
         document.getElementById('recDebug').style.color = '#f59e0b';
-        btn.disabled = false;
+        if (btn) btn.disabled = false;
         return;
       }
       const sizeKb = (blob.size/1024).toFixed(1);
       document.getElementById('recDebug').textContent = 'Invio '+sizeKb+' KB...';
       document.getElementById('recDebug').style.color = '#3b82f6';
       document.getElementById('result').innerHTML = '<div style="color:#3b82f6;">Elaborazione…</div>';
-      btn.disabled = true;
+      if (btn) btn.disabled = true;
       startThinkingFeedback();
       const fr = new FileReader();
       fr.onload = () => {

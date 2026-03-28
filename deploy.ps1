@@ -7,8 +7,10 @@
 #   $env:G1_SSH_KEY="C:\path\to\id_ed25519_jetson"   # consigliato se non usi ssh-agent
 #   $env:G1_SKIP_OPENSSL="1"   # opzionale: salta generate_ssl_cert (se i certificati ci sono gia)
 #   $env:G1_SKIP_STRIP_CRLF="1"   # opzionale: salta sed CRLF su scripts/*.sh (se quel passaggio si blocca)
-#   $env:G1_SKIP_SOUNDBOARD_JSON="1"   # NON copiare soundboard.json: evita di sovrascrivere sul Jetson i suoni (base64) con una copia PC vuota/vecchia
+#   $env:G1_PUSH_SOUNDBOARD_JSON="1"   # OPZIONALE: copia config/soundboard.json dal PC al Jetson (default: NO — i suoni restano sul server)
+#   $env:G1_SKIP_SOUNDBOARD_JSON="1"   # (legacy) stesso effetto del default: non pushare soundboard.json
 #   .\deploy.ps1
+# Backup suoni dal Jetson al PC: .\scripts\pull_soundboard_from_jetson.ps1
 #
 # Se lo script "si ferma" su [1]: scp sta aspettando password o conferma host (primo collegamento).
 # Usa una chiave (-i / G1_SSH_KEY) o apri una finestra e accetta il fingerprint. BatchMode evita loop infiniti.
@@ -80,12 +82,12 @@ scp @sshCommon `
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [2] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
-if ($env:G1_SKIP_SOUNDBOARD_JSON -eq "1") {
-    Write-Host "  [2b] soundboard.json... saltato (G1_SKIP_SOUNDBOARD_JSON=1, suono resta quello sul server)" -ForegroundColor Gray
-} else {
+if ($env:G1_PUSH_SOUNDBOARD_JSON -eq "1") {
     Write-Host "  [2b] soundboard.json (audio, ~5MB)..." -NoNewline
     scp @sshCommon -C -o ServerAliveInterval=30 -o ServerAliveCountMax=120 "$root\config\soundboard.json" "${sshHost}:${remote}/config/"
     if ($LASTEXITCODE -eq 0) { Write-Host " OK" -ForegroundColor Green } else { Write-Host " ERRORE scp $LASTEXITCODE" -ForegroundColor Red }
+} else {
+    Write-Host "  [2b] soundboard.json... saltato (protezione: non sovrascrivere i suoni sul Jetson). Push dal PC solo se serve: `$env:G1_PUSH_SOUNDBOARD_JSON='1'" -ForegroundColor Gray
 }
 
 # Installa dipendenze (duckduckgo-search per quick_lookup)

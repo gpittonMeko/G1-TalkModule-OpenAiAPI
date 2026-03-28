@@ -35,7 +35,8 @@ class Settings:
 
     # OpenAI
     api_key: str = _str(os.getenv("OPENAI_API_KEY", ""))
-    llm_model: str = _str(os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    llm_model: str = _str(os.getenv("LLM_MODEL", "gpt-5.4-mini"))
+    llm_text_model: str = _str(os.getenv("LLM_TEXT_MODEL", "")) or _str(os.getenv("LLM_MODEL", "gpt-5.4-mini"))
     # Limite token risposta (max_completion_tokens / max_tokens a seconda del modello)
     llm_max_completion_tokens: int = _int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "1024")) or 1024
 

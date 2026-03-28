@@ -97,47 +97,54 @@ class LLMClient:
         self.system_prompt = DEFAULT_SYSTEM
         self.history: list[dict] = []
 
-    def chat(self, user_message: str, system: Optional[str] = None) -> str:
+    def _is_reasoning_model(self, model: str) -> bool:
+        return any(x in model for x in ("gpt-5", "o1", "o3", "o4"))
+
+    def _build_kwargs(self, model: str, messages: list, max_tokens_override: Optional[int] = None) -> dict:
+        kwargs: dict = {"model": model, "messages": messages}
+        if not self._is_reasoning_model(model):
+            kwargs["temperature"] = 0.5
+        cap = max(64, max_tokens_override or settings.llm_max_completion_tokens)
+        if self._is_reasoning_model(model):
+            kwargs["max_completion_tokens"] = max(cap, 512)
+        elif any(x in model for x in ("gpt-4o", "gpt-4", "gpt-3.5", "gpt-4o-mini")):
+            kwargs["max_completion_tokens"] = cap
+        else:
+            kwargs["max_tokens"] = cap
+        if "gpt-5" in model:
+            kwargs["reasoning_effort"] = "minimal"
+        if "gpt-5" in model and "nano" not in model:
+            kwargs["verbosity"] = "low"
+        return kwargs
+
+    def chat(self, user_message: str, system: Optional[str] = None, *,
+             use_history: bool = True, model: Optional[str] = None,
+             max_tokens: Optional[int] = None) -> str:
         """
         Invia messaggio e ottieni risposta.
-        Mantiene contesto di conversazione (history).
+        use_history=True: mantiene contesto conversazione (default, voce).
+        use_history=False: stateless, per domande scritte indipendenti.
+        model: override modello (es. settings.llm_text_model).
+        max_tokens: override max_completion_tokens per questa chiamata.
         """
         if not user_message or not user_message.strip():
             return ""
         um = user_message.strip()
+        effective_model = model or self.model
         base = system or self.system_prompt
         if _needs_mckinsey_or_consulting_context(um):
             base = f"{base}\n\n{MCKINSEY_EVENT_SUPPLEMENT}"
         sys = f"{base}\n\n{_dynamic_event_context(um)}"
         messages = [{"role": "system", "content": sys}]
-        for h in self.history[-2:]:  # ultimo scambio (meno token / latenza)
-            messages.append(h)
+        if use_history:
+            for h in self.history[-2:]:
+                messages.append(h)
         messages.append({"role": "user", "content": um})
         try:
-            kwargs = {
-                "model": self.model,
-                "messages": messages,
-            }
-            # GPT-5 series: temperature NON supportata, solo default 1. Non inviare mai.
-            if not any(x in self.model for x in ("gpt-5", "o1", "o3", "o4")):
-                kwargs["temperature"] = 0.5
-            # Modelli recenti: max_completion_tokens (budget da LLM_MAX_COMPLETION_TOKENS in .env)
-            cap = max(64, settings.llm_max_completion_tokens)
-            if any(x in self.model for x in ("gpt-5-nano", "gpt-5-mini", "gpt-5", "o1", "o3", "o4")):
-                # Reasoning consuma parte del budget: margine minimo oltre a cap
-                kwargs["max_completion_tokens"] = max(cap, 512)
-            elif any(x in self.model for x in ("gpt-4o", "gpt-4", "gpt-3.5", "gpt-4o-mini")):
-                kwargs["max_completion_tokens"] = cap
-            else:
-                kwargs["max_tokens"] = cap
-            # GPT-5: reasoning_effort riduce i reasoning_tokens (che consumano max_completion_tokens)
-            if "gpt-5" in self.model:
-                kwargs["reasoning_effort"] = "minimal"
-            if "gpt-5" in self.model and "gpt-5-nano" not in self.model:
-                kwargs["verbosity"] = "low"
+            kwargs = self._build_kwargs(effective_model, messages, max_tokens)
             resp = self.client.chat.completions.create(**kwargs)
             content = resp.choices[0].message.content
-            if content:
+            if content and use_history:
                 self.history.append({"role": "user", "content": um})
                 self.history.append({"role": "assistant", "content": content})
             return (content or "").strip()
