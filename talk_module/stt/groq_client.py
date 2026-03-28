@@ -31,8 +31,10 @@ class GroqWhisperClient:
         audio_bytes: bytes,
         language: Optional[str] = None,
         format_hint: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> str:
-        """Trascrive audio. Stessa pipeline di OpenAI: WAV 16k da qualsiasi container browser."""
+        """Trascrive audio. Stessa pipeline di OpenAI: WAV 16k da qualsiasi container browser.
+        prompt: override per settings.whisper_prompt (utile per wake word detection)."""
         if not audio_bytes or len(audio_bytes) < 100:
             return ""
         to_send, ext = prepare_audio_for_stt_api(audio_bytes, format_hint)
@@ -48,8 +50,9 @@ class GroqWhisperClient:
             }
             if language or settings.tts_language:
                 kwargs["language"] = language or settings.tts_language
-            if settings.whisper_prompt and settings.whisper_prompt.strip():
-                kwargs["prompt"] = settings.whisper_prompt.strip()
+            effective_prompt = prompt if prompt is not None else (settings.whisper_prompt or "").strip()
+            if effective_prompt:
+                kwargs["prompt"] = effective_prompt
             resp = client.audio.transcriptions.create(**kwargs)
             if isinstance(resp, str):
                 return resp.strip()

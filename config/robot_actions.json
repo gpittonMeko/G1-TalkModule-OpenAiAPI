@@ -15,9 +15,21 @@
     "action": "shake_hand",
     "response": "Ecco la mano!"
   },
+  "stretta di mano": {
+    "action": "shake_hand",
+    "response": "Ecco la mano!"
+  },
   "la mano": {
     "action": "shake_hand",
     "response": "Ecco la mano!"
+  },
+  "ecco la mano": {
+    "action": "shake_hand",
+    "response": "Ecco la mano!"
+  },
+  "dai la zampa": {
+    "action": "shake_hand",
+    "response": "Ecco la zampa!"
   },
   "saluta": {
     "action": "wave_hand",
@@ -26,6 +38,90 @@
   "fai ciao": {
     "action": "wave_hand",
     "response": "Ciao!"
+  },
+  "dì ciao": {
+    "action": "wave_hand",
+    "response": "Ciao!"
+  },
+  "salutalo": {
+    "action": "wave_hand",
+    "response": "Ciao!"
+  },
+  "salutali": {
+    "action": "wave_hand",
+    "response": "Ciao a tutti!"
+  },
+  "mani in alto": {
+    "action": "hands_up",
+    "response": "Mani in alto!"
+  },
+  "alza le mani": {
+    "action": "hands_up",
+    "response": "Mani in alto!"
+  },
+  "mani su": {
+    "action": "hands_up",
+    "response": "Mani in alto!"
+  },
+  "applaudi": {
+    "action": "clap",
+    "response": "Applauso!"
+  },
+  "fai un applauso": {
+    "action": "clap",
+    "response": "Applauso!"
+  },
+  "applauso": {
+    "action": "clap",
+    "response": "Applauso!"
+  },
+  "batti le mani": {
+    "action": "clap",
+    "response": "Applauso!"
+  },
+  "high five": {
+    "action": "high_five",
+    "response": "High five!"
+  },
+  "batti il cinque": {
+    "action": "high_five",
+    "response": "Cinque!"
+  },
+  "dammi il cinque": {
+    "action": "high_five",
+    "response": "Cinque!"
+  },
+  "abbraccio": {
+    "action": "hug",
+    "response": "Abbraccio!"
+  },
+  "abbracciami": {
+    "action": "hug",
+    "response": "Abbraccio!"
+  },
+  "fai un abbraccio": {
+    "action": "hug",
+    "response": "Abbraccio!"
+  },
+  "cuore": {
+    "action": "heart",
+    "response": "Un cuore per te!"
+  },
+  "fai un cuore": {
+    "action": "heart",
+    "response": "Un cuore per te!"
+  },
+  "bacio": {
+    "action": "kiss",
+    "response": "Un bacio!"
+  },
+  "mandami un bacio": {
+    "action": "kiss",
+    "response": "Un bacio!"
+  },
+  "fai un bacio": {
+    "action": "kiss",
+    "response": "Un bacio!"
   },
   "fai due passi avanti": {
     "loco_command": "double_step_forward",
@@ -43,6 +139,10 @@
     "loco_command": "double_step_forward",
     "response": "Due passi avanti."
   },
+  "vieni avanti": {
+    "loco_command": "double_step_forward",
+    "response": "Ok, avanzo."
+  },
   "fai due passi indietro": {
     "loco_command": "double_step_back",
     "response": "Ok, due passi indietro."
@@ -56,6 +156,10 @@
     "response": "Indietro."
   },
   "passi indietro": {
+    "loco_command": "double_step_back",
+    "response": "Indietro."
+  },
+  "indietreggia": {
     "loco_command": "double_step_back",
     "response": "Indietro."
   },
@@ -78,6 +182,10 @@
   "fai un giro": {
     "loco_command": "spin_inplace",
     "response": "Mi giro!"
+  },
+  "fai una giravolta": {
+    "loco_command": "spin_inplace",
+    "response": "Giravolta!"
   },
   "_comment_teaching": "Per azioni teaching: usa action 'teaching_X' dove X è l'ID dalla app Unitree (Demo Teaching). Es: teaching_1, teaching_2"
 }

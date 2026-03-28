@@ -188,9 +188,9 @@ def _find_wake_and_rest(t: str) -> tuple[Optional[str], str]:
     low = s.lower()
     if any(h in low for h in ("sottotitoli", "amara.org", "amara ", "qtss", "subtitle", "created by", "a cura di")):
         return None, "miss"
-    # Varianti STT: g1, g one, gi one, jee one, mark one (ordine: prefisso vocale prima)
-    wake_core = r"(?:g\s*1|\bg1\b|g\s*one|gi\s*one|mark\s*one|markone|jee\s*one)"
-    m = re.search(rf"(?:hey|ehi|ei)\s*[,.\s]*\s*{wake_core}\s*[,.\s]*", s, re.IGNORECASE)
+    # Varianti STT: g1, g one, gi one, jee one, ji one, mark one, j1, g-1 (expanded for Whisper hallucinations)
+    wake_core = r"(?:g[\s\-]*1|\bg1\b|g[\s\-]*one|gi[\s\-]*one|ji[\s\-]*one|jee[\s\-]*one|mark[\s\-]*one|markone|j[\s\-]*1)"
+    m = re.search(rf"(?:hey|ehi|ei|e)\s*[,.\s]*\s*{wake_core}\s*[,.\s]*", s, re.IGNORECASE)
     if m:
         rest = s[m.end() :].strip().lstrip(",.; ")
         if not rest:
@@ -1124,31 +1124,35 @@ self.addEventListener('activate', () => self.clients.claim());
         _thr.Thread(target=_fire, daemon=True).start()
         return ((rm.response or "").strip() or "Ok")
 
+    WAKE_STT_PROMPT = (
+        "Hey G1. Ehi G1. G1, dimmi pure. Hey G1, che ora è. "
+        "Hey G1, saluta. Hey G1, dai la mano. G One."
+    )
+
     def _stt_and_wake_check(audio_bytes: bytes, format_hint: str = "webm") -> dict:
-        """Phase 1 (fast): STT + wake word detection. Used by WS two-phase pipeline."""
+        """STT + wake word detection. Always returns wake_ack on any wake detection
+        (command comes in a separate slice with skipWake=true).
+        Uses a dedicated STT prompt biased toward recognising "Hey G1"."""
         t0 = time.perf_counter()
         _ms = lambda: int((time.perf_counter() - t0) * 1000)
         try:
             _save_sample_audio(audio_bytes)
-            stt, _, tts_svc, _, _ = get_services()
-            raw_text = stt.transcribe(audio_bytes, format_hint=format_hint, language="it")
+            stt, _, _, _, _ = get_services()
+            raw_text = stt.transcribe(
+                audio_bytes,
+                format_hint=format_hint,
+                language="it",
+                prompt=WAKE_STT_PROMPT,
+            )
             if not raw_text or not raw_text.strip():
-                saved = _save_debug_audio(audio_bytes)
-                if saved:
-                    print(f"[Debug] Audio non trascritto salvato: {saved}")
                 return {"text": raw_text or "", "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
             rest, wkind = _find_wake_and_rest(raw_text)
-            print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r}", flush=True)
+            print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r} ({_ms()}ms)", flush=True)
             if wkind == "miss":
                 return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
-            if wkind == "ack":
-                return {
-                    "text": raw_text, "response": "", "audio_base64": "",
-                    "message": "", "wake_ack": True, "duration_ms": _ms(),
-                }
-            prompt = _apply_stt_fuzzy_correction(rest or "")
-            return {"_wake_ok": True, "_prompt": prompt, "_raw_text": raw_text, "_t0": t0}
+            return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_ack": True, "duration_ms": _ms()}
         except Exception as e:
+            print(f"[Wake] STT error: {e}", flush=True)
             return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": _ms()}
 
     def _process_after_wake(prompt: str, raw_text: str, t0: float) -> dict:
@@ -1158,15 +1162,17 @@ self.addEventListener('activate', () => self.clients.claim());
             if prompt == PROMPT_HEY_G1_ACK_ONLY:
                 resp = (settings.hey_g1_ack_text or "").strip() or "Sì?"
             else:
+                from talk_module.robot_actions import check_robot_action
                 robot_match = None
                 try:
-                    from talk_module.robot_actions import check_robot_action
                     robot_match = check_robot_action(prompt)
-                except Exception:
-                    pass
+                except Exception as _ra_err:
+                    print(f"[robot-check] error: {_ra_err}", flush=True)
                 if robot_match:
+                    print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r}", flush=True)
                     resp = _run_robot_match_actions(robot_match)
                 else:
+                    print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
                     resp = check_knowledge(prompt)
                     if not resp:
                         from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
@@ -1176,6 +1182,14 @@ self.addEventListener('activate', () => self.clients.claim());
                                 resp = None
                     if not resp:
                         resp = llm.chat(prompt)
+                    if resp and not robot_match:
+                        try:
+                            post_match = check_robot_action(resp)
+                            if post_match and post_match.arm_action:
+                                print(f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}", flush=True)
+                                _run_robot_match_actions(post_match)
+                        except Exception:
+                            pass
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             return {
                 "text": raw_text,
@@ -1245,26 +1259,35 @@ self.addEventListener('activate', () => self.clients.claim());
             if prompt == PROMPT_HEY_G1_ACK_ONLY:
                 resp = (settings.hey_g1_ack_text or "").strip() or "Sì, ti ascolto. Come posso aiutarti?"
             else:
-                # Routing azioni robot (dare la mano, saluta, teaching)
+                from talk_module.robot_actions import check_robot_action
                 robot_match = None
                 try:
-                    from talk_module.robot_actions import check_robot_action
-
                     robot_match = check_robot_action(prompt)
-                except Exception:
-                    pass
+                except Exception as _ra_err:
+                    print(f"[robot-check] error: {_ra_err}", flush=True)
                 if robot_match:
+                    print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r} loco={robot_match.loco_command!r}", flush=True)
                     resp = _run_robot_match_actions(robot_match)
                 else:
+                    print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
                     resp = check_knowledge(prompt)
                     if not resp:
                         from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
                         if is_quick_lookup_question(prompt):
                             resp = quick_lookup(prompt)
                             if resp == NOT_FOUND:
-                                resp = None  # fallback a LLM
+                                resp = None
                     if not resp:
                         resp = llm.chat(prompt)
+                    # Post-LLM: if no robot action matched but LLM response suggests one, try to trigger it
+                    if resp and not robot_match:
+                        try:
+                            post_match = check_robot_action(resp)
+                            if post_match and post_match.arm_action:
+                                print(f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}", flush=True)
+                                _run_robot_match_actions(post_match)
+                        except Exception:
+                            pass
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             return {
                 "text": text,
@@ -1401,14 +1424,7 @@ self.addEventListener('activate', () => self.clients.claim());
                                     _executor,
                                     partial(_stt_and_wake_check, audio_bytes, audio_fmt),
                                 )
-                                if p1.get("_wake_ok"):
-                                    await ws.send_text(json.dumps({"type": "wake_chime"}))
-                                    result = await loop.run_in_executor(
-                                        _executor,
-                                        partial(_process_after_wake, p1["_prompt"], p1["_raw_text"], p1["_t0"]),
-                                    )
-                                else:
-                                    result = p1
+                                result = p1
                             else:
                                 result = await loop.run_in_executor(
                                     _executor,
@@ -2898,7 +2914,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let recStartTime = 0, recDurationInterval = null, levelInterval = null, analyserNode = null, audioCtx = null;
     let isRecording = false, pendingStop = false, currentStream = null;
     let wakeStream = null, wakeRawStream = null, wakeListenPending = false;
-    let wakeListenActive = false, wakeMimeType = '', wakeActiveMr = null;
+    let wakeListenActive = false, wakeMimeType = '', wakeActiveMr = null, wakeDiscardCurrentSlice = false;
     let wsListenServer = null, wakeServerMode = false;
     let wakeCommandMode = false, wakeCommandIdleTimer = null;
     let wakeAudioInFlight = false, wakeQueuedBlob = null;
@@ -3036,9 +3052,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (m) { m.style.display = 'block'; m.textContent = 'Microfono non disponibile: consenti l\\'accesso (Dispositivi) e riprova.'; }
       });
     }
-    const WAKE_SLICE_MS = 3000;
+    const WAKE_SLICE_MS = 4000;
     const CMD_SLICE_MS  = 6000;
     const CMD_TIMEOUT_MS = 12000;
+    let _wakeSliceScheduled = false;
     let scheduleNextWakeSliceIfListening = function(){};
     /** Coda riproduzione TTS: evita che due risposte MP3 si sovrappongano. */
     let ttsPlaybackQueue = [];
@@ -3284,12 +3301,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         _listenHumOsc.type = 'sine';
         _listenHumOsc.frequency.value = 440;
         _listenHumGain = _listenHumCtx.createGain();
-        _listenHumGain.gain.value = 0.06;
+        _listenHumGain.gain.value = 0.03;
         var lfo = _listenHumCtx.createOscillator();
         lfo.type = 'sine';
-        lfo.frequency.value = 2.5;
+        lfo.frequency.value = 2;
         var lfoGain = _listenHumCtx.createGain();
-        lfoGain.gain.value = 0.03;
+        lfoGain.gain.value = 0.015;
         lfo.connect(lfoGain);
         lfoGain.connect(_listenHumGain.gain);
         lfo.start();
@@ -3443,8 +3460,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       fr.onload = function(){
         const b64 = arrayBufferToBase64(fr.result);
         try {
-          if (wakeCommandMode) { stopListeningHum(); playStopChime(); }
-          startThinkingFeedback();
+          if (wakeCommandMode) { stopListeningHum(); playStopChime(); startThinkingFeedback(); }
           sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: wakeCommandMode });
         } catch(_){
           wakeListenPending = false;
@@ -3480,6 +3496,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       resetWakeCommandMode();
       wakeQueuedBlob = null;
       wakeAudioInFlight = false;
+      wakeDiscardCurrentSlice = false;
+      _wakeSliceScheduled = false;
       updateActiveMicIndicator();
     }
     var wsLevelMonitor = null;
@@ -3617,16 +3635,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       wakeMimeType = preferredRecorderMime();
       wakeListenActive = true;
       scheduleNextWakeSliceIfListening = function(){
+        if (_wakeSliceScheduled) return;
         if (!wakeListenActive) return;
         const tg = document.getElementById('wakeListenToggle');
         if (!tg || !tg.checked) return;
         if (isRecording) return;
-        setTimeout(runWakeSlice, 120);
+        _wakeSliceScheduled = true;
+        setTimeout(function(){ _wakeSliceScheduled = false; runWakeSlice(); }, 40);
       };
       function runWakeSlice(){
         if (!wakeListenActive || !document.getElementById('wakeListenToggle').checked) return;
         if (isRecording) { setTimeout(runWakeSlice, 350); return; }
         if (!wakeStream) return;
+        if (wakeActiveMr) return;
         const isCmd = wakeCommandMode;
         const sliceMs = isCmd ? CMD_SLICE_MS : WAKE_SLICE_MS;
         const mr = new MediaRecorder(wakeStream, { mimeType: wakeMimeType, audioBitsPerSecond: 128000 });
@@ -3664,10 +3685,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           sliceInterval = null;
           wakeLevelSampleInterval = null;
           if (!wakeListenActive) return;
+          if (wakeDiscardCurrentSlice) {
+            wakeDiscardCurrentSlice = false;
+            return;
+          }
           const blob = new Blob(ch, { type: wakeMimeType });
-          const voiced = !wakeAnalyser || wakeSlicePeak >= getWakeVoiceThreshold();
-          if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob);
-          else scheduleNextWakeSliceIfListening();
+          if (!isCmd) {
+            scheduleNextWakeSliceIfListening();
+            if (blob.size >= WS_AUDIO_MIN_BYTES) trySendWakeChunk(blob);
+          } else {
+            const voiced = !wakeAnalyser || wakeSlicePeak >= getWakeVoiceThreshold();
+            if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob);
+            else scheduleNextWakeSliceIfListening();
+          }
         };
         mr.start();
         setTimeout(function(){ stopMr(); }, sliceMs);
@@ -3753,6 +3783,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               return;
             }
             if (r.wake_ack) {
+              wakeDiscardCurrentSlice = true;
+              wakeQueuedBlob = null;
+              _wakeSliceScheduled = false;
+              if (wakeActiveMr) {
+                try { if (wakeActiveMr.state !== 'inactive') wakeActiveMr.stop(); } catch(_){}
+              }
               wakeLog('WAKE! Ti ascolto\u2026', '#22c55e');
               playWakeChime();
               wakeCommandMode = true;
@@ -3761,7 +3797,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               var wst = document.getElementById('wakeListenStatus');
               if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
               setTimeout(function(){ startListeningHum(); }, 250);
-              onWakeResponseDone();
               return;
             }
             if (!r.response && r.message) {

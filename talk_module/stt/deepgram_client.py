@@ -29,20 +29,26 @@ class DeepgramClient:
         audio_bytes: bytes,
         language: Optional[str] = None,
         format_hint: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> str:
         """
         Trascrive audio in testo. Accetta webm, wav, mp3.
+        prompt: ignored for Deepgram (uses keywords instead).
         Ritorna stringa vuota se audio vuoto o errore.
         """
         if not audio_bytes or len(audio_bytes) < 100:
             return ""
         try:
             client = self._get_client()
+            kw = {}
+            if prompt and "g1" in prompt.lower():
+                kw["keywords"] = ["Hey G1:2", "G1:2", "Ehi G1:2"]
             resp = client.listen.v1.media.transcribe_file(
                 request=audio_bytes,
                 model="nova-3",
                 language=language or settings.tts_language or "it",
                 smart_format=True,
+                **kw,
             )
             text = ""
             if resp and hasattr(resp, "results") and resp.results:

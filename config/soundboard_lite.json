@@ -1,88 +1,88 @@
 {
-  "source_mtime_ns": 1774609351562798700,
+  "source_mtime_ns": 1774630438221347100,
   "slots": [
     {
-      "icon": "\ud83d\udc4b",
-      "text": "WELCOME \u2014 accredito",
+      "icon": "👋",
+      "text": "WELCOME — accredito",
       "format": "wav",
       "format_clean": "wav",
       "has_robot": true,
       "has_clean": true,
-      "robot_arm": "",
+      "robot_arm": "face_wave",
       "robot_loco": ""
     },
     {
-      "icon": "\ud83e\udde5",
-      "text": "WELCOME \u2014 guardaroba",
+      "icon": "🧥",
+      "text": "WELCOME — guardaroba",
       "format": "wav",
       "format_clean": "wav",
       "has_robot": true,
       "has_clean": true,
-      "robot_arm": "",
+      "robot_arm": "right_hand_up",
       "robot_loco": ""
     },
     {
-      "icon": "\u2615",
-      "text": "COFFEE \u2014 accoglienza",
+      "icon": "☕",
+      "text": "COFFEE — accoglienza",
       "format": "wav",
       "format_clean": "wav",
       "has_robot": true,
       "has_clean": true,
-      "robot_arm": "",
+      "robot_arm": "face_wave",
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfad",
-      "text": "SALA \u2014 posto, evento inizia",
+      "icon": "🎭",
+      "text": "SALA — posto, evento inizia",
       "format": "wav",
       "format_clean": "wav",
       "has_robot": true,
       "has_clean": true,
-      "robot_arm": "",
+      "robot_arm": "right_hand_up",
       "robot_loco": ""
     },
     {
-      "icon": "\ud83e\ude91",
-      "text": "SALA \u2014 accomodatevi",
+      "icon": "🪑",
+      "text": "SALA — accomodatevi",
       "format": "wav",
       "format_clean": "wav",
       "has_robot": true,
       "has_clean": true,
-      "robot_arm": "",
+      "robot_arm": "face_wave",
       "robot_loco": ""
     },
     {
-      "icon": "\ud83d\udd0a",
-      "text": "SALA \u2014 messaggio inizio (operatore)",
+      "icon": "🔊",
+      "text": "SALA — messaggio inizio (operatore)",
       "format": "wav",
       "format_clean": "wav",
       "has_robot": true,
       "has_clean": true,
-      "robot_arm": "",
+      "robot_arm": "right_hand_up",
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udf81",
-      "text": "DEFLUSSO \u2014 ricordo",
+      "icon": "🎁",
+      "text": "DEFLUSSO — ricordo",
       "format": "wav",
       "format_clean": "wav",
       "has_robot": true,
       "has_clean": true,
-      "robot_arm": "",
+      "robot_arm": "face_wave",
       "robot_loco": ""
     },
     {
-      "icon": "\u2728",
-      "text": "Chiusura \u2014 ringraziamento",
+      "icon": "✨",
+      "text": "Chiusura — ringraziamento",
       "format": "wav",
       "format_clean": "wav",
       "has_robot": true,
       "has_clean": true,
-      "robot_arm": "",
+      "robot_arm": "right_hand_up",
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 9",
       "format": "webm",
       "format_clean": "mp3",
@@ -92,7 +92,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 10",
       "format": "webm",
       "format_clean": "mp3",
@@ -102,7 +102,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 11",
       "format": "webm",
       "format_clean": "mp3",
@@ -112,7 +112,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 12",
       "format": "webm",
       "format_clean": "mp3",
@@ -122,7 +122,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 13",
       "format": "webm",
       "format_clean": "mp3",
@@ -132,7 +132,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 14",
       "format": "webm",
       "format_clean": "mp3",
@@ -142,7 +142,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 15",
       "format": "webm",
       "format_clean": "mp3",
@@ -152,7 +152,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 16",
       "format": "webm",
       "format_clean": "mp3",
@@ -162,7 +162,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 17",
       "format": "webm",
       "format_clean": "mp3",
@@ -172,7 +172,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 18",
       "format": "webm",
       "format_clean": "mp3",
@@ -182,7 +182,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 19",
       "format": "webm",
       "format_clean": "mp3",
@@ -192,7 +192,7 @@
       "robot_loco": ""
     },
     {
-      "icon": "\ud83c\udfa4",
+      "icon": "🎤",
       "text": "Comando 20",
       "format": "webm",
       "format_clean": "mp3",

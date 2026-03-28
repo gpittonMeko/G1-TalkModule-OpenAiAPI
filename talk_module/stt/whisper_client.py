@@ -17,10 +17,11 @@ class WhisperClient:
     def __init__(self, api_key: Optional[str] = None):
         self.client = OpenAI(api_key=api_key or settings.api_key)
 
-    def transcribe(self, audio_bytes: bytes, language: Optional[str] = None, format_hint: Optional[str] = None) -> str:
+    def transcribe(self, audio_bytes: bytes, language: Optional[str] = None, format_hint: Optional[str] = None, prompt: Optional[str] = None) -> str:
         """
         Trascrive audio in testo. format_hint: MIME browser (audio/webm, audio/mp4, …) o estensione.
         Container rilevato dai magic bytes; conversione in WAV 16k con ffmpeg (imageio-ffmpeg).
+        prompt: override per settings.whisper_prompt (utile per wake word detection).
         """
         if not audio_bytes or len(audio_bytes) < 100:
             return ""
@@ -36,8 +37,9 @@ class WhisperClient:
             }
             if language or settings.tts_language:
                 kwargs["language"] = language or settings.tts_language
-            if settings.whisper_prompt and settings.whisper_prompt.strip():
-                kwargs["prompt"] = settings.whisper_prompt.strip()
+            effective_prompt = prompt if prompt is not None else (settings.whisper_prompt or "").strip()
+            if effective_prompt:
+                kwargs["prompt"] = effective_prompt
             resp = self.client.audio.transcriptions.create(**kwargs)
             if isinstance(resp, str):
                 return resp.strip()
