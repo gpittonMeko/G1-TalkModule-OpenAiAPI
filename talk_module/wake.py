@@ -18,6 +18,24 @@ STT_HALLUCINATION_PATTERNS = (
     "thank you for watching",
     "buonasera grazie",
     "grazie per la visione",
+    "thank you",
+    "goodbye",
+    "hello",
+    "bye bye",
+    "you're welcome",
+    "good morning",
+    "good evening",
+    "good night",
+    "see you next time",
+    "the end",
+    "music playing",
+    "music",
+    "applause",
+    "laughter",
+    "silence",
+    "foreign",
+    "inaudible",
+    "you",
 )
 
 WAKE_STT_PROMPT = (
@@ -41,6 +59,13 @@ def _is_repeated_single_word(text: str) -> bool:
     return len(set(cleaned)) == 1
 
 
+_ENGLISH_ONLY_JUNK = {
+    "yes", "no", "ok", "okay", "yeah", "yep", "nope", "right", "sure",
+    "what", "why", "how", "who", "where", "when", "hi", "hey", "oh",
+    "so", "well", "like", "just", "um", "uh", "hmm", "huh",
+}
+
+
 def is_stt_hallucination(text: str) -> bool:
     """True if transcription is empty, a known ghost phrase, punctuation-only, or repeated token spam."""
     if not text or not text.strip():
@@ -53,6 +78,9 @@ def is_stt_hallucination(text: str) -> bool:
     if not any(c.isalnum() for c in s):
         return True
     if _is_repeated_single_word(s):
+        return True
+    core = re.sub(r"[^\w\s]", "", low, flags=re.UNICODE).strip()
+    if core in _ENGLISH_ONLY_JUNK:
         return True
     return False
 

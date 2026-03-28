@@ -137,6 +137,8 @@ class TeachingManager:
             self._sdk = sdk
             sdk.start(mode="active")
 
+            initial_q = sdk.get_joint_positions()
+
             self._cosine_move(sdk, frames[0]["q"], duration=2.0)
 
             dt = arm_sdk.CONTROL_DT
@@ -167,6 +169,9 @@ class TeachingManager:
                     sdk.set_targets(interp)
 
                 time.sleep(dt)
+
+            if initial_q:
+                self._cosine_move(sdk, initial_q, duration=2.0)
 
             sdk.stop()
 

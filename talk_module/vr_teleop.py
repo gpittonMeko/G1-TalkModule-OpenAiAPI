@@ -95,6 +95,10 @@ class VRTeleopManager:
         self._tracking_left = False
         self._tracking_right = False
 
+        self._udp_packet_count = 0
+        self._udp_source_ip: Optional[str] = None
+        self._udp_parse_errors = 0
+
     @property
     def state(self) -> str:
         return self._state
@@ -196,7 +200,9 @@ class VRTeleopManager:
         buf = ""
         while self._running:
             try:
-                data = sock.recv(65535)
+                data, addr = sock.recvfrom(65535)
+                self._udp_source_ip = addr[0]
+                self._udp_packet_count += 1
                 buf += data.decode("utf-8", errors="replace")
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
@@ -245,7 +251,7 @@ class VRTeleopManager:
                     self._tracking_right = True
                     self._last_udp_time = time.time()
         except Exception:
-            pass
+            self._udp_parse_errors += 1
 
     # ── Control loop ──
 
@@ -290,25 +296,18 @@ class VRTeleopManager:
         wrist: WristPose,
         side: str,
     ) -> list[float]:
-        """Simplified geometric IK: map wrist position delta to 7 joint angles.
+        """Geometric IK: map wrist position delta to 7 joint angles.
 
-        Uses the relative displacement from neutral position scaled to joint angle space.
-        This is a V1 retargeting approach -- not full analytical IK.
+        Uses 2-link arm model (upper arm + forearm) with shoulder-elbow coupling.
+        Right-handed coords after conversion: X=right, Y=up, Z=forward.
         """
         dx, dy, dz = delta
         sign = 1.0 if side == "right" else -1.0
-
-        # Scale factors (meters of hand motion -> radians of joint motion)
-        SCALE_PITCH = 3.0   # forward/back -> shoulder pitch
-        SCALE_ROLL = 3.5    # side-to-side -> shoulder roll
-        SCALE_YAW = 2.5     # hand twist -> shoulder yaw
-        SCALE_ELBOW = 4.0   # up/down + distance -> elbow
 
         neutral_j = self._neutral_joints
         if neutral_j is None:
             return [0.0] * 7
 
-        # Indices into neutral_joints for this arm (ALL_CONTROLLED: waist 0-2, left 3-9, right 10-16)
         arm_offset = 3 if side == "left" else 10
 
         sp_base = neutral_j[arm_offset + 0]
@@ -316,18 +315,23 @@ class VRTeleopManager:
         sy_base = neutral_j[arm_offset + 2]
         el_base = neutral_j[arm_offset + 3]
 
-        shoulder_pitch = sp_base + dz * SCALE_PITCH
-        shoulder_roll = sr_base + dx * sign * SCALE_ROLL
-        shoulder_yaw = sy_base + dx * sign * SCALE_YAW * 0.3
-        elbow = el_base - dy * SCALE_ELBOW
+        reach = math.sqrt(dx * dx + dy * dy + dz * dz)
+        max_reach = UPPER_ARM_LEN + FOREARM_LEN
+        reach_ratio = min(reach / max_reach, 1.0) if max_reach > 0 else 0.0
 
-        # Wrist orientation from quaternion (simplified euler extraction)
+        shoulder_pitch = sp_base - dy * 2.0 + dz * 1.8
+        shoulder_roll = sr_base + dx * sign * 2.5
+        shoulder_yaw = sy_base + dx * sign * 0.6
+
+        elbow = el_base - reach_ratio * 1.2 - dy * 1.5
+        if dy > 0:
+            shoulder_pitch -= dy * 0.8
+
         qx, qy, qz, qw = wrist.qx, wrist.qy, wrist.qz, wrist.qw
         wrist_roll = math.atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy))
         wrist_pitch = math.asin(_clamp(2.0 * (qw * qy - qz * qx), -1.0, 1.0))
         wrist_yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
-        # Scale wrist angles relative to neutral
         wr_base = neutral_j[arm_offset + 4]
         wp_base = neutral_j[arm_offset + 5]
         wy_base = neutral_j[arm_offset + 6]
@@ -338,9 +342,9 @@ class VRTeleopManager:
             n_wr = math.atan2(2.0 * (n_qw * n_qx + n_qy * n_qz), 1.0 - 2.0 * (n_qx * n_qx + n_qy * n_qy))
             n_wp = math.asin(_clamp(2.0 * (n_qw * n_qy - n_qz * n_qx), -1.0, 1.0))
             n_wy = math.atan2(2.0 * (n_qw * n_qz + n_qx * n_qy), 1.0 - 2.0 * (n_qy * n_qy + n_qz * n_qz))
-            wrist_roll_out = wr_base + (wrist_roll - n_wr) * 0.5
-            wrist_pitch_out = wp_base + (wrist_pitch - n_wp) * 0.4
-            wrist_yaw_out = wy_base + (wrist_yaw - n_wy) * 0.4
+            wrist_roll_out = wr_base + (wrist_roll - n_wr) * 0.6
+            wrist_pitch_out = wp_base + (wrist_pitch - n_wp) * 0.5
+            wrist_yaw_out = wy_base + (wrist_yaw - n_wy) * 0.5
         else:
             wrist_roll_out = wr_base
             wrist_pitch_out = wp_base
@@ -371,7 +375,12 @@ class VRTeleopManager:
             "tracking_left": self._tracking_left,
             "tracking_right": self._tracking_right,
             "port": HTS_PORT,
+            "udp_packets": self._udp_packet_count,
+            "udp_source": self._udp_source_ip,
+            "udp_errors": self._udp_parse_errors,
         }
+        if self._last_udp_time > 0:
+            result["udp_age_ms"] = round((time.time() - self._last_udp_time) * 1000)
         if self.tracking_ok:
             result["left_wrist"] = [
                 round(self._left_smooth.x, 3),

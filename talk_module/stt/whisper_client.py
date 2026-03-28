@@ -16,7 +16,7 @@ class WhisperClient:
 
     def __init__(self, api_key: Optional[str] = None):
         self.client = OpenAI(api_key=api_key or settings.api_key)
-        self.model = settings.stt_model or "gpt-4o-mini-transcribe"
+        self.model = settings.stt_model or "gpt-4o-mini-transcribe-2025-12-15"
 
     def transcribe(self, audio_bytes: bytes, language: Optional[str] = None, format_hint: Optional[str] = None, prompt: Optional[str] = None, model: Optional[str] = None) -> str:
         """

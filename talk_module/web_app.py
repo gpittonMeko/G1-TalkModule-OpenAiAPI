@@ -1315,13 +1315,19 @@ self.addEventListener('activate', () => self.clients.claim());
         _thr.Thread(target=_fire, daemon=True).start()
         return ((rm.response or "").strip() or "Ok")
 
+    _wake_cooldown = [0.0]
+    WAKE_COOLDOWN_S = 1.0
+
     def _stt_and_wake_check(audio_bytes: bytes, format_hint: str = "webm") -> dict:
         """STT + wake word detection.
         - wkind 'ack' (solo wake word) → wake_ack (client entra in command mode)
         - wkind 'ok' (wake + comando nello stesso slice) → processa subito il comando
-        Uses a dedicated STT prompt biased toward recognising "Hey G1"."""
+        Uses a dedicated STT prompt biased toward recognising "Hey G1".
+        Server-side cooldown: ignores wake for WAKE_COOLDOWN_S after last response."""
         t0 = time.perf_counter()
         _ms = lambda: int((time.perf_counter() - t0) * 1000)
+        if time.time() < _wake_cooldown[0]:
+            return {"text": "", "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
         try:
             _save_sample_audio(audio_bytes)
             stt, _, _, _, _ = get_services()
@@ -1345,6 +1351,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 print(f"[Wake] comando inline: {prompt!r}", flush=True)
                 result = _process_after_wake(prompt, raw_text, t0)
                 result["wake_cmd_inline"] = True
+                _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
                 return result
             return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_ack": True, "duration_ms": _ms()}
         except Exception as e:
@@ -1438,6 +1445,8 @@ self.addEventListener('activate', () => self.clients.claim());
                         except Exception:
                             pass
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
+            if resp:
+                _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
             return {
                 "text": text,
                 "response": resp or "",
@@ -3751,7 +3760,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         } catch(__){ wakeAnalyser = null; }
       }
     }
-    var WAKE_POST_TTS_PAUSE_MS = 800;
+    var WAKE_POST_TTS_PAUSE_MS = 1500;
     var _wakeDropSlicesAfterTts = 0;
     function setRobotLed(state){
       try { fetch('/api/led', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({state:state})}); } catch(e){}
@@ -3761,7 +3770,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       wakeAudioInFlight = false;
       wakeQueuedBlob = null;
       wakeDiscardCurrentSlice = false;
-      _wakeDropSlicesAfterTts = 1;
+      _wakeDropSlicesAfterTts = 2;
       setRobotLed('idle');
       setTimeout(function(){
         _wakeDropSlicesAfterTts = 0;
@@ -5612,8 +5621,14 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
 .teach-slot-row{display:flex;align-items:center;gap:6px;margin-top:8px;}
 .teach-slot-row label{font-size:11px;color:#71717a;}
 .teach-slot-row input{width:60px;padding:4px 6px;background:#1e1e2e;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:12px;font-family:monospace;text-align:center;}
-.stick-wrap{display:flex;justify-content:center;margin:8px 0;}
-.stick-wrap canvas{background:#0a0b10;border:1px solid #27272a;border-radius:10px;}
+.slot-card{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:#0a0b10;border:1px solid #27272a;border-radius:8px;font-size:11px;}
+.slot-card .slot-info{display:flex;align-items:center;gap:8px;color:#a1a1aa;}
+.slot-card .slot-id{font-weight:700;color:#a78bfa;min-width:36px;}
+.slot-card .slot-dur{color:#71717a;font-family:monospace;font-size:10px;}
+.slot-card .slot-actions{display:flex;gap:4px;}
+.slot-card .slot-actions button{padding:4px 10px;border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid #3f3f46;background:#27272a;color:#e4e4e7;-webkit-tap-highlight-color:transparent;}
+.slot-card .slot-actions .sl-play{background:rgba(20,184,166,0.15);border-color:rgba(20,184,166,0.4);color:#5eead4;}
+.slot-card .slot-actions .sl-del{background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.3);color:#fca5a5;}
 </style>
 </head>
 <body>
@@ -5651,20 +5666,23 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
       <span id="teachStatus" class="teach-status">idle</span>
     </div>
     <div id="teachTimer" class="teach-timer" style="display:none;">00:00</div>
-    <div class="teach-btns">
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
       <button type="button" class="teach-btn rec" id="btnRec" onclick="teachAction('start_record')">REC</button>
       <button type="button" class="teach-btn stop" id="btnStop" onclick="teachAction('stop_record')" disabled>STOP</button>
-      <button type="button" class="teach-btn play" id="btnPlay" onclick="teachAction('replay_temp')" disabled>PLAY</button>
+      <button type="button" class="teach-btn play" id="btnPlay" onclick="teachAction('replay_temp')" disabled>PLAY temp</button>
       <button type="button" class="teach-btn stop" id="btnEmStop" onclick="teachAction('emergency_stop')">E-STOP</button>
     </div>
-    <div class="teach-slot-row">
-      <label>Slot:</label>
+    <div class="teach-slot-row" style="margin-bottom:8px;">
+      <label>Salva in slot:</label>
       <input id="teachSlotId" type="number" min="0" max="99" value="0" />
       <button type="button" class="teach-btn save" id="btnSave" onclick="teachSaveSlot()" disabled>SAVE</button>
-      <button type="button" class="teach-btn play" id="btnPlaySlot" onclick="teachPlaySlot()">PLAY SLOT</button>
     </div>
-    <div class="stick-wrap"><canvas id="stickCanvas" width="320" height="280"></canvas></div>
-    <div class="joints-vis" id="jointsVis">
+    <div id="slotListWrap" style="margin-top:4px;">
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:#71717a;font-weight:600;margin-bottom:6px;">Slot salvati</div>
+      <div id="slotList" style="display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;"></div>
+      <div id="slotListEmpty" style="font-size:11px;color:#52525b;padding:8px 0;">Nessuno slot salvato</div>
+    </div>
+    <div class="joints-vis" id="jointsVis" style="margin-top:8px;">
       <div class="joint-group-label">Vita</div>
       <div id="jgWaist"></div>
       <div class="joint-group-label">Braccio SX</div>
@@ -5992,14 +6010,14 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
     fetch('/api/teaching/save_to_slot/' + slotId, { method: 'POST' })
       .then(function(r){ return r.json(); })
       .then(function(d){
-        if (d.ok) log('Saved to slot ' + slotId, 'ok');
+        if (d.ok) { log('Saved to slot ' + slotId, 'ok'); loadSlotList(); }
         else log('Save ERR: ' + (d.error || ''), 'err');
       })
       .catch(function(e){ log('Save rete: ' + e, 'err'); });
   };
 
-  window.teachPlaySlot = function() {
-    var slotId = parseInt(document.getElementById('teachSlotId').value) || 0;
+  window.teachPlaySlot = function(slotId) {
+    if (slotId == null) slotId = parseInt(document.getElementById('teachSlotId').value) || 0;
     log('Teaching: replay slot ' + slotId);
     fetch('/api/teaching/replay_slot/' + slotId, { method: 'POST' })
       .then(function(r){ return r.json(); })
@@ -6009,6 +6027,44 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
       })
       .catch(function(e){ log('Replay rete: ' + e, 'err'); });
   };
+
+  window.teachDeleteSlot = function(slotId) {
+    if (!confirm('Eliminare slot ' + slotId + '?')) return;
+    fetch('/api/teaching/delete/' + slotId, { method: 'POST' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.ok) { log('Slot ' + slotId + ' eliminato', 'ok'); loadSlotList(); }
+        else log('Delete ERR', 'err');
+      })
+      .catch(function(e){ log('Delete rete: ' + e, 'err'); });
+  };
+
+  function loadSlotList() {
+    fetch('/api/teaching/list')
+      .then(function(r){ return r.json(); })
+      .then(function(slots){
+        var listEl = document.getElementById('slotList');
+        var emptyEl = document.getElementById('slotListEmpty');
+        listEl.innerHTML = '';
+        if (!slots || !slots.length) { emptyEl.style.display = ''; return; }
+        emptyEl.style.display = 'none';
+        slots.forEach(function(s){
+          var card = document.createElement('div');
+          card.className = 'slot-card';
+          var dur = s.duration_s ? s.duration_s.toFixed(1) + 's' : '--';
+          card.innerHTML = '<div class="slot-info"><span class="slot-id">#' + s.slot_id + '</span>'
+            + '<span>' + (s.frames || 0) + ' frames</span>'
+            + '<span class="slot-dur">' + dur + '</span></div>'
+            + '<div class="slot-actions">'
+            + '<button type="button" class="sl-play" onclick="teachPlaySlot(' + s.slot_id + ')">PLAY</button>'
+            + '<button type="button" class="sl-del" onclick="teachDeleteSlot(' + s.slot_id + ')">DEL</button>'
+            + '</div>';
+          listEl.appendChild(card);
+        });
+      })
+      .catch(function(){});
+  }
+  loadSlotList();
 })();
 </script>
 </body>
@@ -6088,6 +6144,17 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
         <div class="hand-icon">&#x270B;</div>
         <div class="hand-label">Destra</div>
         <div class="hand-pos" id="handRightPos">--</div>
+      </div>
+    </div>
+    <div style="margin-top:10px;padding:8px;background:#0a0b10;border:1px solid #27272a;border-radius:8px;font-size:10px;font-family:monospace;color:#71717a;">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;">
+        <span>UDP pkts: <span id="vrUdpPkts" style="color:#a1a1aa;">0</span></span>
+        <span>Sorgente: <span id="vrUdpSrc" style="color:#a1a1aa;">--</span></span>
+        <span>Ultimo: <span id="vrUdpAge" style="color:#a1a1aa;">--</span></span>
+        <span>Errori: <span id="vrUdpErr" style="color:#a1a1aa;">0</span></span>
+      </div>
+      <div id="vrSetupHint" style="margin-top:6px;color:#fbbf24;font-size:10px;display:none;">
+        Nessun dato UDP. Verifica: 1) HTS attivo su Quest 2) IP Jetson corretto in HTS 3) Porta UDP 9000
       </div>
     </div>
   </div>
@@ -6221,6 +6288,21 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
     if (d.right_wrist) {
       document.getElementById('handRightPos').textContent = d.right_wrist.map(function(v){return v.toFixed(3);}).join(', ');
     }
+
+    document.getElementById('vrUdpPkts').textContent = d.udp_packets || 0;
+    document.getElementById('vrUdpSrc').textContent = d.udp_source || '--';
+    document.getElementById('vrUdpErr').textContent = d.udp_errors || 0;
+    var ageEl = document.getElementById('vrUdpAge');
+    if (d.udp_age_ms != null) {
+      var ageSec = (d.udp_age_ms / 1000).toFixed(1);
+      ageEl.textContent = ageSec + 's fa';
+      ageEl.style.color = d.udp_age_ms < 500 ? '#4ade80' : d.udp_age_ms < 2000 ? '#fbbf24' : '#ef4444';
+    } else {
+      ageEl.textContent = '--';
+      ageEl.style.color = '#a1a1aa';
+    }
+    var hint = document.getElementById('vrSetupHint');
+    hint.style.display = (!d.udp_packets && st !== 'idle') ? '' : 'none';
 
     document.getElementById('btnVrStart').disabled = (st !== 'idle' && st !== 'error');
     document.getElementById('btnVrCal').disabled = (st !== 'calibrating' && st !== 'active');
