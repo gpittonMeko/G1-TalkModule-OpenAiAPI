@@ -65,7 +65,7 @@ class Settings:
     # Wake word: risposta TTS quando l'utente dice solo "Hey G1" senza domanda
     hey_g1_ack_text: str = _str(
         os.getenv("HEY_G1_ACK_TEXT"),
-        "Sì, ti ascolto. Come posso aiutarti?",
+        "Dimmi pure.",
     )
 
     # Audio

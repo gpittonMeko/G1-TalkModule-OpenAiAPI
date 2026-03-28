@@ -1130,30 +1130,28 @@ self.addEventListener('activate', () => self.clients.claim());
         try:
             _save_sample_audio(audio_bytes)  # Salva ultimo campione per riuso (Test con campione)
             stt, llm, tts, _, _ = get_services()
-            text = stt.transcribe(audio_bytes, format_hint=format_hint, language="it")
-            text = _apply_stt_fuzzy_correction(text or "")
-            # Debug: salva audio quando trascrizione fallisce (per analisi)
-            if not text or not text.strip():
+            raw_text = stt.transcribe(audio_bytes, format_hint=format_hint, language="it")
+            if not raw_text or not raw_text.strip():
                 saved = _save_debug_audio(audio_bytes)
                 if saved:
                     print(f"[Debug] Audio non trascritto salvato: {saved}")
                 if not skip_wake_word:
                     return {
-                        "text": text or "",
+                        "text": raw_text or "",
                         "response": "",
                         "audio_base64": "",
                         "message": "",
                         "wake_miss": True,
                         "duration_ms": int((time.perf_counter() - t0) * 1000),
                     }
-                prompt, msg = _extract_prompt(text or "", skip_wake_word=True, audio_size=len(audio_bytes))
-                return {"text": text or "", "response": "", "audio_base64": "", "message": msg or "", "duration_ms": int((time.perf_counter() - t0) * 1000)}
+                prompt, msg = _extract_prompt(raw_text or "", skip_wake_word=True, audio_size=len(audio_bytes))
+                return {"text": raw_text or "", "response": "", "audio_base64": "", "message": msg or "", "duration_ms": int((time.perf_counter() - t0) * 1000)}
             if not skip_wake_word:
-                rest, wkind = _find_wake_and_rest(text)
-                print(f"[Wake] text={text!r} kind={wkind} rest={rest!r}", flush=True)
+                rest, wkind = _find_wake_and_rest(raw_text)
+                print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r}", flush=True)
                 if wkind == "miss":
                     return {
-                        "text": text,
+                        "text": raw_text,
                         "response": "",
                         "audio_base64": "",
                         "message": "",
@@ -1161,16 +1159,24 @@ self.addEventListener('activate', () => self.clients.claim());
                         "duration_ms": int((time.perf_counter() - t0) * 1000),
                     }
                 if wkind == "ack":
+                    ack_text = (settings.hey_g1_ack_text or "").strip() or "Dimmi pure."
+                    ack_audio = b""
+                    try:
+                        ack_audio = tts.synthesize(ack_text, format="mp3")
+                    except Exception:
+                        pass
                     return {
-                        "text": text,
-                        "response": "",
-                        "audio_base64": "",
+                        "text": raw_text,
+                        "response": ack_text,
+                        "audio_base64": base64.b64encode(ack_audio).decode() if ack_audio else "",
                         "message": "",
                         "wake_ack": True,
                         "duration_ms": int((time.perf_counter() - t0) * 1000),
                     }
-                prompt = rest
+                prompt = _apply_stt_fuzzy_correction(rest or "")
+                text = raw_text
             else:
+                text = _apply_stt_fuzzy_correction(raw_text or "")
                 prompt, msg = _extract_prompt(text or "", skip_wake_word=True, audio_size=len(audio_bytes))
                 if msg:
                     return {"text": text or "", "response": "", "audio_base64": "", "message": msg, "duration_ms": int((time.perf_counter() - t0) * 1000)}
@@ -2931,7 +2937,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     const WAKE_COMMAND_SILENCE_MS = 12000;
     /** Dopo startWakeRecorder: programma la prossima slice solo quando il round (risposta+TTS) è finito. */
     let scheduleNextWakeSliceIfListening = function(){};
-    const WAKE_SLICE_MS = 2500;
+    const WAKE_SLICE_MS = 3000;
     /** Coda riproduzione TTS: evita che due risposte MP3 si sovrappongano. */
     let ttsPlaybackQueue = [];
     let ttsPlaybackBusy = false;
@@ -3569,7 +3575,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
               btn.disabled = false;
               deferWakeDone = true;
-              setTimeout(function(){ onWakeResponseDone(); }, 320);
+              var ackB64 = r.audio_base64 && String(r.audio_base64).length > 50 ? r.audio_base64 : null;
+              if (ackB64 && lastPlayOn === 'browser') {
+                enqueueTtsPlayback(ackB64, function(){ onWakeResponseDone(); });
+              } else {
+                setTimeout(function(){ onWakeResponseDone(); }, 400);
+              }
               return;
             }
             if (!r.response && r.message) {
@@ -3595,11 +3606,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             deferWakeDone = true;
             enqueueTtsPlayback(r.audio_base64, onWakeResponseDone);
           }
-          const wst = document.getElementById('wakeListenStatus');
-          if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) wst.textContent = 'In ascolto per «Hey G1»…';
-          if (wakeCommandMode && !r.wake_ack && r.wake_miss !== true && (String(r.text||'').trim() || String(r.response||'').trim())) {
-            startWakeCommandIdleTimer();
+          if (wakeCommandMode) {
+            resetWakeCommandMode();
+            wakeLog('Comando completato, torno in ascolto wake', '#71717a');
           }
+          const wst = document.getElementById('wakeListenStatus');
+          if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) wst.textContent = 'In ascolto per \u00abHey G1\u00bb\u2026';
         } finally {
           if (!deferWakeDone) onWakeResponseDone();
         }
