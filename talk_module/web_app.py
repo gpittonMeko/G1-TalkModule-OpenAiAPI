@@ -1124,6 +1124,81 @@ self.addEventListener('activate', () => self.clients.claim());
         _thr.Thread(target=_fire, daemon=True).start()
         return ((rm.response or "").strip() or "Ok")
 
+    def _stt_and_wake_check(audio_bytes: bytes, format_hint: str = "webm") -> dict:
+        """Phase 1 (fast): STT + wake word detection. Used by WS two-phase pipeline."""
+        t0 = time.perf_counter()
+        _ms = lambda: int((time.perf_counter() - t0) * 1000)
+        try:
+            _save_sample_audio(audio_bytes)
+            stt, _, tts_svc, _, _ = get_services()
+            raw_text = stt.transcribe(audio_bytes, format_hint=format_hint, language="it")
+            if not raw_text or not raw_text.strip():
+                saved = _save_debug_audio(audio_bytes)
+                if saved:
+                    print(f"[Debug] Audio non trascritto salvato: {saved}")
+                return {"text": raw_text or "", "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
+            rest, wkind = _find_wake_and_rest(raw_text)
+            print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r}", flush=True)
+            if wkind == "miss":
+                return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
+            if wkind == "ack":
+                ack_text = "Per parlarmi, di' Hey G1 seguito dalla tua domanda."
+                ack_audio = b""
+                try:
+                    ack_audio = tts_svc.synthesize(ack_text, format="mp3")
+                except Exception:
+                    pass
+                return {
+                    "text": raw_text, "response": ack_text,
+                    "audio_base64": base64.b64encode(ack_audio).decode() if ack_audio else "",
+                    "message": "", "wake_ack": True, "duration_ms": _ms(),
+                }
+            prompt = _apply_stt_fuzzy_correction(rest or "")
+            return {"_wake_ok": True, "_prompt": prompt, "_raw_text": raw_text, "_t0": t0}
+        except Exception as e:
+            return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": _ms()}
+
+    def _process_after_wake(prompt: str, raw_text: str, t0: float) -> dict:
+        """Phase 2: robot action / knowledge / LLM + TTS after wake detected."""
+        try:
+            _, llm, tts, _, _ = get_services()
+            if prompt == PROMPT_HEY_G1_ACK_ONLY:
+                resp = (settings.hey_g1_ack_text or "").strip() or "Sì?"
+            else:
+                robot_match = None
+                try:
+                    from talk_module.robot_actions import check_robot_action
+                    robot_match = check_robot_action(prompt)
+                except Exception:
+                    pass
+                if robot_match:
+                    resp = _run_robot_match_actions(robot_match)
+                else:
+                    resp = check_knowledge(prompt)
+                    if not resp:
+                        from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
+                        if is_quick_lookup_question(prompt):
+                            resp = quick_lookup(prompt)
+                            if resp == NOT_FOUND:
+                                resp = None
+                    if not resp:
+                        resp = llm.chat(prompt)
+            audio_out = tts.synthesize(resp, format="mp3") if resp else b""
+            return {
+                "text": raw_text,
+                "response": resp or "",
+                "audio_base64": base64.b64encode(audio_out).decode() if audio_out else "",
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+            }
+        except Exception as e:
+            err = str(e)
+            el = err.lower()
+            if "401" in err or "expired_api_key" in el or "invalid_api_key" in el or "invalid api key" in el or "incorrect api key" in el:
+                err = "Chiave API non valida o scaduta. Aggiorna .env e riavvia. " + err
+            elif "invalid file format" in el or ("supported formats" in el and ("flac" in el or "webm" in el or "mp3" in el)):
+                err = "STT: formato rifiutato. pip install imageio-ffmpeg. " + err
+            return {"text": raw_text, "response": "", "audio_base64": "", "message": f"Errore: {err}", "duration_ms": int((time.perf_counter() - t0) * 1000)}
+
     def _process_audio(audio_bytes: bytes, skip_wake_word: bool = False, format_hint: str = "webm") -> dict:
         """Pipeline: audio -> STT -> LLM -> TTS. skip_wake_word=True per pulsante Parla."""
         t0 = time.perf_counter()
@@ -1159,16 +1234,10 @@ self.addEventListener('activate', () => self.clients.claim());
                         "duration_ms": int((time.perf_counter() - t0) * 1000),
                     }
                 if wkind == "ack":
-                    ack_text = (settings.hey_g1_ack_text or "").strip() or "Dimmi pure."
-                    ack_audio = b""
-                    try:
-                        ack_audio = tts.synthesize(ack_text, format="mp3")
-                    except Exception:
-                        pass
                     return {
                         "text": raw_text,
-                        "response": ack_text,
-                        "audio_base64": base64.b64encode(ack_audio).decode() if ack_audio else "",
+                        "response": "",
+                        "audio_base64": "",
                         "message": "",
                         "wake_ack": True,
                         "duration_ms": int((time.perf_counter() - t0) * 1000),
@@ -1333,11 +1402,25 @@ self.addEventListener('activate', () => self.clients.claim());
                             else:
                                 skip_w = bool(sk)
                             loop = asyncio.get_running_loop()
-                            # STT+LLM+TTS in thread: non blocca il loop (evita timeout e code client)
-                            result = await loop.run_in_executor(
-                                _executor,
-                                partial(_process_audio, audio_bytes, skip_w, audio_fmt),
-                            )
+                            if not skip_w:
+                                # Two-phase: STT+wake (fast) → chime → LLM+TTS
+                                p1 = await loop.run_in_executor(
+                                    _executor,
+                                    partial(_stt_and_wake_check, audio_bytes, audio_fmt),
+                                )
+                                if p1.get("_wake_ok"):
+                                    await ws.send_text(json.dumps({"type": "wake_chime"}))
+                                    result = await loop.run_in_executor(
+                                        _executor,
+                                        partial(_process_after_wake, p1["_prompt"], p1["_raw_text"], p1["_t0"]),
+                                    )
+                                else:
+                                    result = p1
+                            else:
+                                result = await loop.run_in_executor(
+                                    _executor,
+                                    partial(_process_audio, audio_bytes, True, audio_fmt),
+                                )
                             try:
                                 tw = (result.get("text") or "")[:80].replace("\n", " ")
                                 print(
@@ -2499,6 +2582,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <button class="btn" id="btn">Tieni premuto e parla</button>
   </div>
 
+  <!-- VOLUME CASSA -->
+  <div style="margin-bottom:14px;padding:10px 14px;border-radius:10px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.18);display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <label for="parlaGainSlider" style="font-size:12px;color:#86efac;font-weight:600;white-space:nowrap;">Volume cassa</label>
+    <input type="range" id="parlaGainSlider" min="0.5" max="10.0" step="0.1" style="flex:1;min-width:100px;accent-color:#22c55e;" />
+    <span id="parlaGainLabel" style="font-size:12px;color:#a1a1aa;font-family:monospace;min-width:36px;">2.5x</span>
+  </div>
+
   <!-- RISULTATO (condiviso) -->
   <div class="result" id="result"></div>
 
@@ -2937,7 +3027,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     const WAKE_COMMAND_SILENCE_MS = 12000;
     /** Dopo startWakeRecorder: programma la prossima slice solo quando il round (risposta+TTS) è finito. */
     let scheduleNextWakeSliceIfListening = function(){};
-    const WAKE_SLICE_MS = 3000;
+    const WAKE_SLICE_MS = 6000;
     /** Coda riproduzione TTS: evita che due risposte MP3 si sovrappongano. */
     let ttsPlaybackQueue = [];
     let ttsPlaybackBusy = false;
@@ -3240,21 +3330,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         setTimeout(function(){ ctx.close().catch(function(){}); }, 500);
       } catch(_){}
     }
-    function resetWakeCommandMode(){
-      wakeCommandMode = false;
-      stopListeningHum();
-      if (wakeCommandIdleTimer) { clearTimeout(wakeCommandIdleTimer); wakeCommandIdleTimer = null; }
-    }
-    function startWakeCommandIdleTimer(){
-      if (!wakeCommandMode) return;
-      if (wakeCommandIdleTimer) clearTimeout(wakeCommandIdleTimer);
-      wakeCommandIdleTimer = setTimeout(function(){
-        resetWakeCommandMode();
-        const wst = document.getElementById('wakeListenStatus');
-        const tg = document.getElementById('wakeListenToggle');
-        if (wst && tg && tg.checked) wst.textContent = 'In ascolto per «Hey G1»…';
-      }, WAKE_COMMAND_SILENCE_MS);
-    }
+    function resetWakeCommandMode(){ /* no-op, one-shot mode only */ }
+    function startWakeCommandIdleTimer(){ /* no-op */ }
     function stopWakeLevelMeter(){
       if (wakeLevelSampleInterval) { clearInterval(wakeLevelSampleInterval); wakeLevelSampleInterval = null; }
       if (wakeLevelCtx) { try { wakeLevelCtx.close(); } catch(_){} wakeLevelCtx = null; }
@@ -3303,6 +3380,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
     }
     function onWakeResponseDone(){
+      if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
       wakeAudioInFlight = false;
       if (wakeQueuedBlob && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) {
         const b = wakeQueuedBlob;
@@ -3311,31 +3389,45 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       scheduleNextWakeSliceIfListening();
     }
+    let wakeResponseTimeout = null;
     function trySendWakeChunk(blob){
-      if (!blob || blob.size < WS_AUDIO_MIN_BYTES) return;
+      if (!blob || blob.size < WS_AUDIO_MIN_BYTES) { scheduleNextWakeSliceIfListening(); return; }
       if (!document.getElementById('wakeListenToggle').checked) return;
-      if (isRecording) return;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (isRecording) { scheduleNextWakeSliceIfListening(); return; }
+      if (!ws || ws.readyState !== WebSocket.OPEN) { scheduleNextWakeSliceIfListening(); return; }
       if (wakeAudioInFlight) {
         wakeQueuedBlob = blob;
         return;
       }
       wakeAudioInFlight = true;
       wakeListenPending = true;
+      if (wakeResponseTimeout) clearTimeout(wakeResponseTimeout);
+      wakeResponseTimeout = setTimeout(function(){
+        if (wakeAudioInFlight) {
+          wakeLog('Timeout risposta server, riprovo...', '#ef4444');
+          wakeAudioInFlight = false;
+          wakeListenPending = false;
+          stopThinkingFeedback();
+          scheduleNextWakeSliceIfListening();
+        }
+      }, 45000);
       const fr = new FileReader();
       fr.onload = function(){
         const b64 = arrayBufferToBase64(fr.result);
         try {
-          stopListeningHum();
-          playStopChime();
           startThinkingFeedback();
-          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: wakeCommandMode });
+          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: false });
         } catch(_){
           wakeListenPending = false;
           wakeAudioInFlight = false;
-          stopListeningHum();
           stopThinkingFeedback();
+          scheduleNextWakeSliceIfListening();
         }
+      };
+      fr.onerror = function(){
+        wakeListenPending = false;
+        wakeAudioInFlight = false;
+        scheduleNextWakeSliceIfListening();
       };
       fr.readAsArrayBuffer(blob);
     }
@@ -3431,7 +3523,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (msg.type === 'response' && msg.data) {
             var d = msg.data;
             if (d.wake_miss) return;
-            if (d.wake_ack) { playWakeChime(); if (st) st.textContent = 'Ti ascolto…'; return; }
+            if (d.wake_ack) {
+              playWakeChime();
+              if (st) st.textContent = 'Dì Hey G1 + domanda';
+              if (d.audio_base64) { enqueueTtsPlayback(d.audio_base64, function(){ if (st) st.textContent = 'In ascolto per «Hey G1» (mic Jetson)…'; }); }
+              return;
+            }
             if (d.response) {
               var resEl = document.getElementById('result');
               if (resEl) resEl.innerHTML = '<div class="ok"><strong>Tu:</strong> ' + (d.text||'').replace(/</g,'&lt;') + '<br><strong>G1:</strong> ' + (d.response||'').replace(/</g,'&lt;') + '</div>';
@@ -3505,41 +3602,48 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         wakeActiveMr = mr;
         const ch = [];
         wakeSlicePeak = 0;
+        let voiceDetected = false, lastVoiceTs = 0;
+        const SILENCE_AFTER_VOICE_MS = 1500;
+        let sliceInterval = null;
+        function stopMrEarly(){
+          if (sliceInterval) { clearInterval(sliceInterval); sliceInterval = null; }
+          try { if (mr.state !== 'inactive') { if (typeof mr.requestData === 'function') mr.requestData(); mr.stop(); } } catch(_){}
+        }
         if (wakeAnalyser) {
           if (wakeLevelSampleInterval) clearInterval(wakeLevelSampleInterval);
-          wakeLevelSampleInterval = setInterval(function(){
+          sliceInterval = setInterval(function(){
             if (!wakeAnalyser) return;
             const buf = new Uint8Array(wakeAnalyser.frequencyBinCount);
             wakeAnalyser.getByteFrequencyData(buf);
             let s = 0;
             for (let i = 0; i < buf.length; i++) if (buf[i] > s) s = buf[i];
             if (s > wakeSlicePeak) wakeSlicePeak = s;
-          }, 45);
+            const th = getWakeVoiceThreshold();
+            if (s >= th) { voiceDetected = true; lastVoiceTs = Date.now(); }
+            else if (voiceDetected && lastVoiceTs > 0 && (Date.now() - lastVoiceTs >= SILENCE_AFTER_VOICE_MS)) {
+              stopMrEarly();
+            }
+          }, 50);
+          wakeLevelSampleInterval = sliceInterval;
         }
         mr.ondataavailable = function(ev){ if (ev.data && ev.data.size) ch.push(ev.data); };
         mr.onstop = function(){
           wakeActiveMr = null;
-          if (wakeLevelSampleInterval) { clearInterval(wakeLevelSampleInterval); wakeLevelSampleInterval = null; }
+          if (sliceInterval) { clearInterval(sliceInterval); }
+          sliceInterval = null;
+          wakeLevelSampleInterval = null;
           if (!wakeListenActive) return;
           const blob = new Blob(ch, { type: wakeMimeType });
           const voiced = !wakeAnalyser || wakeSlicePeak >= getWakeVoiceThreshold();
           if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob);
           else scheduleNextWakeSliceIfListening();
-          /* La prossima slice dopo risposta+TTS: onWakeResponseDone, oppure subito se slice silenziosa (nessun invio). */
         };
         mr.start();
-        setTimeout(function(){
-          try {
-            if (mr.state !== 'inactive') {
-              if (typeof mr.requestData === 'function') mr.requestData();
-              mr.stop();
-            }
-          } catch(_){}
-        }, WAKE_SLICE_MS);
+        setTimeout(function(){ stopMrEarly(); }, WAKE_SLICE_MS);
       }
       runWakeSlice();
       const st = document.getElementById('wakeListenStatus');
-      if (st) st.textContent = 'In ascolto per «Hey G1»…';
+      if (st) st.textContent = 'In ascolto \u2014 di \u00abHey G1\u00bb + comando';
     }
     const wakeListenToggleEl = document.getElementById('wakeListenToggle');
     if (wakeListenToggleEl) {
@@ -3618,27 +3722,24 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               return;
             }
             if (r.wake_ack) {
-              wakeLog('WAKE! STT: "'+String(r.text||'')+'" \u2192 pronto', '#22c55e');
+              wakeLog('Solo "Hey G1". Dì Hey G1 + domanda.', '#f59e0b');
               playWakeChime();
-              wakeCommandMode = true;
-              startWakeCommandIdleTimer();
-              const wst = document.getElementById('wakeListenStatus');
-              if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
               btn.disabled = false;
-              deferWakeDone = true;
               var ackB64 = r.audio_base64 && String(r.audio_base64).length > 50 ? r.audio_base64 : null;
               if (ackB64 && lastPlayOn === 'browser') {
-                enqueueTtsPlayback(ackB64, function(){ startListeningHum(); onWakeResponseDone(); });
+                deferWakeDone = true;
+                document.getElementById('result').innerHTML = '<div class="warn">'+(r.response||'Dì Hey G1 seguito dalla domanda.')+'</div>';
+                enqueueTtsPlayback(ackB64, onWakeResponseDone);
               } else {
-                setTimeout(function(){ startListeningHum(); onWakeResponseDone(); }, 400);
+                document.getElementById('result').innerHTML = '<div class="warn">'+(r.response||'Dì Hey G1 seguito dalla domanda.')+'</div>';
+                onWakeResponseDone();
               }
               return;
             }
             if (!r.response && r.message) {
               wakeLog('msg: '+r.message, '#f59e0b');
               const wst = document.getElementById('wakeListenStatus');
-              if (wakeCommandMode && wst) wst.textContent = 'Ti ascolto\u2026 (parla 1\u20132 sec pi\u00f9 forte)';
-              else if (wst) wst.textContent = 'In ascolto per \u00abHey G1\u00bb\u2026';
+              if (wst) wst.textContent = 'In ascolto \u2014 di \u00abHey G1\u00bb + comando';
               document.getElementById('result').innerHTML = '<div class="warn">'+r.message+'</div>';
               btn.disabled = false;
               return;
@@ -3657,15 +3758,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             deferWakeDone = true;
             enqueueTtsPlayback(r.audio_base64, onWakeResponseDone);
           }
-          if (wakeCommandMode) {
-            resetWakeCommandMode();
-            wakeLog('Comando completato, torno in ascolto wake', '#71717a');
-          }
+          wakeLog('Comando completato, torno in ascolto wake', '#71717a');
           const wst = document.getElementById('wakeListenStatus');
-          if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) wst.textContent = 'In ascolto per \u00abHey G1\u00bb\u2026';
+          if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) wst.textContent = 'In ascolto \u2014 di \u00abHey G1\u00bb + comando';
         } finally {
           if (!deferWakeDone) onWakeResponseDone();
         }
+      } else if(d.type==='wake_chime'){
+        playWakeChime();
+        wakeLog('Hey G1 rilevato, elaboro...', '#22c55e');
       } else if(d.type==='error'){
         stopThinkingFeedback();
         clearTtsPlaybackQueue();
@@ -3956,11 +4057,18 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     (function(){
       var sl = document.getElementById('ttsGainSlider');
       var lb = document.getElementById('ttsGainLabel');
-      if (sl) {
-        sl.value = getTtsGain();
-        lb.textContent = getTtsGain().toFixed(1) + 'x';
-        sl.addEventListener('input', function(){ var v = parseFloat(sl.value); setTtsGain(v); lb.textContent = v.toFixed(1) + 'x'; });
+      var sl2 = document.getElementById('parlaGainSlider');
+      var lb2 = document.getElementById('parlaGainLabel');
+      function syncAll(v){
+        setTtsGain(v);
+        if (sl) { sl.value = v; }
+        if (lb) { lb.textContent = v.toFixed(1) + 'x'; }
+        if (sl2) { sl2.value = v; }
+        if (lb2) { lb2.textContent = v.toFixed(1) + 'x'; }
       }
+      syncAll(getTtsGain());
+      if (sl) sl.addEventListener('input', function(){ syncAll(parseFloat(sl.value)); });
+      if (sl2) sl2.addEventListener('input', function(){ syncAll(parseFloat(sl2.value)); });
     })();
     if (navigator.mediaDevices) {
       if (isLocalhost) {
@@ -4931,7 +5039,7 @@ LISTEN_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <h1>Ascolto continuo</h1>
-  <p style="color:#71717a;">Di "Hey G1" + domanda. Dopo 6 sec di silenzio risponde. Non toccare nulla.</p>
+  <p style="color:#71717a;">Di &laquo;Hey G1&raquo; + domanda in un&apos;unica frase. Slice 6 sec. Non toccare nulla.</p>
   <div class="status" id="status">Connessione...</div>
   <div class="status" id="result" style="display:none"></div>
   <p style="margin-top:24px;"><a href="/" style="color:#3b82f6;">Setup</a> | <a href="/local" style="color:#3b82f6;">Parla (push)</a></p>
