@@ -54,7 +54,7 @@ class Settings:
         "Esempi: hey g1, buonasera, grazie. Solo parole effettivamente pronunciate.",
     )
     # STT fuzzy: threshold e min_word_length in config/stt_config.json (opzionale override via .env)
-    stt_fuzzy_threshold: float = float(os.getenv("STT_FUZZY_THRESHOLD", "0.72"))
+    stt_fuzzy_threshold: float = float(os.getenv("STT_FUZZY_THRESHOLD", "0.85"))
     stt_min_word_length: int = _int(os.getenv("STT_MIN_WORD_LENGTH", "3")) or 3
 
     # Quick lookup (ora, meteo, domande fattuali)

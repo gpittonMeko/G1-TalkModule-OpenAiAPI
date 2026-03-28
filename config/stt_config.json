@@ -21,7 +21,7 @@
     "ruotati",
     "fai un giro"
   ],
-  "threshold": 0.72,
+  "threshold": 0.85,
   "min_word_length": 3,
   "use_italian_vocabulary": true
 }

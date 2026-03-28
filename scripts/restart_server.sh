@@ -1,6 +1,15 @@
 #!/bin/bash
-# Riavvia G1 Talk Module (Jetson, AI Accelerator, ecc.)
-# HTTPS su 8081 (microfono da telefono). HTTP su 8080 reindirizza a HTTPS.
+# =============================================================================
+# Riavvio stack G1 Talk — UNICO script da usare in produzione (o launch_g1_stack.sh)
+#
+# Processi avviati:
+#   A) python3 -m talk_module.web_app  → :8081  (API, /client, soundboard, robot-action, WebSocket)
+#   B) scripts/http_redirect.py        → :8080  SOLO se esistono certificati SSL (redirect HTTP→HTTPS)
+#
+# Il robot G1 (sport mode, SDK DDS) richiede interfaccia di rete corretta: vedi .env
+#   UNITREE_DDS_INTERFACE=usb0   (tipico Jetson collegato al G1 via USB RNDIS, subnet 192.168.123.x)
+#   UNITREE_ROBOT_IP=192.168.123.161
+# =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

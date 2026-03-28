@@ -66,6 +66,7 @@ G1_ARM_ACTIONS: dict[int, dict] = {
 }
 
 _NAME_TO_ID = {v["name"]: k for k, v in G1_ARM_ACTIONS.items()}
+_NAME_TO_ID["wave_hand"] = 25  # alias → face_wave
 _SHAKE_HAND_ID = _NAME_TO_ID.get("shake_hand", 27)
 
 _sdk_client = None
@@ -75,12 +76,49 @@ _bound_loco_service: Optional[str] = None
 _sdk_lock = threading.Lock()
 
 
+def _dds_interface_for_init() -> str:
+    """
+    Interfaccia CycloneDDS verso il G1.
+    Priorità: 1) UNITREE_DDS_INTERFACE da .env  2) auto-detect interfaccia con IP 192.168.123.x  3) eth0.
+    """
+    explicit = (os.getenv("UNITREE_DDS_INTERFACE") or "").strip()
+    if explicit and explicit != "auto":
+        return explicit
+    target_subnet = os.getenv("UNITREE_ROBOT_IP", "192.168.123.161").rsplit(".", 1)[0] + "."
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(["ip", "-br", "addr", "show"], text=True, timeout=5)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            iface, state = parts[0], parts[1]
+            if state not in ("UP", "UNKNOWN"):
+                continue
+            for addr in parts[2:]:
+                if addr.startswith(target_subnet):
+                    return iface
+    except Exception:
+        pass
+    return "eth0"
+
+
+def _reset_dds_state() -> None:
+    """Dopo errore channel factory / init DDS: permette un nuovo tentativo (es. passaggio a usb0)."""
+    global _dds_inited, _sdk_client, _loco_client
+    with _sdk_lock:
+        _dds_inited = False
+        _sdk_client = None
+        _loco_client = None
+
+
 def _ensure_dds_init() -> None:
     """Inizializza DDS una sola volta (braccia + locomozione G1)."""
     global _dds_inited
     if _dds_inited:
         return
-    iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+    iface = _dds_interface_for_init()
+    print(f"[G1 DDS] ChannelFactoryInitialize(0, {iface!r})", flush=True)
     try:
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
@@ -249,6 +287,16 @@ def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tupl
         return False, f"Azione non riconosciuta: {action_id}"
 
     ok, msg = _do_arm_action(act_int, ip)
+    if (
+        not ok
+        and Path("/sys/class/net/usb0").exists()
+        and "channel factory" in (msg or "").lower()
+        and (os.getenv("UNITREE_DDS_INTERFACE") or "").strip().lower() != "usb0"
+    ):
+        print("[G1 DDS] retry arm action with UNITREE_DDS_INTERFACE=usb0", flush=True)
+        os.environ["UNITREE_DDS_INTERFACE"] = "usb0"
+        _reset_dds_state()
+        ok, msg = _do_arm_action(act_int, ip)
     if ok and act_int == _SHAKE_HAND_ID:
         _schedule_shake_hand_release(ip)
     return ok, msg
@@ -349,7 +397,7 @@ def _loco_spin_inplace_macro() -> tuple[bool, str]:
 
 
 def _loco_rpc_message(rc: int, op: str) -> str:
-    iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+    iface = _dds_interface_for_init()
     return (
         f"{op} rifiutato (codice RPC {rc}, atteso 0). "
         f"Sport mode (es. L1+A), DDS su {iface}. "
@@ -359,7 +407,7 @@ def _loco_rpc_message(rc: int, op: str) -> str:
 
 
 def _run_ready_sequence(lc, svc_name: str) -> tuple[bool, str]:
-    iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+    iface = _dds_interface_for_init()
     seq = (os.getenv("G1_READY_SEQUENCE") or "standard").strip().lower()
     skip_start = os.getenv("G1_READY_SKIP_START", "").lower() in ("1", "true", "yes")
     UINT32_MAX = float((1 << 32) - 1)
@@ -402,7 +450,7 @@ def send_move_command(vx: float, vy: float, vyaw: float, robot_ip: Optional[str]
             _ensure_dds_init()
             lc, svc = _ensure_loco_client_locked()
             rc = lc.SetVelocity(float(vx), float(vy), float(vyaw), 1.0)
-            iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+            iface = _dds_interface_for_init()
             msg = f"Move rc={rc} iface={iface} svc={svc}"
             _loco_log(msg)
             if rc != 0:
@@ -509,7 +557,7 @@ def execute_g1_loco_command(
                 parts = [f"Squat2Up rc={ru}"]
                 if ru != 0:
                     return False, _loco_rpc_message(ru, "Squat2StandUp") + " | " + "; ".join(parts)
-                iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+                iface = _dds_interface_for_init()
                 msg = "; ".join(parts) + f". iface={iface} svc={svc_name} (no Damp)"
                 _loco_log(f"squat_up {msg}")
                 return True, msg
@@ -580,7 +628,7 @@ def execute_g1_loco_command(
                 parts.append(f"Squat2Up rc={ru}")
                 if ru != 0:
                     return False, _loco_rpc_message(ru, "Squat2StandUp") + " | " + "; ".join(parts)
-                iface = (os.getenv("UNITREE_DDS_INTERFACE") or "eth0").strip() or "eth0"
+                iface = _dds_interface_for_init()
                 msg = "; ".join(parts) + f". iface={iface} svc={svc_name}"
                 _loco_log(f"squat_up_damp {msg}")
                 return True, msg

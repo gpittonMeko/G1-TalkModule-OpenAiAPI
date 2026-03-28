@@ -957,20 +957,27 @@ self.addEventListener('activate', () => self.clients.claim());
             raise HTTPException(400, "Audio troppo corto")
         arm = str(s.get("robot_arm") or "").strip()
         loco = str(s.get("robot_loco") or "").strip()
+        if not arm and not loco:
+            arm = "face_wave"
         if arm or loco:
-            try:
-                from talk_module.robot_actions import (
-                    execute_g1_loco_command,
-                    execute_robot_action,
-                    loco_command_requires_confirm,
-                )
+            import threading as _thr
 
-                if arm:
-                    execute_robot_action(arm)
-                if loco and not loco_command_requires_confirm(loco):
-                    execute_g1_loco_command(loco)
-            except Exception as e:
-                print(f"[soundboard-play-local] robot: {e}", flush=True)
+            def _sb_robot(a, l):
+                try:
+                    from talk_module.robot_actions import (
+                        execute_g1_loco_command,
+                        execute_robot_action,
+                        loco_command_requires_confirm,
+                    )
+                    if a:
+                        ok, msg = execute_robot_action(a)
+                        print(f"[soundboard-play-local] arm={a!r} ok={ok} msg={msg}", flush=True)
+                    if l and not loco_command_requires_confirm(l):
+                        execute_g1_loco_command(l)
+                except Exception as e:
+                    print(f"[soundboard-play-local] robot: {e}", flush=True)
+
+            _thr.Thread(target=_sb_robot, args=(arm, loco), daemon=True).start()
         from talk_module.audio import AudioPlayer
 
         try:
@@ -1092,6 +1099,31 @@ self.addEventListener('activate', () => self.clients.claim());
             return None, "Audio non chiaro. Riprova a parlare piu vicino al microfono."
         return t, ""
 
+    def _run_robot_match_actions(rm) -> str:
+        """Esegue arm/loco da RobotMatch (dataclass) in thread separato; ritorna testo per TTS senza bloccare."""
+        import threading as _thr
+
+        def _fire():
+            try:
+                from talk_module.robot_actions import (
+                    execute_g1_loco_command,
+                    execute_robot_action,
+                    loco_command_requires_confirm,
+                )
+                arm = (rm.arm_action or "").strip()
+                if arm:
+                    ok, msg = execute_robot_action(arm)
+                    print(f"[robot-match] arm={arm!r} ok={ok} msg={msg}", flush=True)
+                loco = (rm.loco_command or "").strip()
+                if loco and not loco_command_requires_confirm(loco):
+                    ok, msg = execute_g1_loco_command(loco)
+                    print(f"[robot-match] loco={loco!r} ok={ok} msg={msg}", flush=True)
+            except Exception as e:
+                print(f"[robot-match] error: {e}", flush=True)
+
+        _thr.Thread(target=_fire, daemon=True).start()
+        return ((rm.response or "").strip() or "Ok")
+
     def _process_audio(audio_bytes: bytes, skip_wake_word: bool = False, format_hint: str = "webm") -> dict:
         """Pipeline: audio -> STT -> LLM -> TTS. skip_wake_word=True per pulsante Parla."""
         t0 = time.perf_counter()
@@ -1147,14 +1179,13 @@ self.addEventListener('activate', () => self.clients.claim());
                 # Routing azioni robot (dare la mano, saluta, teaching)
                 robot_match = None
                 try:
-                    from talk_module.robot_actions import check_robot_action, execute_robot_action
+                    from talk_module.robot_actions import check_robot_action
+
                     robot_match = check_robot_action(prompt)
                 except Exception:
                     pass
                 if robot_match:
-                    resp_text, action_id = robot_match
-                    execute_robot_action(action_id)  # esegue se possibile, ignora errore nella risposta
-                    resp = resp_text
+                    resp = _run_robot_match_actions(robot_match)
                 else:
                     resp = check_knowledge(prompt)
                     if not resp:
@@ -1209,14 +1240,13 @@ self.addEventListener('activate', () => self.clients.claim());
             stt, llm, tts, _, _ = get_services()
             robot_match = None
             try:
-                from talk_module.robot_actions import check_robot_action, execute_robot_action
+                from talk_module.robot_actions import check_robot_action
+
                 robot_match = check_robot_action(prompt.strip())
             except Exception:
                 pass
             if robot_match:
-                resp_text, action_id = robot_match
-                execute_robot_action(action_id)  # esegue se possibile, ignora errore nella risposta
-                resp = resp_text
+                resp = _run_robot_match_actions(robot_match)
             else:
                 resp = check_knowledge(prompt)
                 if not resp:
@@ -2286,6 +2316,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <button type="button" class="client-tab" data-section="robot" onclick="return window.g1ActivateClientSection('robot')"><span class="ct-ic" aria-hidden="true">&#127918;</span><span>Robot</span></button>
       <button type="button" class="client-tab" data-section="info" onclick="return window.g1ActivateClientSection('info')"><span class="ct-ic" aria-hidden="true">&#8505;</span><span>Info</span></button>
     </nav>
+    <div id="persistentMicLevel" style="padding:5px 12px;display:flex;align-items:center;gap:8px;background:rgba(20,184,166,0.05);border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:2px;">
+      <span style="font-size:11px;color:#71717a;white-space:nowrap;">&#127908; Mic</span>
+      <div style="flex:1;height:10px;background:#1e1e2e;border-radius:5px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
+        <div id="persistMicBar" style="width:0%;height:100%;background:#22c55e;transition:width 0.06s;border-radius:5px;"></div>
+      </div>
+      <span id="persistMicLabel" style="font-size:10px;color:#71717a;font-family:monospace;min-width:50px;">--</span>
+    </div>
     <script>
     (function(){
       function closeDrawer(){
@@ -2421,6 +2458,29 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <span id="activeMicDot" style="width:8px;height:8px;border-radius:50%;background:#71717a;flex-shrink:0;"></span>
       <span id="activeMicLabel" style="color:#9ca3af;">Microfono: caricamento...</span>
     </div>
+    <div id="parlaMicPreviewPanel" style="margin:12px 0 0;padding:12px;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2);">
+      <div style="font-size:12px;color:#93c5fd;margin-bottom:6px;font-weight:600;">Livello microfono in tempo reale</div>
+      <p class="hint" id="parlaSetupHintTop" style="margin:0 0 8px;font-size:10px;color:#64748b;line-height:1.4;"><strong>Setup tipico:</strong> microfono su questo telefono (es. DJI Mic Mini), cassa <strong>Bluetooth</strong> accoppiata al telefono — in Soundboard scegli <strong>Browser</strong> e la cassa in <strong>Riproduci su</strong>. Gesti robot: tab Robot, IP <code>192.168.123.161</code> (salvato nel browser).</p>
+      <div id="parlaPreviewDisabledMsg" style="display:none;font-size:11px;color:#f59e0b;margin-bottom:8px;">Seleziona un microfono <strong>Browser</strong> in Dispositivi e consenti l&apos;accesso per vedere il livello qui.</div>
+      <div id="parlaPreviewMeterWrap" style="position:relative;">
+        <div style="position:relative;height:20px;background:#1e1e2e;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
+          <div id="parlaPreviewThresholdLine" style="position:absolute;top:0;bottom:0;width:3px;background:#f97316;z-index:3;opacity:0.9;left:4%;box-shadow:0 0 4px #f97316;"></div>
+          <div id="parlaPreviewBarFill" style="position:relative;height:100%;width:0%;background:linear-gradient(90deg,#22c55e,#84cc16,#eab308);border-radius:8px;transition:width 0.06s linear;z-index:1;"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;flex-wrap:wrap;gap:6px;">
+          <span id="parlaPreviewStatus" style="font-size:11px;color:#a1a1aa;font-family:monospace;">Picco: — · soglia: —</span>
+          <span id="parlaPreviewGate" style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:#27272a;color:#71717a;">—</span>
+        </div>
+      </div>
+      <div style="margin-top:12px;">
+        <label for="micWakeThresholdSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Sensibilità ascolto continuo (soglia invio voce): <strong id="wakeThDisplay">22</strong> <span style="color:#52525b;">(più basso = più sensibile)</span></label>
+        <input type="range" id="micWakeThresholdSlider" min="3" max="45" value="22" style="width:100%;max-width:340px;accent-color:#3b82f6;" />
+      </div>
+      <div style="margin-top:10px;">
+        <label for="micMonitorGainSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Guadagno indicatore (solo barra, non cambia l&apos;audio registrato): <strong id="micGainDisplay">1.0</strong>×</label>
+        <input type="range" id="micMonitorGainSlider" min="0.4" max="4" step="0.1" value="1" style="width:100%;max-width:340px;accent-color:#64748b;" />
+      </div>
+    </div>
   </div>
 
   <!-- 2. PUSH TO TALK -->
@@ -2516,6 +2576,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <button type="button" id="devicesRefresh" style="padding:8px 14px;background:rgba(255,255,255,0.08);color:#e8eaed;border:1px solid rgba(255,255,255,0.12);border-radius:8px;cursor:pointer;font-size:13px;">Aggiorna elenco</button>
       <button type="button" id="devicesSave" style="padding:8px 14px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva configurazione sul server</button>
       <span id="devicesSaveStatus" class="hint" style="margin:0;"></span>
+    </div>
+    <div style="margin-top:16px;padding:12px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;">
+      <label style="display:block;font-size:12px;color:#86efac;font-weight:600;margin-bottom:6px;">Volume risposta TTS (amplificazione browser)</label>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="ttsGainSlider" min="0.5" max="5.0" step="0.1" style="flex:1;accent-color:#22c55e;" />
+        <span id="ttsGainLabel" style="font-size:12px;color:#a1a1aa;font-family:monospace;min-width:40px;">2.5x</span>
+      </div>
+      <p class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;">1.0 = volume originale, 2.5 = default amplificato. Alza se l&apos;audio TTS &egrave; troppo basso su cassa Bluetooth.</p>
     </div>
   </div>
     </section>
@@ -2719,10 +2787,140 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let wakeAudioInFlight = false, wakeQueuedBlob = null;
     let wakeLevelCtx = null, wakeAnalyser = null, wakeLevelSampleInterval = null;
     let wakeSlicePeak = 0;
-    /** Livello 0-255: sotto questa soglia la slice non viene inviata (rumore/stanza silenziosa). */
-    const WAKE_VOICE_THRESHOLD = 11;
+    /** Default soglia voce (0-255 FFT); override con slider e localStorage g1_wake_voice_threshold. */
+    const WAKE_VOICE_THRESHOLD_DEFAULT = 22;
+    function getWakeVoiceThreshold() {
+      try {
+        var raw = localStorage.getItem('g1_wake_voice_threshold');
+        if (raw != null && raw !== '') {
+          var v = parseInt(raw, 10);
+          if (!isNaN(v) && v >= 3 && v <= 45) return v;
+        }
+      } catch (_) {}
+      return WAKE_VOICE_THRESHOLD_DEFAULT;
+    }
+    let parlaPreviewTimer = null;
+    let parlaPreviewCtx = null;
+    let parlaPreviewAnalyser = null;
+    let parlaPreviewStream = null;
+    function getParlaMonitorGain() {
+      try {
+        var g = parseFloat(localStorage.getItem('g1_mic_monitor_gain'));
+        if (!isNaN(g) && g >= 0.4 && g <= 4) return g;
+      } catch (_) {}
+      return 1;
+    }
+    function stopParlaMicPreview() {
+      if (parlaPreviewTimer) { clearInterval(parlaPreviewTimer); parlaPreviewTimer = null; }
+      if (parlaPreviewCtx) {
+        try { parlaPreviewCtx.close(); } catch (_) {}
+        parlaPreviewCtx = null;
+      }
+      parlaPreviewAnalyser = null;
+      if (parlaPreviewStream) {
+        try { parlaPreviewStream.getTracks().forEach(function(t){ try { t.stop(); } catch(_){} }); } catch (_) {}
+        parlaPreviewStream = null;
+      }
+    }
+    function updateParlaThresholdLine() {
+      var line = document.getElementById('parlaPreviewThresholdLine');
+      if (!line) return;
+      var th = getWakeVoiceThreshold();
+      var pct = Math.max(0, Math.min(100, (th / 255) * 100));
+      line.style.left = 'calc(' + pct + '% - 1px)';
+    }
+    (function initParlaMicControls(){
+      var wTh = document.getElementById('micWakeThresholdSlider');
+      var wDisp = document.getElementById('wakeThDisplay');
+      var gSl = document.getElementById('micMonitorGainSlider');
+      var gDisp = document.getElementById('micGainDisplay');
+      if (wTh) {
+        wTh.value = String(getWakeVoiceThreshold());
+        if (wDisp) wDisp.textContent = wTh.value;
+        wTh.addEventListener('input', function(){
+          var v = parseInt(wTh.value, 10);
+          if (isNaN(v)) v = WAKE_VOICE_THRESHOLD_DEFAULT;
+          v = Math.max(3, Math.min(45, v));
+          try { localStorage.setItem('g1_wake_voice_threshold', String(v)); } catch (_) {}
+          if (wDisp) wDisp.textContent = String(v);
+          updateParlaThresholdLine();
+        });
+      }
+      if (gSl) {
+        var gv = getParlaMonitorGain();
+        gSl.value = String(gv);
+        if (gDisp) gDisp.textContent = gv.toFixed(1);
+        gSl.addEventListener('input', function(){
+          var g = parseFloat(gSl.value);
+          if (isNaN(g)) g = 1;
+          g = Math.max(0.4, Math.min(4, g));
+          try { localStorage.setItem('g1_mic_monitor_gain', String(g)); } catch (_) {}
+          if (gDisp) gDisp.textContent = g.toFixed(1);
+        });
+      }
+      updateParlaThresholdLine();
+    })();
+    function startParlaMicPreviewIfEligible() {
+      var sec = document.getElementById('section-parla');
+      if (!sec || !sec.classList.contains('active')) return;
+      stopParlaMicPreview();
+      var micEl = document.getElementById('mic');
+      var micVal = micEl ? micEl.value : '';
+      var wrap = document.getElementById('parlaPreviewMeterWrap');
+      var msg = document.getElementById('parlaPreviewDisabledMsg');
+      var isBrowserMic = micVal && micVal.indexOf('webmic_') === 0;
+      if (!isBrowserMic) {
+        if (wrap) wrap.style.display = 'none';
+        if (msg) {
+          msg.style.display = 'block';
+          msg.innerHTML = 'Microfono attuale: Jetson o rete — il livello qui vale solo per il microfono <strong>Browser</strong> (telefono / DJI Mic).';
+        }
+        return;
+      }
+      if (wrap) wrap.style.display = '';
+      if (msg) msg.style.display = 'none';
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micForBrowserCapture())).then(function(stream){
+        parlaPreviewStream = stream;
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        parlaPreviewCtx = new Ctx();
+        var src = parlaPreviewCtx.createMediaStreamSource(stream);
+        parlaPreviewAnalyser = parlaPreviewCtx.createAnalyser();
+        parlaPreviewAnalyser.fftSize = 512;
+        parlaPreviewAnalyser.smoothingTimeConstant = 0.35;
+        src.connect(parlaPreviewAnalyser);
+        if (parlaPreviewCtx.resume) parlaPreviewCtx.resume();
+        var buf = new Uint8Array(parlaPreviewAnalyser.frequencyBinCount);
+        updateParlaThresholdLine();
+        parlaPreviewTimer = setInterval(function(){
+          if (!parlaPreviewAnalyser) return;
+          var secEl = document.getElementById('section-parla');
+          if (!secEl || !secEl.classList.contains('active')) return;
+          if (isRecording) return;
+          parlaPreviewAnalyser.getByteFrequencyData(buf);
+          var peak = 0;
+          for (var i = 0; i < buf.length; i++) if (buf[i] > peak) peak = buf[i];
+          var th = getWakeVoiceThreshold();
+          var gain = getParlaMonitorGain();
+          var barW = Math.min(100, peak * gain * (100 / 255));
+          var fill = document.getElementById('parlaPreviewBarFill');
+          var st = document.getElementById('parlaPreviewStatus');
+          var gate = document.getElementById('parlaPreviewGate');
+          if (fill) fill.style.width = barW.toFixed(1) + '%';
+          if (st) st.textContent = 'Picco: ' + peak + ' / 255 · soglia invio: ' + th;
+          if (gate) {
+            if (peak >= th) { gate.textContent = 'SOPRA SOGLIA'; gate.style.background = 'rgba(34,197,94,0.25)'; gate.style.color = '#4ade80'; }
+            else { gate.textContent = 'Sotto soglia'; gate.style.background = '#27272a'; gate.style.color = '#71717a'; }
+          }
+          updateParlaThresholdLine();
+        }, 55);
+      }).catch(function(){
+        var m = document.getElementById('parlaPreviewDisabledMsg');
+        if (m) { m.style.display = 'block'; m.textContent = 'Microfono non disponibile: consenti l\\'accesso (Dispositivi) e riprova.'; }
+      });
+    }
     /** Dopo «Hey G1»: se nessun turno utile per questo tempo, torna solo ad ascoltare la wake word. */
-    const WAKE_COMMAND_SILENCE_MS = 26000;
+    const WAKE_COMMAND_SILENCE_MS = 12000;
     /** Dopo startWakeRecorder: programma la prossima slice solo quando il round (risposta+TTS) è finito. */
     let scheduleNextWakeSliceIfListening = function(){};
     /* Slice più lunga = meno tagli a metà frase prima che parta STT/LLM (costa ~2s in più di attesa). */
@@ -2731,35 +2929,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let ttsPlaybackQueue = [];
     let ttsPlaybackBusy = false;
     const TTS_BEFORE_PLAY_GAP_MS = 180;
-    function _sbLabelLooksLikePhoneEarpiece(lab) {
-      var s = String(lab || '').toLowerCase();
-      if (!String(lab || '').trim()) return true;
-      return /earpiece|receiver|auricolare|ear piece|phone call|chiamat|communication|comunicaz|built-?in|built in|handset|phone speaker|altoparlante.{0,16}(telefono|phone|interno|device)/i.test(s);
-    }
-    function _sbLabelLooksLikeBluetoothOrExternal(lab) {
-      var s = String(lab || '').toLowerCase();
-      if (_sbLabelLooksLikePhoneEarpiece(lab)) return false;
-      if (/bluetooth|\bbt\b|wireless|airpods|cuffie|headphone|headset|usb audio|hdmi|dock|car audio|automotive/i.test(s)) return true;
-      return false;
-    }
     /**
-     * Uscita browser per Parla + soundboard: esplicito su #sbOutput; se «Predefinito», stesso device di #speaker
-     * se browser_*; altrimenti sceglie tra le opzioni un'uscita BT/esterna (evita auricolare Android con label vuota).
+     * Uscita browser: solo se esplicita (Soundboard «Riproduci su» o altoparlante Browser non-Predefinito).
+     * Se null → niente setSinkId: il sistema sceglie (su Android spesso la cassa BT se è l’uscita media predefinita).
      */
-    function pickFallbackBrowserSinkIdFromOutputOptions() {
-      var sbOut = document.getElementById('sbOutput');
-      if (!sbOut || !sbOut.options) return null;
-      var bestBt = null, bestLabeled = null;
-      for (var i = 0; i < sbOut.options.length; i++) {
-        var o = sbOut.options[i];
-        if (!o.value || o.value === 'default') continue;
-        var lab = o.text || o.label || '';
-        if (_sbLabelLooksLikePhoneEarpiece(lab)) continue;
-        if (_sbLabelLooksLikeBluetoothOrExternal(lab)) { bestBt = o.value; break; }
-        if (String(lab).trim()) bestLabeled = bestLabeled || o.value;
-      }
-      return bestBt || bestLabeled || null;
-    }
     function resolveBrowserPlaybackSinkIdLikeSoundboard() {
       var sbOut = document.getElementById('sbOutput');
       if (sbOut && sbOut.value && sbOut.value !== 'default') return sbOut.value;
@@ -2769,7 +2942,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (v && v.indexOf('browser_') === 0 && v !== 'browser_default')
           return v.replace(/^browser_/, '');
       }
-      return pickFallbackBrowserSinkIdFromOutputOptions();
+      return null;
     }
     function applySinkThenPlay(audio, sinkId) {
       var p = Promise.resolve();
@@ -2782,7 +2955,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (!sd) return;
       var arm = (sd.robot_arm && String(sd.robot_arm).trim()) || '';
       var loco = (sd.robot_loco && String(sd.robot_loco).trim()) || '';
-      if (!arm && !loco) return;
+      if (!arm && !loco) arm = 'face_wave';
       var ip = '192.168.123.161';
       try {
         var ls = localStorage.getItem('g1_robot_ip');
@@ -2837,6 +3010,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       ttsPlaybackQueue.push({ b64: String(b64), onEnded: onPlaybackFullyEnded });
       pumpTtsPlaybackQueue();
     }
+    var _ttsGainValue = parseFloat(localStorage.getItem('g1_tts_gain') || '2.5');
+    function getTtsGain() { return _ttsGainValue; }
+    function setTtsGain(v) { _ttsGainValue = v; localStorage.setItem('g1_tts_gain', String(v)); }
     function pumpTtsPlaybackQueue() {
       if (ttsPlaybackBusy) return;
       if (ttsPlaybackQueue.length === 0) return;
@@ -2844,29 +3020,63 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const item = ttsPlaybackQueue.shift();
       setTimeout(function() {
         try {
-          const audio = new Audio('data:audio/mpeg;base64,' + item.b64);
-          var ttsSink = resolveBrowserPlaybackSinkIdLikeSoundboard();
-          audio.onended = function() {
-            ttsPlaybackBusy = false;
-            if (item.onEnded) item.onEnded();
-            pumpTtsPlaybackQueue();
-          };
-          audio.onerror = function() {
-            ttsPlaybackBusy = false;
-            if (item.onEnded) item.onEnded();
-            pumpTtsPlaybackQueue();
-          };
-          applySinkThenPlay(audio, ttsSink).catch(function() {
-            ttsPlaybackBusy = false;
-            if (item.onEnded) item.onEnded();
-            pumpTtsPlaybackQueue();
-          });
+          var gain = getTtsGain();
+          if (gain > 1.05 && window.AudioContext) {
+            var raw = atob(item.b64);
+            var buf = new Uint8Array(raw.length);
+            for (var i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+            var ctx = new AudioContext();
+            ctx.decodeAudioData(buf.buffer, function(decoded) {
+              var src = ctx.createBufferSource();
+              src.buffer = decoded;
+              var gn = ctx.createGain();
+              gn.gain.value = gain;
+              src.connect(gn);
+              gn.connect(ctx.destination);
+              src.onended = function() {
+                ctx.close().catch(function(){});
+                ttsPlaybackBusy = false;
+                if (item.onEnded) item.onEnded();
+                pumpTtsPlaybackQueue();
+              };
+              src.start(0);
+            }, function() {
+              _pumpTtsFallback(item);
+            });
+          } else {
+            _pumpTtsFallback(item);
+          }
         } catch(_) {
           ttsPlaybackBusy = false;
           if (item.onEnded) item.onEnded();
           pumpTtsPlaybackQueue();
         }
       }, TTS_BEFORE_PLAY_GAP_MS);
+    }
+    function _pumpTtsFallback(item) {
+      try {
+        const audio = new Audio('data:audio/mpeg;base64,' + item.b64);
+        var ttsSink = resolveBrowserPlaybackSinkIdLikeSoundboard();
+        audio.onended = function() {
+          ttsPlaybackBusy = false;
+          if (item.onEnded) item.onEnded();
+          pumpTtsPlaybackQueue();
+        };
+        audio.onerror = function() {
+          ttsPlaybackBusy = false;
+          if (item.onEnded) item.onEnded();
+          pumpTtsPlaybackQueue();
+        };
+        applySinkThenPlay(audio, ttsSink).catch(function() {
+          ttsPlaybackBusy = false;
+          if (item.onEnded) item.onEnded();
+          pumpTtsPlaybackQueue();
+        });
+      } catch(_) {
+        ttsPlaybackBusy = false;
+        if (item.onEnded) item.onEnded();
+        pumpTtsPlaybackQueue();
+      }
     }
     function clearTtsPlaybackQueue() {
       ttsPlaybackQueue = [];
@@ -3045,7 +3255,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         const b64 = arrayBufferToBase64(fr.result);
         try {
           startThinkingFeedback();
-          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: !wakeCommandMode });
+          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: wakeCommandMode });
         } catch(_){
           wakeListenPending = false;
           wakeAudioInFlight = false;
@@ -3193,6 +3403,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         return;
       }
       try {
+        stopParlaMicPreview();
         wakeRawStream = await navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micForBrowserCapture()));
         startWakeSpeechEnhancer();
       } catch(e) {
@@ -3236,7 +3447,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (wakeLevelSampleInterval) { clearInterval(wakeLevelSampleInterval); wakeLevelSampleInterval = null; }
           if (!wakeListenActive) return;
           const blob = new Blob(ch, { type: wakeMimeType });
-          const voiced = !wakeAnalyser || wakeSlicePeak >= WAKE_VOICE_THRESHOLD;
+          const voiced = !wakeAnalyser || wakeSlicePeak >= getWakeVoiceThreshold();
           if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob);
           else scheduleNextWakeSliceIfListening();
           /* La prossima slice dopo risposta+TTS: onWakeResponseDone, oppure subito se slice silenziosa (nessun invio). */
@@ -3267,6 +3478,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           resetWakeCommandMode();
           const st = document.getElementById('wakeListenStatus');
           if (st) st.textContent = 'Disattivato';
+          setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 300);
         }
         var wtl = document.getElementById('wakeToggleLabel');
         if (wtl) wtl.textContent = wakeListenToggleEl.checked ? 'ON' : 'OFF';
@@ -3525,7 +3737,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         });
         micHtml += '</optgroup>';
         micSel.innerHTML = micHtml;
-        micSel.onchange = function(){ updateActiveMicIndicator(); };
+        micSel.onchange = function(){
+          updateActiveMicIndicator();
+          setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 80);
+        };
 
         const ss = (serverData.speakers || []).filter(function(s){
           return s && (s.type === 'local' || (s.value && String(s.value).indexOf('local_') === 0));
@@ -3642,6 +3857,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           .catch(function(e){ if (st) st.textContent = 'Errore: '+(e.message||String(e)); });
       };
     })();
+    (function(){
+      var sl = document.getElementById('ttsGainSlider');
+      var lb = document.getElementById('ttsGainLabel');
+      if (sl) {
+        sl.value = getTtsGain();
+        lb.textContent = getTtsGain().toFixed(1) + 'x';
+        sl.addEventListener('input', function(){ var v = parseFloat(sl.value); setTtsGain(v); lb.textContent = v.toFixed(1) + 'x'; });
+      }
+    })();
     if (navigator.mediaDevices) {
       if (isLocalhost) {
         loadDevices();
@@ -3722,6 +3946,21 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         applySinkThenPlay(a, sinkId).catch(function(){});
       }
       if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
+        var arm0 = (s.robot_arm && String(s.robot_arm).trim()) || '';
+        var loco0 = (s.robot_loco && String(s.robot_loco).trim()) || '';
+        if ((!arm0 && !loco0) && typeof slotIndex === 'number') {
+          fetch('/api/soundboard-slot/'+slotIndex).then(function(r){
+            if (!r.ok) return Promise.resolve(s);
+            return r.json();
+          }).then(function(full){
+            var merged = Object.assign({}, s, {
+              robot_arm: (full && full.robot_arm) ? String(full.robot_arm) : '',
+              robot_loco: (full && full.robot_loco) ? String(full.robot_loco) : ''
+            });
+            playFromData(merged);
+          }).catch(function(){ playFromData(s); });
+          return;
+        }
         playFromData(s);
         return;
       }
@@ -3811,6 +4050,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             if (!soundboardSlots.length) { sbLoadLiteSlots(); }
             else if (typeof window.renderSoundboard === 'function') { window.renderSoundboard(); }
           }, 0);
+        }
+        if (sec === 'parla') {
+          setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 120);
+        } else {
+          if (typeof stopParlaMicPreview === 'function') stopParlaMicPreview();
         }
         return false;
       };
@@ -4130,6 +4374,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       const deviceId = wantServerTts ? serverTtsDeviceId : null;
       try {
+        stopParlaMicPreview();
         const stream = await navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micForBrowserCapture()));
         if(pendingStop){ stream.getTracks().forEach(t=>t.stop()); isRecording=false; return; }
         currentStream = stream;
@@ -4150,11 +4395,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if(dur < MIN_REC_MS){
             document.getElementById('recDebug').textContent = 'Troppo breve ('+Math.round(dur/100)+' decimi sec). Tieni premuto 1-2 secondi.';
             document.getElementById('recDebug').style.color = '#f59e0b';
+            setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 200);
             return;
           }
           setTimeout(function(){
             sendAudio(lastPlayOn, deviceId);
             if (document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) setTimeout(function(){ startWakeRecorder(); }, 400);
+            setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 350);
           }, 80);
         };
         mediaRecorder.onerror = (e) => {
@@ -4338,6 +4585,81 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (monActive) stopMonitor();
         else startMonitor();
       };
+    })();
+
+    /* ---- Persistent Mic Level (always visible above tabs) ---- */
+    (function(){
+      var _pmWs = null;
+      var _pmTimer = null;
+      var _pmSource = null;
+
+      function pmUpdateFromBrowser() {
+        var bar = document.getElementById('persistMicBar');
+        var lbl = document.getElementById('persistMicLabel');
+        if (!bar) return;
+        var an = analyserNode || parlaPreviewAnalyser || wakeAnalyser || null;
+        if (!an) {
+          bar.style.width = '0%';
+          if (lbl) lbl.textContent = '--';
+          return;
+        }
+        var buf = new Uint8Array(an.frequencyBinCount);
+        an.getByteFrequencyData(buf);
+        var peak = 0;
+        for (var i = 0; i < buf.length; i++) if (buf[i] > peak) peak = buf[i];
+        var gain = typeof getParlaMonitorGain === 'function' ? getParlaMonitorGain() : 1;
+        var pct = Math.min(100, peak * gain * (100 / 255));
+        bar.style.width = pct.toFixed(1) + '%';
+        bar.style.background = peak > 128 ? '#ef4444' : peak > 50 ? '#22c55e' : peak > 13 ? '#eab308' : '#52525b';
+        if (lbl) lbl.textContent = peak > 5 ? (pct|0) + '%' : '--';
+      }
+
+      function pmStartServerWs() {
+        if (_pmWs && _pmWs.readyState <= 1) return;
+        var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        _pmWs = new WebSocket(proto + '//' + location.host + '/ws/mic-level');
+        _pmWs.onmessage = function(ev) {
+          try {
+            var d = JSON.parse(ev.data);
+            if (d.type === 'level') {
+              var bar = document.getElementById('persistMicBar');
+              var lbl = document.getElementById('persistMicLabel');
+              if (bar) {
+                var pct = Math.max(0, Math.min(100, ((d.db + 60) / 60) * 100));
+                bar.style.width = pct.toFixed(1) + '%';
+                bar.style.background = d.peak > 0.5 ? '#ef4444' : d.rms > 0.02 ? '#22c55e' : d.rms > 0.005 ? '#eab308' : '#52525b';
+              }
+              if (lbl) lbl.textContent = d.rms > 0.01 ? (pct|0) + '%' : '--';
+            }
+          } catch(_){}
+        };
+        _pmWs.onclose = function() { _pmWs = null; _pmSource = null; };
+        _pmWs.onerror = function() { try { _pmWs.close(); } catch(_){} _pmWs = null; _pmSource = null; };
+      }
+
+      function pmStopServerWs() {
+        if (_pmWs) { try { _pmWs.close(); } catch(_){} _pmWs = null; }
+        _pmSource = null;
+      }
+
+      _pmTimer = setInterval(function() {
+        var micEl = document.getElementById('mic');
+        var micVal = micEl ? micEl.value : '';
+        var isLocal = micVal && micVal.indexOf('local_') === 0;
+
+        if (isLocal) {
+          if (_pmSource !== 'server') {
+            _pmSource = 'server';
+            pmStartServerWs();
+          } else if (!_pmWs || _pmWs.readyState > 1) {
+            pmStartServerWs();
+          }
+          return;
+        }
+        if (_pmSource === 'server') { pmStopServerWs(); }
+        _pmSource = 'browser';
+        pmUpdateFromBrowser();
+      }, 60);
     })();
   </script>
 </body>
@@ -4566,15 +4888,19 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
 .gesture-btn.release:active{background:#ef444430;border-color:#ef4444;}
 .gesture-btn.special{border-color:#6366f140;background:#6366f110;}
 .gesture-btn.special:active{background:#6366f130;border-color:#6366f1;}
-.joystick-area{display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap;padding:14px 12px 20px;margin-top:8px;background:#111318;border:1px solid #27272a;border-radius:12px;touch-action:manipulation;}
-.joy-wrap{position:relative;width:160px;height:160px;flex-shrink:0;touch-action:none;}
+.joystick-area{display:flex;align-items:flex-start;justify-content:center;gap:12px;flex-wrap:nowrap;padding:14px 8px 20px;margin-top:8px;background:#111318;border:1px solid #27272a;border-radius:12px;touch-action:manipulation;}
+.joy-col{display:flex;flex-direction:column;align-items:center;gap:6px;}
+.joy-col-label{font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:#71717a;font-weight:600;}
+.joy-wrap{position:relative;width:140px;height:140px;flex-shrink:0;touch-action:none;}
 .joy-base{position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle,#1e1e2e 0%,#18181b 100%);border:2px solid #27272a;}
-.joy-stick{position:absolute;width:60px;height:60px;border-radius:50%;background:radial-gradient(circle,#2dd4bf 0%,#14b8a6 100%);box-shadow:0 0 12px #14b8a640;left:50%;top:50%;transform:translate(-50%,-50%);transition:none;pointer-events:none;}
-.joy-info{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#71717a;font-family:monospace;}
+.joy-stick{position:absolute;width:52px;height:52px;border-radius:50%;background:radial-gradient(circle,#2dd4bf 0%,#14b8a6 100%);box-shadow:0 0 12px #14b8a640;left:50%;top:50%;transform:translate(-50%,-50%);transition:none;pointer-events:none;}
+.joy-stick.rot{background:radial-gradient(circle,#a78bfa 0%,#7c3aed 100%);box-shadow:0 0 12px #7c3aed40;}
+.joy-info{display:flex;flex-direction:column;gap:4px;font-size:11px;color:#71717a;font-family:monospace;text-align:center;}
 .joy-info span{color:#e4e4e7;}
-.speed-wrap{display:flex;flex-direction:column;gap:4px;align-items:flex-start;}
+.speed-wrap{display:flex;flex-direction:column;gap:4px;align-items:center;}
 .speed-wrap label{font-size:10px;color:#71717a;}
-.speed-wrap input[type=range]{width:100px;accent-color:#14b8a6;}
+.speed-wrap input[type=range]{width:110px;accent-color:#14b8a6;}
+.joy-settings{display:flex;flex-direction:column;gap:8px;align-items:center;justify-content:center;min-width:80px;}
 .quick-btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
 .quick-btn{padding:8px 14px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent;}
 .quick-btn:active{background:#14b8a630;border-color:#14b8a6;}
@@ -4614,25 +4940,36 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
     <div class="log-area" id="logArea"></div>
   </div>
   <div class="joystick-area">
-    <div class="joy-wrap" id="joyWrap">
-      <div class="joy-base"></div>
-      <div class="joy-stick" id="joyStick"></div>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:10px;">
+    <div class="joy-col">
+      <div class="joy-col-label">Movimento</div>
+      <div class="joy-wrap" id="joyMoveWrap">
+        <div class="joy-base"></div>
+        <div class="joy-stick" id="joyMoveStick"></div>
+      </div>
       <div class="joy-info">
-        <div>vx: <span id="jVx">0.00</span></div>
-        <div>vy: <span id="jVy">0.00</span></div>
-        <div>vyaw: <span id="jVyaw">0.00</span></div>
+        <div>vx: <span id="jVx">0.00</span> &nbsp; vy: <span id="jVy">0.00</span></div>
       </div>
+    </div>
+    <div class="joy-settings">
       <div class="speed-wrap">
-        <label>Velocit&agrave; max</label>
+        <label>Vel. max</label>
         <input type="range" id="speedMax" min="0.1" max="1.5" step="0.1" value="0.5" />
-        <span style="font-size:11px;color:#a1a1aa;" id="speedLabel">0.5 m/s</span>
+        <span style="font-size:11px;color:#a1a1aa;" id="speedLabel">0.5</span>
       </div>
       <div class="speed-wrap">
-        <label>Rotazione max</label>
+        <label>Rot. max</label>
         <input type="range" id="yawMax" min="0.2" max="2.0" step="0.1" value="0.8" />
-        <span style="font-size:11px;color:#a1a1aa;" id="yawLabel">0.8 rad/s</span>
+        <span style="font-size:11px;color:#a1a1aa;" id="yawLabel">0.8</span>
+      </div>
+    </div>
+    <div class="joy-col">
+      <div class="joy-col-label">Rotazione</div>
+      <div class="joy-wrap" id="joyRotWrap">
+        <div class="joy-base"></div>
+        <div class="joy-stick rot" id="joyRotStick"></div>
+      </div>
+      <div class="joy-info">
+        <div>vyaw: <span id="jVyaw">0.00</span></div>
       </div>
     </div>
   </div>
@@ -4725,57 +5062,18 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
     el.textContent = s === 'ok' ? 'OK' : s === 'err' ? 'ERR' : '--';
   }
 
-  // Joystick touch
-  var joyWrap = document.getElementById('joyWrap');
-  var joyStick = document.getElementById('joyStick');
-  var jVx = document.getElementById('jVx');
-  var jVy = document.getElementById('jVy');
-  var jVyaw = document.getElementById('jVyaw');
   var speedSlider = document.getElementById('speedMax');
   var yawSlider = document.getElementById('yawMax');
   var speedLabel = document.getElementById('speedLabel');
   var yawLabel = document.getElementById('yawLabel');
-  speedSlider.addEventListener('input', function(){ speedLabel.textContent = parseFloat(this.value).toFixed(1) + ' m/s'; });
-  yawSlider.addEventListener('input', function(){ yawLabel.textContent = parseFloat(this.value).toFixed(1) + ' rad/s'; });
+  speedSlider.addEventListener('input', function(){ speedLabel.textContent = parseFloat(this.value).toFixed(1); });
+  yawSlider.addEventListener('input', function(){ yawLabel.textContent = parseFloat(this.value).toFixed(1); });
 
-  var joyActive = false, joyId = null;
+  var jVx = document.getElementById('jVx');
+  var jVy = document.getElementById('jVy');
+  var jVyaw = document.getElementById('jVyaw');
   var curVx = 0, curVy = 0, curVyaw = 0;
   var moveInterval = null;
-
-  function getJoyCenter(){
-    var r = joyWrap.getBoundingClientRect();
-    return {x: r.left + r.width/2, y: r.top + r.height/2, radius: r.width/2 - 30};
-  }
-
-  function updateJoy(cx, cy){
-    var c = getJoyCenter();
-    var dx = cx - c.x;
-    var dy = cy - c.y;
-    var dist = Math.sqrt(dx*dx + dy*dy);
-    var maxR = c.radius;
-    if (dist > maxR) { dx = dx/dist*maxR; dy = dy/dist*maxR; dist = maxR; }
-    joyStick.style.transform = 'translate(calc(-50% + '+dx+'px), calc(-50% + '+dy+'px))';
-    var norm = dist / maxR;
-    var sMax = parseFloat(speedSlider.value);
-    var yMax = parseFloat(yawSlider.value);
-    // Y-axis (up) = forward (vx positive), X-axis (right) = rotation (vyaw negative = turn right)
-    curVx = -dy / maxR * sMax;
-    curVy = 0;
-    curVyaw = -dx / maxR * yMax;
-    curVx = Math.round(curVx * 100) / 100;
-    curVyaw = Math.round(curVyaw * 100) / 100;
-    jVx.textContent = curVx.toFixed(2);
-    jVy.textContent = curVy.toFixed(2);
-    jVyaw.textContent = curVyaw.toFixed(2);
-  }
-
-  function resetJoy(){
-    joyStick.style.transform = 'translate(-50%,-50%)';
-    curVx = 0; curVy = 0; curVyaw = 0;
-    jVx.textContent = '0.00'; jVy.textContent = '0.00'; jVyaw.textContent = '0.00';
-    sendMove(0, 0, 0);
-    if (moveInterval) { clearInterval(moveInterval); moveInterval = null; }
-  }
 
   function startSending(){
     if (moveInterval) return;
@@ -4785,38 +5083,79 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
       }
     }, 200);
   }
+  function stopSendingIfIdle(){
+    if (Math.abs(curVx) < 0.01 && Math.abs(curVy) < 0.01 && Math.abs(curVyaw) < 0.01) {
+      if (moveInterval) { clearInterval(moveInterval); moveInterval = null; }
+      sendMove(0, 0, 0);
+    }
+  }
 
-  joyWrap.addEventListener('touchstart', function(e){
-    e.preventDefault();
-    var t = e.changedTouches[0];
-    joyId = t.identifier;
-    joyActive = true;
-    updateJoy(t.clientX, t.clientY);
-    startSending();
-  }, {passive:false});
-
-  joyWrap.addEventListener('touchmove', function(e){
-    e.preventDefault();
-    for (var i = 0; i < e.changedTouches.length; i++) {
-      if (e.changedTouches[i].identifier === joyId) {
-        updateJoy(e.changedTouches[i].clientX, e.changedTouches[i].clientY);
-        break;
+  function makeJoystick(wrapId, stickId, onUpdate, onRelease) {
+    var wrap = document.getElementById(wrapId);
+    var stick = document.getElementById(stickId);
+    var touchId = null, active = false;
+    function center() {
+      var r = wrap.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, radius: r.width / 2 - 26 };
+    }
+    function move(cx, cy) {
+      var c = center();
+      var dx = cx - c.x, dy = cy - c.y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      var maxR = c.radius;
+      if (dist > maxR) { dx = dx / dist * maxR; dy = dy / dist * maxR; }
+      stick.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px))';
+      onUpdate(dx / maxR, -dy / maxR);
+    }
+    function reset() {
+      stick.style.transform = 'translate(-50%,-50%)';
+      onRelease();
+    }
+    wrap.addEventListener('touchstart', function(e) {
+      e.preventDefault();
+      var t = e.changedTouches[0];
+      touchId = t.identifier; active = true;
+      move(t.clientX, t.clientY); startSending();
+    }, { passive: false });
+    wrap.addEventListener('touchmove', function(e) {
+      e.preventDefault();
+      for (var i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === touchId) { move(e.changedTouches[i].clientX, e.changedTouches[i].clientY); break; }
       }
-    }
-  }, {passive:false});
+    }, { passive: false });
+    wrap.addEventListener('touchend', function(e) {
+      for (var i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === touchId) { active = false; touchId = null; reset(); break; }
+      }
+    });
+    wrap.addEventListener('touchcancel', function() { active = false; touchId = null; reset(); });
+    var md = false;
+    wrap.addEventListener('mousedown', function(e) { md = true; move(e.clientX, e.clientY); startSending(); e.preventDefault(); });
+    document.addEventListener('mousemove', function(e) { if (md) move(e.clientX, e.clientY); });
+    document.addEventListener('mouseup', function() { if (md) { md = false; reset(); } });
+  }
 
-  joyWrap.addEventListener('touchend', function(e){
-    for (var i = 0; i < e.changedTouches.length; i++) {
-      if (e.changedTouches[i].identifier === joyId) { joyActive = false; joyId = null; resetJoy(); break; }
-    }
+  makeJoystick('joyMoveWrap', 'joyMoveStick', function(nx, ny) {
+    var sMax = parseFloat(speedSlider.value);
+    curVx = Math.round(ny * sMax * 100) / 100;
+    curVy = Math.round(-nx * sMax * 100) / 100;
+    jVx.textContent = curVx.toFixed(2);
+    jVy.textContent = curVy.toFixed(2);
+  }, function() {
+    curVx = 0; curVy = 0;
+    jVx.textContent = '0.00'; jVy.textContent = '0.00';
+    stopSendingIfIdle();
   });
-  joyWrap.addEventListener('touchcancel', function(){ joyActive = false; joyId = null; resetJoy(); });
 
-  // Mouse fallback (desktop)
-  var mouseDown = false;
-  joyWrap.addEventListener('mousedown', function(e){ mouseDown = true; updateJoy(e.clientX, e.clientY); startSending(); e.preventDefault(); });
-  document.addEventListener('mousemove', function(e){ if (mouseDown) updateJoy(e.clientX, e.clientY); });
-  document.addEventListener('mouseup', function(){ if (mouseDown) { mouseDown = false; resetJoy(); } });
+  makeJoystick('joyRotWrap', 'joyRotStick', function(nx, ny) {
+    var yMax = parseFloat(yawSlider.value);
+    curVyaw = Math.round(-nx * yMax * 100) / 100;
+    jVyaw.textContent = curVyaw.toFixed(2);
+  }, function() {
+    curVyaw = 0;
+    jVyaw.textContent = '0.00';
+    stopSendingIfIdle();
+  });
 })();
 </script>
 </body>
@@ -4852,6 +5191,16 @@ def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False,
     except Exception:
         pass
     import uvicorn
+    try:
+        from talk_module.robot_actions import _dds_interface_for_init
+
+        print(
+            f"[Robot] DDS iface (effective): {_dds_interface_for_init()!r}  "
+            f"UNITREE_ROBOT_IP={os.getenv('UNITREE_ROBOT_IP', '192.168.123.161')!r}",
+            flush=True,
+        )
+    except Exception:
+        pass
     proto = "https" if ssl_keyfile else "http"
     print(f"G1 Talk Module - {proto}://{host}:{port}")
     print("  Setup dispositivi Jetson: /setup")
