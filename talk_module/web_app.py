@@ -166,6 +166,30 @@ def _save_debug_audio(audio_bytes: bytes) -> str | None:
         return None
 
 
+_WAKE_DEBUG_DIR = settings.audio_dir / "wake_debug"
+_WAKE_DEBUG_MAX = 50
+
+
+def _save_wake_debug_audio(audio_bytes: bytes, stt_text: str, kind: str) -> str | None:
+    """Salva ogni slice wake con timestamp + trascrizione per debug. Max 50 file, poi ruota."""
+    try:
+        from datetime import datetime
+        settings.ensure_dirs()
+        _WAKE_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
+        safe_text = re.sub(r'[^\w\s-]', '', (stt_text or 'empty')[:40]).strip().replace(' ', '_') or 'empty'
+        fname = f"{ts}_{kind}_{safe_text}.webm"
+        out = _WAKE_DEBUG_DIR / fname
+        out.write_bytes(audio_bytes)
+        existing = sorted(_WAKE_DEBUG_DIR.glob("*.webm"), key=lambda p: p.stat().st_mtime)
+        while len(existing) > _WAKE_DEBUG_MAX:
+            existing.pop(0).unlink(missing_ok=True)
+        return str(out.name)
+    except Exception as e:
+        print(f"[Wake] debug audio save error: {e}", flush=True)
+        return None
+
+
 def _save_sample_audio(audio_bytes: bytes) -> Path | None:
     """Salva ultimo campione vocale per riuso (es. 'pronto pronto pronto'). Sovrascrive."""
     try:
@@ -183,6 +207,7 @@ def _find_wake_and_rest(t: str) -> tuple[Optional[str], str]:
     Ascolto continuo: rileva wake (Hey G1, G1, G one, gi one, Mark one, …).
     Ritorna (resto dopo wake, kind) con kind: miss | ack | ok.
     rest None se miss; stringa vuota se solo wake; altrimenti testo comando.
+    Gestisce varianti Whisper: giuno, gi uno, di uno, gì uno, sei di uno, etc.
     """
     if not t or not t.strip():
         return None, "miss"
@@ -190,9 +215,28 @@ def _find_wake_and_rest(t: str) -> tuple[Optional[str], str]:
     low = s.lower()
     if any(h in low for h in ("sottotitoli", "amara.org", "amara ", "qtss", "subtitle", "created by", "a cura di")):
         return None, "miss"
-    # Varianti STT: g1, g one, gi one, jee one, ji one, mark one, j1, g-1 (expanded for Whisper hallucinations)
-    wake_core = r"(?:g[\s\-]*1|\bg1\b|g[\s\-]*one|gi[\s\-]*one|ji[\s\-]*one|jee[\s\-]*one|mark[\s\-]*one|markone|j[\s\-]*1)"
-    m = re.search(rf"(?:hey|ehi|ei|e)\s*[,.\s]*\s*{wake_core}\s*[,.\s]*", s, re.IGNORECASE)
+    # Varianti STT: g1, g one, gi one, giuno, di uno, gì uno, jee one, ji one, mark one, j1, g-1
+    wake_core = (
+        r"(?:"
+        r"g[\s\-]*1"            # g1, g 1, g-1
+        r"|\bg1\b"              # g1
+        r"|g[\s\-]*one"         # g one
+        r"|gi[\s\-]*one"        # gi one
+        r"|giuno"               # giuno (attached)
+        r"|gì[\s\-]*one"       # gì one (accented)
+        r"|gì[\s\-]*uno"       # gì uno
+        r"|gi[\s\-]*uno"        # gi uno
+        r"|di[\s\-]*uno"        # di uno (Whisper mishearing)
+        r"|ji[\s\-]*one"        # ji one
+        r"|jee[\s\-]*one"       # jee one
+        r"|mark[\s\-]*one"      # mark one
+        r"|markone"             # markone
+        r"|j[\s\-]*1"           # j1
+        r")"
+    )
+    # Prefissi wake: hey, ehi, ei, e, sei (Whisper trascrive "sei di uno" per "ehi G1")
+    wake_prefix = r"(?:hey|ehi|ei|e|sei)\s*[,.\s]*\s*"
+    m = re.search(rf"{wake_prefix}{wake_core}\s*[,.\s]*", s, re.IGNORECASE)
     if m:
         rest = s[m.end() :].strip().lstrip(",.; ")
         if not rest:
@@ -371,6 +415,29 @@ self.addEventListener('activate', () => self.clients.claim());
     @app.get("/api/health")
     def health():
         return {"status": "ok", "host": "AI Accelerator"}
+
+    @app.get("/api/wake-debug")
+    def api_wake_debug_list():
+        """Lista file audio wake debug con trascrizione (dal nome file)."""
+        d = _WAKE_DEBUG_DIR
+        if not d.exists():
+            return {"files": []}
+        files = sorted(d.glob("*.webm"), key=lambda p: p.stat().st_mtime, reverse=True)
+        result = []
+        for f in files[:_WAKE_DEBUG_MAX]:
+            result.append({"name": f.name, "size": f.stat().st_size, "url": f"/api/wake-debug/{f.name}"})
+        return {"files": result}
+
+    @app.get("/api/wake-debug/{filename}")
+    def api_wake_debug_file(filename: str):
+        """Scarica un file audio wake debug."""
+        from fastapi.responses import Response
+        safe = Path(filename).name
+        fp = _WAKE_DEBUG_DIR / safe
+        if not fp.exists() or not fp.is_file():
+            raise HTTPException(404, "File not found")
+        return Response(content=fp.read_bytes(), media_type="audio/webm",
+                        headers={"Content-Disposition": f'inline; filename="{safe}"'})
 
     @app.get("/api/version")
     def api_version():
@@ -1192,7 +1259,10 @@ self.addEventListener('activate', () => self.clients.claim());
         _thr.Thread(target=_fire, daemon=True).start()
         return ((rm.response or "").strip() or "Ok")
 
-    WAKE_STT_PROMPT = "Italiano. Trascrivi solo parole effettivamente pronunciate."
+    WAKE_STT_PROMPT = (
+        "Italiano. Vocabolario: G1, G One, Gi One, Hey G1, Ehi G1. "
+        "Trascrivi solo parole effettivamente pronunciate, non inventare frasi."
+    )
 
     def _stt_and_wake_check(audio_bytes: bytes, format_hint: str = "webm") -> dict:
         """STT + wake word detection. Always returns wake_ack on any wake detection
@@ -1210,18 +1280,10 @@ self.addEventListener('activate', () => self.clients.claim());
                 prompt=WAKE_STT_PROMPT,
             )
             if not raw_text or not raw_text.strip():
+                _save_wake_debug_audio(audio_bytes, "", "silence")
                 return {"text": raw_text or "", "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
             rest, wkind = _find_wake_and_rest(raw_text)
-            txt_clean = raw_text.strip()
-            # Anti-hallucination: reject wake if transcript is suspiciously short
-            # or matches known Whisper ghost patterns (no real speech)
-            _GHOST = ("hey g1", "ehi g1", "g1", "g one", "gi one", "hey g one", "hey g 1")
-            if wkind != "miss" and txt_clean.lower().rstrip(".,;!? ") in _GHOST and len(txt_clean) < 12:
-                print(f"[Wake] REJECT reason=ghost_hallucination raw={raw_text!r} ({_ms()}ms)", flush=True)
-                return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
-            if wkind != "miss" and len(txt_clean) < 3:
-                print(f"[Wake] REJECT reason=too_short raw={raw_text!r} ({_ms()}ms)", flush=True)
-                return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
+            _save_wake_debug_audio(audio_bytes, raw_text.strip(), wkind)
             print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r} ({_ms()}ms)", flush=True)
             if wkind == "miss":
                 return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
