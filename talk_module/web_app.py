@@ -3376,8 +3376,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               src.buffer = decoded;
               var gn = ctx.createGain();
               gn.gain.value = gain;
+              var limiter = ctx.createDynamicsCompressor();
+              limiter.threshold.value = -3;
+              limiter.knee.value = 6;
+              limiter.ratio.value = 20;
+              limiter.attack.value = 0.002;
+              limiter.release.value = 0.05;
               src.connect(gn);
-              gn.connect(ctx.destination);
+              gn.connect(limiter);
+              limiter.connect(ctx.destination);
               src.onended = function() {
                 ctx.close().catch(function(){});
                 ttsPlaybackBusy = false;
@@ -3642,15 +3649,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         } catch(__){ wakeAnalyser = null; }
       }
     }
+    var WAKE_POST_TTS_PAUSE_MS = 1200;
     function onWakeResponseDone(){
       if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
       wakeAudioInFlight = false;
-      if (wakeQueuedBlob && wakeQueuedBlob.blob && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) {
-        const q = wakeQueuedBlob;
-        wakeQueuedBlob = null;
-        trySendWakeChunk(q.blob, q.skipWake);
-      }
-      scheduleNextWakeSliceIfListening();
+      wakeQueuedBlob = null;
+      setTimeout(function(){
+        scheduleNextWakeSliceIfListening();
+      }, WAKE_POST_TTS_PAUSE_MS);
     }
     let wakeResponseTimeout = null;
     function trySendWakeChunk(blob, skipWakeForBlob){
