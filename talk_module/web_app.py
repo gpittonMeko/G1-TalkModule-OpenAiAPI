@@ -2035,7 +2035,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <p style="margin:8px 0;"><a href="/local" style="display:inline-block;padding:12px 20px;background:#14b8a6;color:#0c0e14;border-radius:8px;text-decoration:none;font-weight:600;">Parla</a> <span class="hint">— Tieni premuto, parla, rilascia. Mic e cuffie sull’AI Accelerator.</span></p>
     <p style="margin:8px 0;"><a href="/listen" style="display:inline-block;padding:12px 20px;background:#14b8a6;color:#0c0e14;border-radius:8px;text-decoration:none;font-weight:600;">Ascolto</a> <span class="hint">— Di’ «Hey G1» + domanda. Mic e cuffie sull’AI Accelerator.</span></p>
     <p style="margin:8px 0;"><a href="/client" style="display:inline-block;padding:12px 20px;background:rgba(255,255,255,0.1);color:#e8eaed;border-radius:8px;text-decoration:none;font-weight:600;">Client rete</a> <span class="hint">— Apri su telefono/tablet: userai mic e cuffie di quel dispositivo.</span></p>
-    <p style="margin:8px 0;"><a href="/robot-control" style="display:inline-block;padding:12px 20px;background:rgba(99,102,241,0.2);color:#a5b4fc;border-radius:8px;text-decoration:none;font-weight:600;">Robot Control</a> <span class="hint">— Joystick + gesti braccia G1 (192.168.123.161).</span></p>
+    <p style="margin:8px 0;"><a href="/robot-control" style="display:inline-block;padding:12px 20px;background:rgba(99,102,241,0.2);color:#a5b4fc;border-radius:8px;text-decoration:none;font-weight:600;">Robot Control</a> <span class="hint">— Joystick + gesti braccia G1 + Teaching (192.168.123.161).</span></p>
+    <p style="margin:8px 0;"><a href="/vr-control" style="display:inline-block;padding:12px 20px;background:rgba(167,139,250,0.2);color:#c4b5fd;border-radius:8px;text-decoration:none;font-weight:600;">VR Control</a> <span class="hint">— Apri dal Quest 3: hand tracking braccia + controller locomotion.</span></p>
   </div>
 
   <script>
@@ -2970,6 +2971,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <section id="section-robot" class="section">
       <h2 style="font-size:1.2rem;margin:0 0 8px;">Robot G1 — Sport mode</h2>
       <p class="hint" style="margin:0 0 12px;font-size:12px;">Joystick e gesti braccia: comandi al robot (default IP <code>192.168.123.161</code>, modificabile sotto). Il robot deve essere in sport mode (telecomando).</p>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        <a href="/vr-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.4);color:#c4b5fd;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#x1F576; VR Control (Quest 3)</a>
+        <a href="/robot-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);color:#a5b4fc;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#127918; Robot Control (fullscreen)</a>
+      </div>
       <iframe id="robotControlFrame" title="Robot control" src="about:blank"></iframe>
     </section>
   </main>
