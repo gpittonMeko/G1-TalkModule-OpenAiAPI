@@ -29,6 +29,9 @@ tmp/
 # JS (Capacitor / tooling)
 node_modules/
 
+# Quest HTS APK (~77MB; scarica con scripts/install_hand_tracking_streamer_quest.ps1)
+installers/quest/*.apk
+
 # OS
 .DS_Store
 Thumbs.db
