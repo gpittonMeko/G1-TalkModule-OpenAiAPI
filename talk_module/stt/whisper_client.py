@@ -18,11 +18,12 @@ class WhisperClient:
         self.client = OpenAI(api_key=api_key or settings.api_key)
         self.model = settings.stt_model or "gpt-4o-mini-transcribe"
 
-    def transcribe(self, audio_bytes: bytes, language: Optional[str] = None, format_hint: Optional[str] = None, prompt: Optional[str] = None) -> str:
+    def transcribe(self, audio_bytes: bytes, language: Optional[str] = None, format_hint: Optional[str] = None, prompt: Optional[str] = None, model: Optional[str] = None) -> str:
         """
         Trascrive audio in testo. format_hint: MIME browser (audio/webm, audio/mp4, …) o estensione.
         Container rilevato dai magic bytes; conversione in WAV 16k con ffmpeg (imageio-ffmpeg).
         prompt: override per settings.whisper_prompt (utile per wake word detection).
+        model: override per self.model (es. wake_stt_model per wake detection).
         """
         if not audio_bytes or len(audio_bytes) < 100:
             return ""
@@ -30,9 +31,10 @@ class WhisperClient:
         file = BytesIO(to_send)
         file.name = f"audio.{ext}"
         file.seek(0)
+        effective_model = model or self.model
         try:
             kwargs = {
-                "model": self.model,
+                "model": effective_model,
                 "file": file,
                 "response_format": "text",
             }
@@ -46,5 +48,5 @@ class WhisperClient:
                 return resp.strip()
             return getattr(resp, "text", str(resp)).strip()
         except Exception as e:
-            print(f"[STT:{self.model}] Errore: {e}")
+            print(f"[STT:{effective_model}] Errore: {e}")
             raise

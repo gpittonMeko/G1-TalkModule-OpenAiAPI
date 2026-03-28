@@ -29,6 +29,7 @@ except ImportError:
     HAS_FASTAPI = False
 
 from talk_module.config import settings
+from talk_module.wake import WAKE_STT_PROMPT, find_wake_and_rest
 from talk_module.audio_robot_effect import apply_robot_effect_base64
 import os
 from talk_module.network_discovery import (
@@ -200,61 +201,6 @@ def _save_sample_audio(audio_bytes: bytes) -> Path | None:
     except Exception as e:
         print(f"[Debug] Salvataggio campione fallito: {e}")
         return None
-
-
-def _find_wake_and_rest(t: str) -> tuple[Optional[str], str]:
-    """
-    Ascolto continuo: rileva wake (Hey G1, G1, G one, gi one, Mark one, …).
-    Ritorna (resto dopo wake, kind) con kind: miss | ack | ok.
-    rest None se miss; stringa vuota se solo wake; altrimenti testo comando.
-    Gestisce varianti Whisper: giuno, gi uno, di uno, gì uno, sei di uno, etc.
-    """
-    if not t or not t.strip():
-        return None, "miss"
-    s = t.strip()
-    low = s.lower()
-    if any(h in low for h in ("sottotitoli", "amara.org", "amara ", "qtss", "subtitle", "created by", "a cura di")):
-        return None, "miss"
-    # Varianti STT: g1, g one, gi one, giuno, di uno, gì uno, jee one, ji one, mark one, j1, g-1
-    wake_core = (
-        r"(?:"
-        r"g[\s\-]*1"            # g1, g 1, g-1
-        r"|\bg1\b"              # g1
-        r"|g[\s\-]*one"         # g one
-        r"|gi[\s\-]*one"        # gi one
-        r"|giuno"               # giuno (attached)
-        r"|gì[\s\-]*one"       # gì one (accented)
-        r"|gì[\s\-]*uno"       # gì uno
-        r"|gi[\s\-]*uno"        # gi uno
-        r"|di[\s\-]*uno"        # di uno (Whisper mishearing)
-        r"|ji[\s\-]*one"        # ji one
-        r"|jee[\s\-]*one"       # jee one
-        r"|mark[\s\-]*one"      # mark one
-        r"|markone"             # markone
-        r"|j[\s\-]*1"           # j1
-        r")"
-    )
-    # Prefissi wake: hey, ehi, ei, e, sei (Whisper trascrive "sei di uno" per "ehi G1")
-    wake_prefix = r"(?:hey|ehi|ei|e|sei)\s*[,.\s]*\s*"
-    m = re.search(rf"{wake_prefix}{wake_core}\s*[,.\s]*", s, re.IGNORECASE)
-    if m:
-        rest = s[m.end() :].strip().lstrip(",.; ")
-        if not rest:
-            return "", "ack"
-        return rest, "ok"
-    m2 = re.match(rf"^\s*{wake_core}\s*[,.\s]*\s*(.*)$", s, re.IGNORECASE | re.DOTALL)
-    if m2:
-        rest = (m2.group(1) or "").strip()
-        if not rest:
-            return "", "ack"
-        return rest, "ok"
-    m3 = re.search(rf"(?:^|[\s,;])({wake_core})(?=[\s,;]|$)", s, re.IGNORECASE)
-    if m3:
-        rest = s[m3.end() :].strip().lstrip(",.; ")
-        if not rest:
-            return "", "ack"
-        return rest, "ok"
-    return None, "miss"
 
 
 # WebSocket clients: {client_id: ws}
@@ -438,6 +384,21 @@ self.addEventListener('activate', () => self.clients.claim());
             raise HTTPException(404, "File not found")
         return Response(content=fp.read_bytes(), media_type="audio/webm",
                         headers={"Content-Disposition": f'inline; filename="{safe}"'})
+
+    @app.post("/api/led")
+    def api_set_led(data: dict = Body(...)):
+        """Set LED color: {r, g, b} or {state: 'idle'|'listening'|'thinking'|'speaking'}."""
+        from talk_module.robot_actions import set_led_color, LED_LISTENING, LED_THINKING, LED_SPEAKING, LED_IDLE
+        state = (data.get("state") or "").strip().lower()
+        presets = {"idle": LED_IDLE, "listening": LED_LISTENING, "thinking": LED_THINKING, "speaking": LED_SPEAKING}
+        if state in presets:
+            r, g, b = presets[state]
+        else:
+            r = int(data.get("r", 255))
+            g = int(data.get("g", 255))
+            b = int(data.get("b", 255))
+        ok, msg = set_led_color(r, g, b)
+        return {"ok": ok, "message": msg}
 
     @app.get("/api/version")
     def api_version():
@@ -1259,11 +1220,6 @@ self.addEventListener('activate', () => self.clients.claim());
         _thr.Thread(target=_fire, daemon=True).start()
         return ((rm.response or "").strip() or "Ok")
 
-    WAKE_STT_PROMPT = (
-        "Italiano. Vocabolario: G1, G One, Gi One, Hey G1, Ehi G1. "
-        "Trascrivi solo parole effettivamente pronunciate, non inventare frasi."
-    )
-
     def _stt_and_wake_check(audio_bytes: bytes, format_hint: str = "webm") -> dict:
         """STT + wake word detection. Always returns wake_ack on any wake detection
         (command comes in a separate slice with skipWake=true).
@@ -1278,11 +1234,12 @@ self.addEventListener('activate', () => self.clients.claim());
                 format_hint=format_hint,
                 language="it",
                 prompt=WAKE_STT_PROMPT,
+                model=settings.wake_stt_model,
             )
             if not raw_text or not raw_text.strip():
                 _save_wake_debug_audio(audio_bytes, "", "silence")
                 return {"text": raw_text or "", "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
-            rest, wkind = _find_wake_and_rest(raw_text)
+            rest, wkind = find_wake_and_rest(raw_text)
             _save_wake_debug_audio(audio_bytes, raw_text.strip(), wkind)
             print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r} ({_ms()}ms)", flush=True)
             if wkind == "miss":
@@ -1293,55 +1250,8 @@ self.addEventListener('activate', () => self.clients.claim());
             return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": _ms()}
 
     def _process_after_wake(prompt: str, raw_text: str, t0: float) -> dict:
-        """Phase 2: robot action / knowledge / LLM + TTS after wake detected."""
-        try:
-            _, llm, tts, _, _ = get_services()
-            if prompt == PROMPT_HEY_G1_ACK_ONLY:
-                resp = (settings.hey_g1_ack_text or "").strip() or "Sì?"
-            else:
-                from talk_module.robot_actions import check_robot_action
-                robot_match = None
-                try:
-                    robot_match = check_robot_action(prompt)
-                except Exception as _ra_err:
-                    print(f"[robot-check] error: {_ra_err}", flush=True)
-                if robot_match:
-                    print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r}", flush=True)
-                    resp = _run_robot_match_actions(robot_match)
-                else:
-                    print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
-                    resp = check_knowledge(prompt)
-                    if not resp:
-                        from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
-                        if is_quick_lookup_question(prompt):
-                            resp = quick_lookup(prompt)
-                            if resp == NOT_FOUND:
-                                resp = None
-                    if not resp:
-                        resp = llm.chat(prompt)
-                    if resp and not robot_match:
-                        try:
-                            post_match = check_robot_action(resp)
-                            if post_match and post_match.arm_action:
-                                print(f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}", flush=True)
-                                _run_robot_match_actions(post_match)
-                        except Exception:
-                            pass
-            audio_out = tts.synthesize(resp, format="mp3") if resp else b""
-            return {
-                "text": raw_text,
-                "response": resp or "",
-                "audio_base64": base64.b64encode(audio_out).decode() if audio_out else "",
-                "duration_ms": int((time.perf_counter() - t0) * 1000),
-            }
-        except Exception as e:
-            err = str(e)
-            el = err.lower()
-            if "401" in err or "expired_api_key" in el or "invalid_api_key" in el or "invalid api key" in el or "incorrect api key" in el:
-                err = "Chiave API non valida o scaduta. Aggiorna .env e riavvia. " + err
-            elif "invalid file format" in el or ("supported formats" in el and ("flac" in el or "webm" in el or "mp3" in el)):
-                err = "STT: formato rifiutato. pip install imageio-ffmpeg. " + err
-            return {"text": raw_text, "response": "", "audio_base64": "", "message": f"Errore: {err}", "duration_ms": int((time.perf_counter() - t0) * 1000)}
+        from talk_module.processing import process_after_wake
+        return process_after_wake(prompt, raw_text, t0, get_services, check_knowledge, _run_robot_match_actions)
 
     def _process_audio(audio_bytes: bytes, skip_wake_word: bool = False, format_hint: str = "webm") -> dict:
         """Pipeline: audio -> STT -> LLM -> TTS. skip_wake_word=True per pulsante Parla."""
@@ -1366,7 +1276,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 prompt, msg = _extract_prompt(raw_text or "", skip_wake_word=True, audio_size=len(audio_bytes))
                 return {"text": raw_text or "", "response": "", "audio_base64": "", "message": msg or "", "duration_ms": int((time.perf_counter() - t0) * 1000)}
             if not skip_wake_word:
-                rest, wkind = _find_wake_and_rest(raw_text)
+                rest, wkind = find_wake_and_rest(raw_text)
                 print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r}", flush=True)
                 if wkind == "miss":
                     return {
@@ -1415,7 +1325,7 @@ self.addEventListener('activate', () => self.clients.claim());
                             if resp == NOT_FOUND:
                                 resp = None
                     if not resp:
-                        resp = llm.chat(prompt)
+                        resp = llm.chat(prompt, use_history=False)
                     # Post-LLM: if no robot action matched but LLM response suggests one, try to trigger it
                     if resp and not robot_match:
                         try:
@@ -2678,6 +2588,41 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           <button type="button" id="sbModalClear" style="padding:10px 16px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Rimuovi audio</button>
         </div>
       </div>
+      <div style="margin-bottom:12px;padding:12px;background:rgba(99,102,241,0.06);border-radius:10px;border:1px solid rgba(99,102,241,0.15);">
+        <label style="font-size:12px;color:#a5b4fc;font-weight:600;display:block;margin-bottom:6px;">Azione robot (opzionale)</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:140px;">
+            <label style="font-size:11px;color:#9ca3af;">Gesto braccia</label>
+            <select id="sbModalArm" style="width:100%;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;margin-top:2px;">
+              <option value="">Nessuno</option>
+              <option value="face_wave">Saluto (ciao)</option>
+              <option value="shake_hand">Stretta di mano</option>
+              <option value="hands_up">Mani in alto</option>
+              <option value="clap">Applauso</option>
+              <option value="high_five">High Five</option>
+              <option value="hug">Abbraccio</option>
+              <option value="heart">Cuore (due mani)</option>
+              <option value="right_heart">Cuore (mano dx)</option>
+              <option value="kiss">Bacio</option>
+              <option value="two_hand_kiss">Bacio (due mani)</option>
+              <option value="reject">Rifiuto / No</option>
+              <option value="right_hand_up">Mano destra su</option>
+              <option value="x_ray">Braccia incrociate</option>
+              <option value="high_wave">Saluto alto</option>
+            </select>
+          </div>
+          <div style="flex:1;min-width:140px;">
+            <label style="font-size:11px;color:#9ca3af;">Locomozione</label>
+            <select id="sbModalLoco" style="width:100%;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;margin-top:2px;">
+              <option value="">Nessuna</option>
+              <option value="double_step_forward">Due passi avanti</option>
+              <option value="double_step_back">Due passi indietro</option>
+              <option value="spin_inplace">Gira su se stesso</option>
+            </select>
+          </div>
+        </div>
+        <p class="hint" style="margin:4px 0 0;font-size:10px;color:#64748b;">Se nessun gesto selezionato, il robot far&agrave; &quot;Saluto (ciao)&quot; di default alla riproduzione locale.</p>
+      </div>
       <div style="display:flex;gap:8px;margin-top:16px;">
         <button type="button" id="sbModalSave" style="flex:1;padding:12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Salva</button>
         <button type="button" id="sbModalCancel" style="padding:12px 20px;background:rgba(255,255,255,0.1);color:#e8eaed;border:none;border-radius:10px;cursor:pointer;">Annulla</button>
@@ -3649,12 +3594,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         } catch(__){ wakeAnalyser = null; }
       }
     }
-    var WAKE_POST_TTS_PAUSE_MS = 1200;
+    var WAKE_POST_TTS_PAUSE_MS = 2500;
+    var _wakeDropSlicesAfterTts = 0;
+    function setRobotLed(state){
+      try { fetch('/api/led', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({state:state})}); } catch(e){}
+    }
     function onWakeResponseDone(){
       if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
       wakeAudioInFlight = false;
       wakeQueuedBlob = null;
+      _wakeDropSlicesAfterTts = 2;
+      setRobotLed('idle');
       setTimeout(function(){
+        setRobotLed('listening');
         scheduleNextWakeSliceIfListening();
       }, WAKE_POST_TTS_PAUSE_MS);
     }
@@ -3723,6 +3675,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       wakeAudioInFlight = false;
       wakeDiscardCurrentSlice = false;
       _wakeSliceScheduled = false;
+      _wakeDropSlicesAfterTts = 0;
       updateActiveMicIndicator();
     }
     var wsLevelMonitor = null;
@@ -3921,8 +3874,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           }
           const blob = new Blob(ch, { type: wakeMimeType });
           if (!isCmd) {
-            scheduleNextWakeSliceIfListening();
-            if (blob.size >= WS_AUDIO_MIN_BYTES) trySendWakeChunk(blob, false);
+            if (_wakeDropSlicesAfterTts > 0) {
+              _wakeDropSlicesAfterTts--;
+              wakeLog('slice post-TTS scartato (eco speaker)', '#71717a');
+              scheduleNextWakeSliceIfListening();
+            } else {
+              scheduleNextWakeSliceIfListening();
+              if (blob.size >= WS_AUDIO_MIN_BYTES) trySendWakeChunk(blob, false);
+            }
           } else {
             const voiced = !wakeAnalyser || wakeSlicePeak >= getWakeVoiceThreshold();
             if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob, true);
@@ -4021,6 +3980,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               wakeDiscardCurrentSlice = true;
               wakeQueuedBlob = null;
               _wakeSliceScheduled = false;
+              _wakeDropSlicesAfterTts = 0;
               if (wakeActiveMr) {
                 try { if (wakeActiveMr.state !== 'inactive') wakeActiveMr.stop(); } catch(_){}
               }
@@ -4594,6 +4554,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         updateSbModalStatus();
         updateSbCharCount();
       }
+      var armSel = document.getElementById('sbModalArm');
+      var locoSel = document.getElementById('sbModalLoco');
+      if (armSel) armSel.value = s.robot_arm || '';
+      if (locoSel) locoSel.value = s.robot_loco || '';
       document.getElementById('sbModal').style.display = 'flex';
       if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
         applyFull(s);
@@ -4602,7 +4566,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       var st = document.getElementById('sbModalAudioStatus');
       if (st) st.innerHTML = 'Caricamento audio…';
       sbEditAudio = null; sbEditFmt = 'webm'; sbEditAudioClean = null; sbEditFmtClean = 'mp3';
-      fetch('/api/soundboard-slot/'+idx).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(applyFull).catch(function(e){
+      fetch('/api/soundboard-slot/'+idx).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(function(full){
+        applyFull(full);
+        if (armSel) armSel.value = full.robot_arm || '';
+        if (locoSel) locoSel.value = full.robot_loco || '';
+      }).catch(function(e){
         if (st) st.innerHTML = 'Errore: '+(e.message||String(e));
       });
     }
@@ -4614,7 +4582,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (sbEditIdx < 0) return;
       const icon = (document.getElementById('sbModalIcon').value || '🎤').trim().substring(0,20);
       const text = (document.getElementById('sbModalText').value || 'Comando '+(sbEditIdx+1)).trim().substring(0, sbTextMax);
-      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3'})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
+      const robot_arm = (document.getElementById('sbModalArm')||{}).value || '';
+      const robot_loco = (document.getElementById('sbModalLoco')||{}).value || '';
+      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
     };
     document.getElementById('sbModalSynth').onclick = async ()=>{

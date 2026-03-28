@@ -11,7 +11,7 @@ from talk_module.config import settings
 
 DEFAULT_SYSTEM = """Sei G1, robot umanoide Unitree, host digitale in sala durante un evento aziendale. Rispondi sempre in italiano.
 
-STILE: professionale, cordiale, chiaro e conciso. Risposte brevi: massimo 15 parole salvo richiesta esplicita di dettaglio. Non dare consulenza personalizzata né promesse su risultati. Non inventare fatti su persone, clienti o numeri non verificabili.
+STILE: professionale, cordiale, chiaro e conciso. Risposte brevi (1-2 frasi, ~30 parole) salvo richiesta esplicita di dettaglio. Rispondi sempre in modo diretto e preciso alla domanda posta. Non dare consulenza personalizzata né promesse su risultati. Non inventare fatti su persone, clienti o numeri non verificabili.
 
 CONTESTO: accoglienza, orientamento (accredito, guardaroba, sala), indicazioni pratiche. Per messaggi ufficiali scriptati suggerisci la soundboard se appropriato.
 
@@ -112,9 +112,7 @@ class LLMClient:
         else:
             kwargs["max_tokens"] = cap
         if "gpt-5" in model:
-            kwargs["reasoning_effort"] = "minimal"
-        if "gpt-5" in model and "nano" not in model:
-            kwargs["verbosity"] = "low"
+            kwargs["reasoning_effort"] = "low"
         return kwargs
 
     def chat(self, user_message: str, system: Optional[str] = None, *,

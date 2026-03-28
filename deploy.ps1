@@ -50,6 +50,8 @@ Write-Host ""
 Write-Host "  [1] talk_module..." -NoNewline
 scp @sshCommon `
     "$root\talk_module\web_app.py" `
+    "$root\talk_module\wake.py" `
+    "$root\talk_module\processing.py" `
     "$root\talk_module\config.py" `
     "$root\talk_module\audio_robot_effect.py" `
     "$root\talk_module\quick_lookup.py" `

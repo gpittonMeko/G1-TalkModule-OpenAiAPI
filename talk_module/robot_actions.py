@@ -71,6 +71,7 @@ _SHAKE_HAND_ID = _NAME_TO_ID.get("shake_hand", 27)
 
 _sdk_client = None
 _loco_client = None
+_audio_client = None
 _dds_inited = False
 _bound_loco_service: Optional[str] = None
 _sdk_lock = threading.Lock()
@@ -350,6 +351,33 @@ def _do_arm_action_http(action_id: int, robot_ip: str) -> tuple[bool, str]:
             return True, body[:200]
     except Exception:
         return False, "unitree_sdk2py non installato e HTTP fallback non disponibile. pip install unitree_sdk2_python"
+
+
+def set_led_color(r: int, g: int, b: int) -> tuple[bool, str]:
+    """Set G1 forehead LED color via AudioClient.LedControl(R, G, B). Values 0-255."""
+    global _audio_client
+    try:
+        from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
+        with _sdk_lock:
+            _ensure_dds_init()
+            if _audio_client is None:
+                _audio_client = AudioClient()
+                _audio_client.SetTimeout(5.0)
+                _audio_client.Init()
+            rc = _audio_client.LedControl(int(r) & 0xFF, int(g) & 0xFF, int(b) & 0xFF)
+        if rc == 0:
+            return True, f"LED set to ({r},{g},{b})"
+        return False, f"LedControl rc={rc}"
+    except ImportError:
+        return False, "unitree_sdk2py AudioClient non disponibile"
+    except Exception as e:
+        return False, f"LED error: {e}"
+
+
+LED_LISTENING = (0, 120, 255)    # blue: wake word listening
+LED_THINKING = (255, 180, 0)     # amber: processing/thinking
+LED_SPEAKING = (0, 255, 80)      # green: TTS playing
+LED_IDLE = (255, 255, 255)       # white: idle/standby
 
 
 def _loco_pulse_forward_back(vx: float, n_pulses: int = 2) -> tuple[bool, str]:
