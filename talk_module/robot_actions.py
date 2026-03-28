@@ -226,12 +226,20 @@ def _resolve_action_int(action_id) -> Optional[int]:
     return _NAME_TO_ID.get(s)
 
 
-def _schedule_shake_hand_release(robot_ip: str) -> None:
-    """Dopo la stretta di mano, torna in posa neutra (release braccia) dopo qualche secondo."""
+_ARM_RELEASE_DELAYS = {
+    _NAME_TO_ID.get("shake_hand", 27): 5.5,
+}
+_ARM_DEFAULT_RELEASE_DELAY = 4.0
+
+def _schedule_arm_release(action_id: int, robot_ip: str) -> None:
+    """After any arm gesture, auto-release back to neutral after a delay."""
+    delay = _ARM_RELEASE_DELAYS.get(action_id, _ARM_DEFAULT_RELEASE_DELAY)
     try:
-        delay = float((os.getenv("G1_SHAKE_HAND_RELEASE_DELAY_SEC") or "5.5").strip() or "5.5")
+        env_delay = os.getenv("G1_ARM_RELEASE_DELAY_SEC", "").strip()
+        if env_delay:
+            delay = float(env_delay)
     except ValueError:
-        delay = 5.5
+        pass
     delay = max(2.0, min(delay, 30.0))
 
     def _run():
@@ -242,6 +250,9 @@ def _schedule_shake_hand_release(robot_ip: str) -> None:
             pass
 
     threading.Thread(target=_run, daemon=True).start()
+
+def _schedule_shake_hand_release(robot_ip: str) -> None:
+    _schedule_arm_release(_SHAKE_HAND_ID, robot_ip)
 
 
 def _is_shake_hand_action(action_id) -> bool:
@@ -273,8 +284,9 @@ def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tupl
                 cwd=str(SCRIPT_ACTIONS_PATH.parent),
             )
             if r.returncode == 0:
-                if shake:
-                    _schedule_shake_hand_release(ip)
+                act_int_resolved = _resolve_action_int(action_id)
+                if act_int_resolved is not None and act_int_resolved != 99:
+                    _schedule_arm_release(act_int_resolved, ip)
                 return True, "ok"
             return False, (r.stderr or r.stdout or "script fallito").strip()
         except Exception as e:
@@ -297,8 +309,8 @@ def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tupl
         os.environ["UNITREE_DDS_INTERFACE"] = "usb0"
         _reset_dds_state()
         ok, msg = _do_arm_action(act_int, ip)
-    if ok and act_int == _SHAKE_HAND_ID:
-        _schedule_shake_hand_release(ip)
+    if ok and act_int != 99:
+        _schedule_arm_release(act_int, ip)
     return ok, msg
 
 

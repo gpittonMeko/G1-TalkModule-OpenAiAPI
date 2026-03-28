@@ -1150,6 +1150,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 return {"text": text or "", "response": "", "audio_base64": "", "message": msg or "", "duration_ms": int((time.perf_counter() - t0) * 1000)}
             if not skip_wake_word:
                 rest, wkind = _find_wake_and_rest(text)
+                print(f"[Wake] text={text!r} kind={wkind} rest={rest!r}", flush=True)
                 if wkind == "miss":
                     return {
                         "text": text,
@@ -2444,7 +2445,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         <input type="checkbox" id="wakeListenToggle" class="wake-checkbox" style="width:22px;height:22px;margin:0;accent-color:#14b8a6;" />
       </label>
     </div>
-    <p id="wakeListenStatus" style="margin:0 0 10px;font-size:13px;color:#71717a;">Disattivato</p>
+    <p id="wakeListenStatus" style="margin:0 0 6px;font-size:13px;color:#71717a;">Disattivato</p>
+    <div id="wakeDebugLog" style="max-height:60px;overflow-y:auto;font-size:10px;font-family:monospace;color:#52525b;line-height:1.4;margin:0 0 8px;padding:4px 8px;background:rgba(0,0,0,0.2);border-radius:6px;display:none;"></div>
     <div id="recStatus" style="min-height:30px;">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
         <div style="flex:1;height:16px;background:#1e1e2e;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);">
@@ -2458,8 +2460,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <span id="activeMicDot" style="width:8px;height:8px;border-radius:50%;background:#71717a;flex-shrink:0;"></span>
       <span id="activeMicLabel" style="color:#9ca3af;">Microfono: caricamento...</span>
     </div>
-    <div id="parlaMicPreviewPanel" style="margin:12px 0 0;padding:12px;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2);">
-      <div style="font-size:12px;color:#93c5fd;margin-bottom:6px;font-weight:600;">Livello microfono in tempo reale</div>
+    <details id="parlaMicPreviewPanel" style="margin:12px 0 0;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2);">
+      <summary style="padding:10px 12px;cursor:pointer;font-size:12px;color:#93c5fd;font-weight:600;user-select:none;">Microfono e sensibilit&agrave;</summary>
+      <div style="padding:0 12px 12px;">
       <p class="hint" id="parlaSetupHintTop" style="margin:0 0 8px;font-size:10px;color:#64748b;line-height:1.4;"><strong>Setup tipico:</strong> microfono su questo telefono (es. DJI Mic Mini), cassa <strong>Bluetooth</strong> accoppiata al telefono — in Soundboard scegli <strong>Browser</strong> e la cassa in <strong>Riproduci su</strong>. Gesti robot: tab Robot, IP <code>192.168.123.161</code> (salvato nel browser).</p>
       <div id="parlaPreviewDisabledMsg" style="display:none;font-size:11px;color:#f59e0b;margin-bottom:8px;">Seleziona un microfono <strong>Browser</strong> in Dispositivi e consenti l&apos;accesso per vedere il livello qui.</div>
       <div id="parlaPreviewMeterWrap" style="position:relative;">
@@ -2473,14 +2476,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div style="margin-top:12px;">
-        <label for="micWakeThresholdSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Sensibilità ascolto continuo (soglia invio voce): <strong id="wakeThDisplay">22</strong> <span style="color:#52525b;">(più basso = più sensibile)</span></label>
-        <input type="range" id="micWakeThresholdSlider" min="3" max="45" value="22" style="width:100%;max-width:340px;accent-color:#3b82f6;" />
+        <label for="micWakeThresholdSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Sensibilit&agrave; ascolto continuo (soglia invio voce): <strong id="wakeThDisplay">14</strong> <span style="color:#52525b;">(pi&ugrave; basso = pi&ugrave; sensibile)</span></label>
+        <input type="range" id="micWakeThresholdSlider" min="1" max="80" value="14" style="width:100%;max-width:340px;accent-color:#3b82f6;" />
       </div>
       <div style="margin-top:10px;">
         <label for="micMonitorGainSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Guadagno indicatore (solo barra, non cambia l&apos;audio registrato): <strong id="micGainDisplay">1.0</strong>×</label>
         <input type="range" id="micMonitorGainSlider" min="0.4" max="4" step="0.1" value="1" style="width:100%;max-width:340px;accent-color:#64748b;" />
       </div>
-    </div>
+      </div>
+    </details>
   </div>
 
   <!-- 2. PUSH TO TALK -->
@@ -2512,20 +2516,22 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <div id="secureWarnDesktop" style="display:none;"><p style="margin:0;">Tunnel SSH poi localhost:8081/client</p></div>
     </details>
   </div>
-  <p class="hint" id="hintAccess" style="margin:0 0 6px;font-size:11px;">Per il microfono browser: consenti l'accesso.</p>
   <div id="allowWrap" class="step" style="display:block;margin-bottom:8px;">
-    <button type="button" class="btn-allow" id="btnAllow">Consenti microfono e aggiorna dispositivi</button>
-    <p id="deviceStatus" style="font-size:11px;margin:4px 0 0;color:#52525b;">Clicca per caricare dispositivi.</p>
+    <button type="button" class="btn-allow" id="btnAllow" style="font-size:12px;padding:8px 14px;">Consenti microfono</button>
+    <p id="deviceStatus" style="font-size:10px;margin:4px 0 0;color:#52525b;">Clicca per caricare dispositivi.</p>
+    <p class="hint" id="hintAccess" style="margin:4px 0 0;font-size:10px;">Per il microfono browser: consenti l'accesso.</p>
   </div>
-  <div id="ttsOutputWrap" class="step" style="display:none;margin-bottom:10px;padding:10px 12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.2);">
-    <label style="display:block;margin-bottom:4px;color:#a1a1aa;font-size:12px;">Risposta vocale</label>
-    <select id="ttsPlayDest" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;width:100%;max-width:300px;">
-      <option value="server">Cassa robot (Jetson)</option>
-      <option value="browser">Browser (telefono/PC)</option>
-    </select>
-    <p id="ttsServerHint" class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;"></p>
-    <p class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;">Con <strong>Browser</strong>: stessa uscita della Soundboard. Per <strong>Bluetooth</strong>, in Soundboard scegli esplicitamente la cassa BT in <strong>Riproduci su</strong> (o l&apos;altoparlante browser in Dispositivi); con «Predefinito» su Android l&apos;audio può finire sull&apos;auricolare.</p>
-  </div>
+  <details style="margin-bottom:10px;">
+    <summary style="cursor:pointer;font-size:12px;color:#71717a;">Uscita audio (TTS)</summary>
+    <div id="ttsOutputWrap" class="step" style="margin-top:8px;margin-bottom:0;padding:10px 12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.2);">
+      <label style="display:block;margin-bottom:4px;color:#a1a1aa;font-size:12px;">Risposta vocale</label>
+      <select id="ttsPlayDest" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;width:100%;max-width:300px;">
+        <option value="server">Cassa robot (Jetson)</option>
+        <option value="browser">Browser (telefono/PC)</option>
+      </select>
+      <p id="ttsServerHint" class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;"></p>
+    </div>
+  </details>
   <details style="margin-top:8px;">
     <summary style="cursor:pointer;font-size:12px;color:#52525b;">Test & debug</summary>
     <div style="margin-top:8px;">
@@ -2559,32 +2565,34 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
   </details>
     </section>
     <section id="section-devices" class="section">
-  <h2 style="font-size:1.2rem;margin:0 0 16px;">Dispositivi</h2>
-  <p class="hint" style="margin-bottom:10px;"><strong>Jetson (Unitree):</strong> il server esegue una <strong>scansione</strong> (PortAudio + ALSA + USB). Le voci <em>Jetson (server)</em> sono i dispositivi collegati alla scheda audio del robot. <em>Browser</em> = microfono/casse di questo telefono o PC.</p>
-  <p class="hint" style="margin-bottom:12px;font-size:12px;">Per elenco completo e salvataggio guidato apri anche <a href="/setup" style="color:#14b8a6;">/setup</a>. In <strong>Parla</strong>, se scegli <strong>Jetson – server</strong> qui e salvi, l&apos;ascolto è sul <strong>microfono USB del robot</strong>; se scegli <strong>Browser</strong>, l&apos;ascolto è sul telefono/PC.</p>
+  <h2 style="font-size:1.2rem;margin:0 0 12px;">Dispositivi</h2>
   <div id="devicesWrap" class="step">
-    <label style="display:block;margin-bottom:6px;">Microfono (<strong>Jetson</strong> = USB sul robot; <strong>Browser</strong> = questo dispositivo)</label>
+    <label style="display:block;margin-bottom:6px;">Microfono</label>
     <select id="mic"><option value="">Caricamento...</option></select>
     <label style="display:block;margin-top:12px;margin-bottom:6px;">Altoparlante / cassa</label>
     <select id="speaker"><option value="">Caricamento...</option></select>
-    <p style="margin:12px 0 6px;font-size:12px;color:#9ca3af;">Anteprima hardware rilevato sulla Jetson (ALSA / USB):</p>
-    <pre id="hwProbe" style="margin:0 0 10px;padding:10px;background:#18181b;border-radius:8px;font-size:10px;line-height:1.35;max-height:180px;overflow:auto;color:#a1a1aa;white-space:pre-wrap;">—</pre>
-    <p style="margin:8px 0 6px;font-size:12px;color:#9ca3af;">Elenco completo con <strong>nomi precisi</strong> (PortAudio + ALSA):</p>
-    <button type="button" id="devicesLoadFull" style="padding:8px 14px;background:rgba(59,130,246,0.25);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:8px;cursor:pointer;font-size:13px;margin-bottom:8px;">Mostra tutti i nomi (Jetson)</button>
-    <pre id="devicesFullDump" style="margin:0 0 10px;padding:10px;background:#0f172a;border-radius:8px;font-size:10px;line-height:1.35;max-height:min(50vh,420px);overflow:auto;color:#cbd5e1;white-space:pre-wrap;display:none;">—</pre>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-      <button type="button" id="devicesRefresh" style="padding:8px 14px;background:rgba(255,255,255,0.08);color:#e8eaed;border:1px solid rgba(255,255,255,0.12);border-radius:8px;cursor:pointer;font-size:13px;">Aggiorna elenco</button>
-      <button type="button" id="devicesSave" style="padding:8px 14px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva configurazione sul server</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;">
+      <button type="button" id="devicesRefresh" style="padding:8px 14px;background:rgba(255,255,255,0.08);color:#e8eaed;border:1px solid rgba(255,255,255,0.12);border-radius:8px;cursor:pointer;font-size:13px;">Aggiorna</button>
+      <button type="button" id="devicesSave" style="padding:8px 14px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva</button>
       <span id="devicesSaveStatus" class="hint" style="margin:0;"></span>
     </div>
-    <div style="margin-top:16px;padding:12px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;">
-      <label style="display:block;font-size:12px;color:#86efac;font-weight:600;margin-bottom:6px;">Volume risposta TTS (amplificazione browser)</label>
+    <div style="margin-top:14px;padding:12px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;">
+      <label style="display:block;font-size:12px;color:#86efac;font-weight:600;margin-bottom:6px;">Volume risposta TTS</label>
       <div style="display:flex;align-items:center;gap:10px;">
-        <input type="range" id="ttsGainSlider" min="0.5" max="5.0" step="0.1" style="flex:1;accent-color:#22c55e;" />
+        <input type="range" id="ttsGainSlider" min="0.5" max="10.0" step="0.1" style="flex:1;accent-color:#22c55e;" />
         <span id="ttsGainLabel" style="font-size:12px;color:#a1a1aa;font-family:monospace;min-width:40px;">2.5x</span>
       </div>
-      <p class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;">1.0 = volume originale, 2.5 = default amplificato. Alza se l&apos;audio TTS &egrave; troppo basso su cassa Bluetooth.</p>
+      <p class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;">1.0 = originale, 2.5 = default. Max 10x. L&apos;audio viene anche normalizzato lato server (loudnorm).</p>
     </div>
+    <details style="margin-top:12px;">
+      <summary style="cursor:pointer;font-size:12px;color:#71717a;">Avanzate (hardware Jetson, nomi PortAudio)</summary>
+      <div style="padding-top:8px;">
+        <p class="hint" style="margin-bottom:8px;"><strong>Jetson:</strong> scansione PortAudio + ALSA + USB. Voci <em>Jetson (server)</em> = audio sul robot.</p>
+        <pre id="hwProbe" style="margin:0 0 10px;padding:10px;background:#18181b;border-radius:8px;font-size:10px;line-height:1.35;max-height:180px;overflow:auto;color:#a1a1aa;white-space:pre-wrap;">—</pre>
+        <button type="button" id="devicesLoadFull" style="padding:6px 12px;background:rgba(59,130,246,0.25);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:8px;cursor:pointer;font-size:11px;margin-bottom:8px;">Mostra tutti i nomi</button>
+        <pre id="devicesFullDump" style="margin:0 0 10px;padding:10px;background:#0f172a;border-radius:8px;font-size:10px;line-height:1.35;max-height:min(50vh,420px);overflow:auto;color:#cbd5e1;white-space:pre-wrap;display:none;">—</pre>
+      </div>
+    </details>
   </div>
     </section>
     <section id="section-info" class="section">
@@ -2788,13 +2796,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let wakeLevelCtx = null, wakeAnalyser = null, wakeLevelSampleInterval = null;
     let wakeSlicePeak = 0;
     /** Default soglia voce (0-255 FFT); override con slider e localStorage g1_wake_voice_threshold. */
-    const WAKE_VOICE_THRESHOLD_DEFAULT = 22;
+    const WAKE_VOICE_THRESHOLD_DEFAULT = 14;
     function getWakeVoiceThreshold() {
       try {
         var raw = localStorage.getItem('g1_wake_voice_threshold');
         if (raw != null && raw !== '') {
           var v = parseInt(raw, 10);
-          if (!isNaN(v) && v >= 3 && v <= 45) return v;
+          if (!isNaN(v) && v >= 1 && v <= 80) return v;
         }
       } catch (_) {}
       return WAKE_VOICE_THRESHOLD_DEFAULT;
@@ -2840,7 +2848,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         wTh.addEventListener('input', function(){
           var v = parseInt(wTh.value, 10);
           if (isNaN(v)) v = WAKE_VOICE_THRESHOLD_DEFAULT;
-          v = Math.max(3, Math.min(45, v));
+          v = Math.max(1, Math.min(80, v));
           try { localStorage.setItem('g1_wake_voice_threshold', String(v)); } catch (_) {}
           if (wDisp) wDisp.textContent = String(v);
           updateParlaThresholdLine();
@@ -2923,8 +2931,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     const WAKE_COMMAND_SILENCE_MS = 12000;
     /** Dopo startWakeRecorder: programma la prossima slice solo quando il round (risposta+TTS) è finito. */
     let scheduleNextWakeSliceIfListening = function(){};
-    /* Slice più lunga = meno tagli a metà frase prima che parta STT/LLM (costa ~2s in più di attesa). */
-    const WAKE_SLICE_MS = 5200;
+    const WAKE_SLICE_MS = 2500;
     /** Coda riproduzione TTS: evita che due risposte MP3 si sovrappongano. */
     let ttsPlaybackQueue = [];
     let ttsPlaybackBusy = false;
@@ -3021,11 +3028,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       setTimeout(function() {
         try {
           var gain = getTtsGain();
+          var ttsSink = resolveBrowserPlaybackSinkIdLikeSoundboard();
           if (gain > 1.05 && window.AudioContext) {
             var raw = atob(item.b64);
             var buf = new Uint8Array(raw.length);
             for (var i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
-            var ctx = new AudioContext();
+            var ctxOpts = {};
+            if (ttsSink) { try { ctxOpts.sinkId = ttsSink; } catch(_){} }
+            var ctx;
+            try { ctx = new AudioContext(ctxOpts); } catch(_) { ctx = new AudioContext(); }
             ctx.decodeAudioData(buf.buffer, function(decoded) {
               var src = ctx.createBufferSource();
               src.buffer = decoded;
@@ -3041,10 +3052,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               };
               src.start(0);
             }, function() {
-              _pumpTtsFallback(item);
+              _pumpTtsFallback(item, ttsSink);
             });
           } else {
-            _pumpTtsFallback(item);
+            _pumpTtsFallback(item, ttsSink);
           }
         } catch(_) {
           ttsPlaybackBusy = false;
@@ -3053,10 +3064,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         }
       }, TTS_BEFORE_PLAY_GAP_MS);
     }
-    function _pumpTtsFallback(item) {
+    function _pumpTtsFallback(item, sinkId) {
       try {
         const audio = new Audio('data:audio/mpeg;base64,' + item.b64);
-        var ttsSink = resolveBrowserPlaybackSinkIdLikeSoundboard();
+        audio.volume = 1.0;
         audio.onended = function() {
           ttsPlaybackBusy = false;
           if (item.onEnded) item.onEnded();
@@ -3067,7 +3078,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (item.onEnded) item.onEnded();
           pumpTtsPlaybackQueue();
         };
-        applySinkThenPlay(audio, ttsSink).catch(function() {
+        applySinkThenPlay(audio, sinkId).catch(function() {
           ttsPlaybackBusy = false;
           if (item.onEnded) item.onEnded();
           pumpTtsPlaybackQueue();
@@ -3158,15 +3169,22 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         const Ctx = window.AudioContext || window.webkitAudioContext;
         if (!Ctx) return;
         const ctx = new Ctx();
-        const o = ctx.createOscillator();
-        const g = ctx.createGain();
-        o.type = 'sine';
-        o.frequency.value = 880;
-        g.gain.value = 0.09;
-        o.connect(g); g.connect(ctx.destination);
-        o.start();
-        o.stop(ctx.currentTime + 0.14);
-        ctx.resume && ctx.resume();
+        if (ctx.resume) ctx.resume();
+        var vol = 0.35;
+        var o1 = ctx.createOscillator(); var g1 = ctx.createGain();
+        o1.type = 'sine'; o1.frequency.value = 660;
+        g1.gain.setValueAtTime(vol, ctx.currentTime);
+        g1.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+        o1.connect(g1); g1.connect(ctx.destination);
+        o1.start(ctx.currentTime); o1.stop(ctx.currentTime + 0.15);
+        var o2 = ctx.createOscillator(); var g2 = ctx.createGain();
+        o2.type = 'sine'; o2.frequency.value = 880;
+        g2.gain.setValueAtTime(0.01, ctx.currentTime);
+        g2.gain.setValueAtTime(vol, ctx.currentTime + 0.12);
+        g2.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+        o2.connect(g2); g2.connect(ctx.destination);
+        o2.start(ctx.currentTime + 0.12); o2.stop(ctx.currentTime + 0.35);
+        setTimeout(function(){ ctx.close().catch(function(){}); }, 500);
       } catch(_){}
     }
     function resetWakeCommandMode(){
@@ -3514,6 +3532,18 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
 
 
+    function wakeLog(msg, color) {
+      var el = document.getElementById('wakeDebugLog');
+      if (!el) return;
+      el.style.display = '';
+      var d = document.createElement('div');
+      d.style.color = color || '#71717a';
+      var t = new Date(); var ts = t.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      d.textContent = ts + ' ' + msg;
+      el.appendChild(d);
+      if (el.children.length > 20) el.removeChild(el.firstChild);
+      el.scrollTop = el.scrollHeight;
+    }
     function onWsPipelineMessage(e){
       let d;
       try { d = JSON.parse(e.data); } catch(_) { document.getElementById('result').innerHTML = '<div class="warn">Errore risposta server</div>'; return; }
@@ -3525,28 +3555,33 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (wakeListenPending) {
             wakeListenPending = false;
             if (r.wake_miss) {
+              var sttTxt = String(r.text||'').trim();
+              wakeLog(sttTxt ? 'STT: "'+sttTxt+'" \u2192 miss (no wake word)' : 'silenzio / no speech', '#71717a');
               btn.disabled = false;
               return;
             }
             if (r.wake_ack) {
+              wakeLog('WAKE! STT: "'+String(r.text||'')+'" \u2192 pronto', '#22c55e');
               playWakeChime();
               wakeCommandMode = true;
               startWakeCommandIdleTimer();
               const wst = document.getElementById('wakeListenStatus');
-              if (wst) wst.textContent = 'Ti ascolto… parla pure.';
+              if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
               btn.disabled = false;
               deferWakeDone = true;
               setTimeout(function(){ onWakeResponseDone(); }, 320);
               return;
             }
             if (!r.response && r.message) {
+              wakeLog('msg: '+r.message, '#f59e0b');
               const wst = document.getElementById('wakeListenStatus');
-              if (wakeCommandMode && wst) wst.textContent = 'Ti ascolto… (parla 1–2 sec più forte)';
-              else if (wst) wst.textContent = 'In ascolto per «Hey G1»…';
+              if (wakeCommandMode && wst) wst.textContent = 'Ti ascolto\u2026 (parla 1\u20132 sec pi\u00f9 forte)';
+              else if (wst) wst.textContent = 'In ascolto per \u00abHey G1\u00bb\u2026';
               document.getElementById('result').innerHTML = '<div class="warn">'+r.message+'</div>';
               btn.disabled = false;
               return;
             }
+            if (r.text) wakeLog('CMD: "'+String(r.text||'')+'" \u2192 risposta', '#14b8a6');
           }
           btn.disabled = false;
           recordingServerJetson = false;
@@ -3669,9 +3704,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (sb0) { sb0.value = 'browser'; }
         }
         var wrap = document.getElementById('ttsOutputWrap');
-        if (wrap && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-          wrap.style.display = 'block';
-        }
+        if (wrap) wrap.style.display = 'block';
         updateSbBrowserRowVisibility();
       }).catch(function(){});
     })();

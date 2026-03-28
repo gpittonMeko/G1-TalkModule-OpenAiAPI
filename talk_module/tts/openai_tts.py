@@ -2,11 +2,62 @@
 Client OpenAI TTS per Text-to-Speech.
 """
 
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Optional
 
 from openai import OpenAI
 
 from talk_module.config import settings
+
+
+def _find_ffmpeg() -> Optional[str]:
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    for p in ("ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        try:
+            subprocess.run([p, "-version"], capture_output=True, timeout=5)
+            return p
+        except Exception:
+            continue
+    return None
+
+
+def _loudnorm_mp3(audio_bytes: bytes) -> bytes:
+    """Apply EBU R128 loudness normalization via FFmpeg. Returns original on failure."""
+    if not audio_bytes or len(audio_bytes) < 200:
+        return audio_bytes
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return audio_bytes
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as fin:
+            fin.write(audio_bytes)
+            fin_path = fin.name
+        fout_path = fin_path.replace(".mp3", "_loud.mp3")
+        r = subprocess.run(
+            [ffmpeg, "-y", "-i", fin_path,
+             "-af", "loudnorm=I=-14:TP=-1:LRA=11,volume=1.5",
+             "-b:a", "128k", fout_path],
+            capture_output=True, timeout=15,
+        )
+        if r.returncode == 0 and Path(fout_path).exists():
+            result = Path(fout_path).read_bytes()
+            if len(result) > 100:
+                return result
+    except Exception as e:
+        print(f"[TTS loudnorm] {e}", flush=True)
+    finally:
+        for p in (fin_path, fout_path):
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception:
+                pass
+    return audio_bytes
 
 
 class TTSClient:
@@ -32,15 +83,17 @@ class TTSClient:
                 "response_format": format,
                 "speed": 1.0,
             }
-            # instructions solo se supportato dallo SDK / endpoint
             if "gpt-4o-mini-tts" in settings.tts_model:
-                kwargs["instructions"] = "Parla in italiano. Pronuncia correttamente ogni parola."
+                kwargs["instructions"] = "Parla in italiano con voce chiara e alta. Pronuncia correttamente ogni parola."
             try:
                 resp = self.client.audio.speech.create(**kwargs)
             except TypeError:
                 kwargs.pop("instructions", None)
                 resp = self.client.audio.speech.create(**kwargs)
-            return resp.content
+            raw = resp.content
+            if raw and format == "mp3":
+                raw = _loudnorm_mp3(raw)
+            return raw
         except Exception as e:
             print(f"[TTS] Errore: {e}")
             return b""
