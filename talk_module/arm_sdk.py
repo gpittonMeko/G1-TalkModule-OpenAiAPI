@@ -297,7 +297,7 @@ class G1ArmSDK:
 
     def _publish_loop(self):
         """Main 50Hz control loop with velocity clamping."""
-        max_delta = 0.5 * CONTROL_DT  # 0.5 rad/s * 0.02s = 0.01 rad/cycle
+        max_delta = 3.0 * CONTROL_DT  # 3.0 rad/s * 0.02s = 0.06 rad/cycle
 
         current_cmd_q = list(self._target_q)
 

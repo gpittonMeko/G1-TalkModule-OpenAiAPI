@@ -825,6 +825,7 @@ self.addEventListener('activate', () => self.clients.claim());
                     "robot_arm": str(s.get("robot_arm") or ""),
                     "robot_loco": str(s.get("robot_loco") or ""),
                     "led_effect": str(s.get("led_effect") or ""),
+                    "teaching_slot": str(s.get("teaching_slot") or ""),
                 }
             )
         return lite
@@ -887,6 +888,7 @@ self.addEventListener('activate', () => self.clients.claim());
             "robot_arm": str(s.get("robot_arm") or ""),
             "robot_loco": str(s.get("robot_loco") or ""),
             "led_effect": str(s.get("led_effect") or ""),
+            "teaching_slot": str(s.get("teaching_slot") or ""),
         }
 
     @app.get("/api/run-sheet")
@@ -971,6 +973,7 @@ self.addEventListener('activate', () => self.clients.claim());
         ra = data.get("robot_arm")
         rl = data.get("robot_loco")
         le = data.get("led_effect")
+        ts = data.get("teaching_slot")
         slots[slot] = {
             "icon": str(data.get("icon", "🎤")).strip()[:20],
             "text": txt,
@@ -981,6 +984,7 @@ self.addEventListener('activate', () => self.clients.claim());
             "robot_arm": str(ra if ra is not None else (prev.get("robot_arm") or "")),
             "robot_loco": str(rl if rl is not None else (prev.get("robot_loco") or "")),
             "led_effect": str(le if le is not None else (prev.get("led_effect") or "")),
+            "teaching_slot": str(ts if ts is not None else (prev.get("teaching_slot") or "")),
         }
         try:
             SOUNDBOARD_PATH.write_text(json.dumps({"slots": slots}, indent=2), encoding="utf-8")
@@ -2776,6 +2780,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         </div>
         <p class="hint" style="margin:4px 0 0;font-size:10px;color:#64748b;">Il LED si attiva durante la riproduzione dello slot.</p>
       </div>
+      <div style="margin-bottom:12px;padding:12px;background:rgba(20,184,166,0.06);border-radius:10px;border:1px solid rgba(20,184,166,0.15);">
+        <label style="font-size:12px;color:#5eead4;font-weight:600;display:block;margin-bottom:6px;">Teaching slot (opzionale)</label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="number" id="sbModalTeaching" min="" max="99" value="" placeholder="--" style="width:70px;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;font-family:monospace;text-align:center;" />
+          <span style="font-size:11px;color:#71717a;">Se impostato, riproduce il teaching registrato insieme all'audio.</span>
+        </div>
+      </div>
       <div style="display:flex;gap:8px;margin-top:16px;">
         <button type="button" id="sbModalSave" style="flex:1;padding:12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Salva</button>
         <button type="button" id="sbModalCancel" style="padding:12px 20px;background:rgba(255,255,255,0.1);color:#e8eaed;border:none;border-radius:10px;cursor:pointer;">Annulla</button>
@@ -3165,7 +3176,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let wakeLevelCtx = null, wakeAnalyser = null, wakeLevelSampleInterval = null;
     let wakeSlicePeak = 0;
     /** Default soglia voce (0-255 FFT); override con slider e localStorage g1_wake_voice_threshold. */
-    const WAKE_VOICE_THRESHOLD_DEFAULT = 14;
+    const WAKE_VOICE_THRESHOLD_DEFAULT = 20;
     function getWakeVoiceThreshold() {
       try {
         var raw = localStorage.getItem('g1_wake_voice_threshold');
@@ -3399,7 +3410,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       var arm = (sd.robot_arm && String(sd.robot_arm).trim()) || '';
       var loco = (sd.robot_loco && String(sd.robot_loco).trim()) || '';
       var led = (sd.led_effect && String(sd.led_effect).trim()) || '';
-      if (!arm && !loco) arm = 'face_wave';
+      var teach = (sd.teaching_slot != null && String(sd.teaching_slot).trim()) || '';
+      if (!arm && !loco && !teach) arm = 'face_wave';
       var ip = '192.168.123.161';
       try {
         var ls = localStorage.getItem('g1_robot_ip');
@@ -3407,6 +3419,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       } catch(_) {}
       if (led) {
         fetch('/api/led', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ effect: led }) }).catch(function(){});
+      }
+      if (teach) {
+        fetch('/api/teaching/replay_slot/' + teach, { method: 'POST' }).catch(function(){});
       }
       if (arm) {
         fetch('/api/robot-action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ action_id: arm, robot_ip: ip }) }).catch(function(){});
@@ -3760,7 +3775,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         } catch(__){ wakeAnalyser = null; }
       }
     }
-    var WAKE_POST_TTS_PAUSE_MS = 1500;
+    var WAKE_POST_TTS_PAUSE_MS = 1000;
     var _wakeDropSlicesAfterTts = 0;
     function setRobotLed(state){
       try { fetch('/api/led', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({state:state})}); } catch(e){}
@@ -3770,10 +3785,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       wakeAudioInFlight = false;
       wakeQueuedBlob = null;
       wakeDiscardCurrentSlice = false;
-      _wakeDropSlicesAfterTts = 2;
+      _wakeDropSlicesAfterTts = 0;
       setRobotLed('idle');
       setTimeout(function(){
-        _wakeDropSlicesAfterTts = 0;
         wakeDiscardCurrentSlice = false;
         setRobotLed('listening');
         scheduleNextWakeSliceIfListening();
@@ -4042,17 +4056,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             return;
           }
           const blob = new Blob(ch, { type: wakeMimeType });
+          var voiced = !wakeAnalyser || wakeSlicePeak >= getWakeVoiceThreshold();
           if (!isCmd) {
-            if (_wakeDropSlicesAfterTts > 0) {
-              _wakeDropSlicesAfterTts--;
-              wakeLog('slice post-TTS scartato (eco speaker)', '#71717a');
-              scheduleNextWakeSliceIfListening();
-            } else {
-              scheduleNextWakeSliceIfListening();
-              if (blob.size >= WS_AUDIO_MIN_BYTES) trySendWakeChunk(blob, false);
-            }
+            scheduleNextWakeSliceIfListening();
+            if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob, false);
           } else {
-            const voiced = !wakeAnalyser || wakeSlicePeak >= getWakeVoiceThreshold();
             if (blob.size >= WS_AUDIO_MIN_BYTES && voiced) trySendWakeChunk(blob, true);
             else scheduleNextWakeSliceIfListening();
           }
@@ -4607,7 +4615,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           }).then(function(full){
             var merged = Object.assign({}, s, {
               robot_arm: (full && full.robot_arm) ? String(full.robot_arm) : '',
-              robot_loco: (full && full.robot_loco) ? String(full.robot_loco) : ''
+              robot_loco: (full && full.robot_loco) ? String(full.robot_loco) : '',
+              teaching_slot: (full && full.teaching_slot) ? String(full.teaching_slot) : ''
             });
             playFromData(merged);
           }).catch(function(){ playFromData(s); });
@@ -4736,9 +4745,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       var armSel = document.getElementById('sbModalArm');
       var locoSel = document.getElementById('sbModalLoco');
       var ledSel = document.getElementById('sbModalLed');
+      var teachSel = document.getElementById('sbModalTeaching');
       if (armSel) armSel.value = s.robot_arm || '';
       if (locoSel) locoSel.value = s.robot_loco || '';
       if (ledSel) { ledSel.value = s.led_effect || ''; sbUpdateLedPreview(); }
+      if (teachSel) teachSel.value = s.teaching_slot || '';
       document.getElementById('sbModal').style.display = 'flex';
       if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
         applyFull(s);
@@ -4752,6 +4763,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (armSel) armSel.value = full.robot_arm || '';
         if (locoSel) locoSel.value = full.robot_loco || '';
         if (ledSel) { ledSel.value = full.led_effect || ''; sbUpdateLedPreview(); }
+        if (teachSel) teachSel.value = full.teaching_slot || '';
       }).catch(function(e){
         if (st) st.innerHTML = 'Errore: '+(e.message||String(e));
       });
@@ -4782,7 +4794,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const robot_arm = (document.getElementById('sbModalArm')||{}).value || '';
       const robot_loco = (document.getElementById('sbModalLoco')||{}).value || '';
       const led_effect = (document.getElementById('sbModalLed')||{}).value || '';
-      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco, led_effect})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
+      const teaching_slot = (document.getElementById('sbModalTeaching')||{}).value || '';
+      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco, led_effect, teaching_slot})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
     };
     document.getElementById('sbModalSynth').onclick = async ()=>{
@@ -6154,7 +6167,13 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
         <span>Errori: <span id="vrUdpErr" style="color:#a1a1aa;">0</span></span>
       </div>
       <div id="vrSetupHint" style="margin-top:6px;color:#fbbf24;font-size:10px;display:none;">
-        Nessun dato UDP. Verifica: 1) HTS attivo su Quest 2) IP Jetson corretto in HTS 3) Porta UDP 9000
+        &#9888; Nessun dato UDP dal Quest.<br/>
+        <strong>Setup necessario:</strong><br/>
+        1. Sul Meta Quest installa l'app <strong>&quot;Hand Tracking Streamer&quot; (HTS)</strong> da SideQuest.<br/>
+        2. Apri HTS sul Quest e inserisci l'IP del <strong>Jetson/server</strong> (es. 192.168.123.161) e porta <strong>9000</strong>.<br/>
+        3. Premi &quot;Start&quot; in HTS — i dati mano vengono inviati <strong>dal Quest al Jetson</strong> via UDP.<br/>
+        4. Il Quest non ha bisogno di ricevere nulla — è solo un trasmettitore di posizioni mano.<br/>
+        <em>Il Quest e il Jetson devono essere sulla stessa rete WiFi/LAN.</em>
       </div>
     </div>
   </div>

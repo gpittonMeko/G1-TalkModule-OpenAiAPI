@@ -35,7 +35,7 @@ class Settings:
 
     # OpenAI
     api_key: str = _str(os.getenv("OPENAI_API_KEY", ""))
-    stt_model: str = _str(os.getenv("STT_MODEL", "gpt-4o-mini-transcribe-2025-12-15"))
+    stt_model: str = _str(os.getenv("STT_MODEL", "gpt-4o-transcribe"))
     wake_stt_model: str = _str(os.getenv("WAKE_STT_MODEL", "")) or _str(os.getenv("STT_MODEL", "gpt-4o-transcribe"))
     llm_model: str = _str(os.getenv("LLM_MODEL", "gpt-5.4-mini"))
     llm_text_model: str = _str(os.getenv("LLM_TEXT_MODEL", "")) or _str(os.getenv("LLM_MODEL", "gpt-5.4-mini"))

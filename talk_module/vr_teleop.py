@@ -134,7 +134,7 @@ class VRTeleopManager:
         if self._state != VRState.CALIBRATING and self._state != VRState.ACTIVE:
             return {"ok": False, "error": f"cannot calibrate in state {self._state}"}
         if not self.tracking_ok:
-            return {"ok": False, "error": "no hand tracking data -- open HTS on Quest and check IP/port"}
+            return {"ok": False, "error": "No hand tracking data. Apri HTS sul Quest, inserisci IP Jetson (es. 192.168.123.161) e porta 9000, poi premi Start in HTS."}
 
         self._neutral_left = WristPose(
             self._left_smooth.x, self._left_smooth.y, self._left_smooth.z,

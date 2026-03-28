@@ -63,6 +63,22 @@
     "action": "hands_up",
     "response": "Su le mani! Momento celebrazione!"
   },
+  "alza la mano": {
+    "action": "right_hand_up",
+    "response": "Eccola su! Presente!"
+  },
+  "alza le braccia": {
+    "action": "hands_up",
+    "response": "Braccia in alto! Festeggiamo!"
+  },
+  "braccia in alto": {
+    "action": "hands_up",
+    "response": "Su! Come dopo una vittoria!"
+  },
+  "alza la mano destra": {
+    "action": "right_hand_up",
+    "response": "Mano destra su! Eccomi!"
+  },
   "applaudi": {
     "action": "clap",
     "response": "Bravi! Un applauso meritato!"
@@ -90,6 +106,18 @@
   "dammi il cinque": {
     "action": "high_five",
     "response": "Toh, battilo forte! Non mi faccio male."
+  },
+  "mi dai il cinque": {
+    "action": "high_five",
+    "response": "Eccolo! Cinque!"
+  },
+  "mi dai il 5": {
+    "action": "high_five",
+    "response": "Cinque! Daje!"
+  },
+  "dai il cinque": {
+    "action": "high_five",
+    "response": "Cinque! Squadra fortissimi!"
   },
   "abbraccio": {
     "action": "hug",
