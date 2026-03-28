@@ -3170,6 +3170,53 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (thinkingInterval) { clearInterval(thinkingInterval); thinkingInterval = null; }
       if (thinkingAudioCtx) { try { thinkingAudioCtx.close(); } catch(_){} thinkingAudioCtx = null; }
     }
+    var _listenHumCtx = null, _listenHumOsc = null, _listenHumGain = null;
+    function startListeningHum(){
+      stopListeningHum();
+      try {
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        _listenHumCtx = new Ctx();
+        if (_listenHumCtx.resume) _listenHumCtx.resume();
+        _listenHumOsc = _listenHumCtx.createOscillator();
+        _listenHumOsc.type = 'sine';
+        _listenHumOsc.frequency.value = 440;
+        _listenHumGain = _listenHumCtx.createGain();
+        _listenHumGain.gain.value = 0.06;
+        var lfo = _listenHumCtx.createOscillator();
+        lfo.type = 'sine';
+        lfo.frequency.value = 2.5;
+        var lfoGain = _listenHumCtx.createGain();
+        lfoGain.gain.value = 0.03;
+        lfo.connect(lfoGain);
+        lfoGain.connect(_listenHumGain.gain);
+        lfo.start();
+        _listenHumOsc.connect(_listenHumGain);
+        _listenHumGain.connect(_listenHumCtx.destination);
+        _listenHumOsc.start();
+      } catch(_) { stopListeningHum(); }
+    }
+    function stopListeningHum(){
+      if (_listenHumOsc) { try { _listenHumOsc.stop(); } catch(_){} _listenHumOsc = null; }
+      if (_listenHumCtx) { try { _listenHumCtx.close(); } catch(_){} _listenHumCtx = null; }
+      _listenHumGain = null;
+    }
+    function playStopChime(){
+      try {
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        var ctx = new Ctx();
+        if (ctx.resume) ctx.resume();
+        var o = ctx.createOscillator(); var g = ctx.createGain();
+        o.type = 'sine'; o.frequency.setValueAtTime(660, ctx.currentTime);
+        o.frequency.exponentialRampToValueAtTime(330, ctx.currentTime + 0.2);
+        g.gain.setValueAtTime(0.2, ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(); o.stop(ctx.currentTime + 0.2);
+        setTimeout(function(){ ctx.close().catch(function(){}); }, 300);
+      } catch(_){}
+    }
     function playWakeChime(){
       try {
         const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -3195,6 +3242,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     function resetWakeCommandMode(){
       wakeCommandMode = false;
+      stopListeningHum();
       if (wakeCommandIdleTimer) { clearTimeout(wakeCommandIdleTimer); wakeCommandIdleTimer = null; }
     }
     function startWakeCommandIdleTimer(){
@@ -3278,11 +3326,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       fr.onload = function(){
         const b64 = arrayBufferToBase64(fr.result);
         try {
+          stopListeningHum();
+          playStopChime();
           startThinkingFeedback();
           sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: wakeCommandMode });
         } catch(_){
           wakeListenPending = false;
           wakeAudioInFlight = false;
+          stopListeningHum();
           stopThinkingFeedback();
         }
       };
@@ -3577,9 +3628,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               deferWakeDone = true;
               var ackB64 = r.audio_base64 && String(r.audio_base64).length > 50 ? r.audio_base64 : null;
               if (ackB64 && lastPlayOn === 'browser') {
-                enqueueTtsPlayback(ackB64, function(){ onWakeResponseDone(); });
+                enqueueTtsPlayback(ackB64, function(){ startListeningHum(); onWakeResponseDone(); });
               } else {
-                setTimeout(function(){ onWakeResponseDone(); }, 400);
+                setTimeout(function(){ startListeningHum(); onWakeResponseDone(); }, 400);
               }
               return;
             }
