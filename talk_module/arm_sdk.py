@@ -64,6 +64,24 @@ NUM_MOTORS = 35
 CONTROL_DT = 0.02  # 50 Hz
 
 
+def _safe_crc_init():
+    """Init CRC with fallback to pure-Python if the native .so is missing."""
+    from unitree_sdk2py.utils.crc import CRC
+    try:
+        crc = CRC()
+        print("[ArmSDK] CRC initialized (native)", flush=True)
+        return crc
+    except OSError as e:
+        print(f"[ArmSDK] WARNING: native CRC failed ({e}), using pure-Python fallback", flush=True)
+        crc = CRC.__new__(CRC)
+        crc.platform = "fallback"
+        crc._CRC__packFmtHGLowCmd = '<2B2x' + 'B3x5fI' * 35 + '5I'
+        crc._CRC__packFmtHGLowState = '<2I2B2xI' + '13fh2x' + 'B3x4f2hf7I' * 35 + '40B5I'
+        crc._CRC__packFmtLowCmd = '<4B4IH2x' + 'B3x5f3I' * 20 + '4B' + '55Bx2I'
+        crc._CRC__packFmtLowState = '<4B4IH2x' + '13fb3x' + 'B3x7fb3x3I' * 20 + '4BiH4b15H' + '8hI41B3xf2b2x2f4h2I'
+        return crc
+
+
 def is_arm_sdk_active() -> bool:
     return _arm_sdk_active
 
@@ -86,7 +104,6 @@ class G1ArmSDK:
         from talk_module.robot_actions import _ensure_dds_init
         _ensure_dds_init()
 
-        from unitree_sdk2py.utils.crc import CRC
         from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import (
             LowCmd_ as hg_LowCmd,
@@ -94,7 +111,7 @@ class G1ArmSDK:
         )
         from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
 
-        self._crc = CRC()
+        self._crc = _safe_crc_init()
         self._msg = unitree_hg_msg_dds__LowCmd_()
         self._msg.mode_pr = 0
 
