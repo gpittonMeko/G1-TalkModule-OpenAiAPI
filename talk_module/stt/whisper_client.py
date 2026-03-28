@@ -12,10 +12,11 @@ from talk_module.stt.audio_convert import prepare_audio_for_stt_api
 
 
 class WhisperClient:
-    """Trascrive audio in testo tramite OpenAI Whisper API."""
+    """Trascrive audio in testo tramite OpenAI Transcription API (whisper-1 / gpt-4o-transcribe / gpt-4o-mini-transcribe)."""
 
     def __init__(self, api_key: Optional[str] = None):
         self.client = OpenAI(api_key=api_key or settings.api_key)
+        self.model = settings.stt_model or "gpt-4o-mini-transcribe"
 
     def transcribe(self, audio_bytes: bytes, language: Optional[str] = None, format_hint: Optional[str] = None, prompt: Optional[str] = None) -> str:
         """
@@ -31,7 +32,7 @@ class WhisperClient:
         file.seek(0)
         try:
             kwargs = {
-                "model": "whisper-1",
+                "model": self.model,
                 "file": file,
                 "response_format": "text",
             }
@@ -45,5 +46,5 @@ class WhisperClient:
                 return resp.strip()
             return getattr(resp, "text", str(resp)).strip()
         except Exception as e:
-            print(f"[Whisper] Errore: {e}")
+            print(f"[STT:{self.model}] Errore: {e}")
             raise
