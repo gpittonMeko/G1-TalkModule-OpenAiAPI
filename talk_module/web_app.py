@@ -1142,15 +1142,8 @@ self.addEventListener('activate', () => self.clients.claim());
             if wkind == "miss":
                 return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
             if wkind == "ack":
-                ack_text = "Per parlarmi, di' Hey G1 seguito dalla tua domanda."
-                ack_audio = b""
-                try:
-                    ack_audio = tts_svc.synthesize(ack_text, format="mp3")
-                except Exception:
-                    pass
                 return {
-                    "text": raw_text, "response": ack_text,
-                    "audio_base64": base64.b64encode(ack_audio).decode() if ack_audio else "",
+                    "text": raw_text, "response": "", "audio_base64": "",
                     "message": "", "wake_ack": True, "duration_ms": _ms(),
                 }
             prompt = _apply_stt_fuzzy_correction(rest or "")
@@ -2062,6 +2055,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       max-width: 420px;
       margin: 0 auto;
       position: relative;
+      overflow-x: hidden;
     }
     .header {
       display: flex;
@@ -2296,6 +2290,21 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     @media (max-width: 360px) {
       #soundboardGrid { grid-template-columns: repeat(3, 1fr) !important; }
     }
+    @media (orientation: landscape) {
+      body { max-width: 100%; }
+      .header { max-width: 100%; padding-top: max(8px, env(safe-area-inset-top, 0px)); padding-bottom: 8px; }
+      .main-content { padding-top: calc(16px + 4.5rem + env(safe-area-inset-top, 0px)); }
+      #soundboardGrid { grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)) !important; }
+      #soundboardScroll { max-height: 50vh; }
+      .btn { width: 120px; height: 120px; font-size: 13px; margin: 12px auto; }
+    }
+    @media (orientation: landscape) and (max-height: 500px) {
+      .header { padding: 6px 16px; padding-top: max(6px, env(safe-area-inset-top)); }
+      .header h1 { font-size: 1rem; }
+      .main-content { padding-top: calc(12px + 3.5rem + env(safe-area-inset-top, 0px)); padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+      .sidebar { padding-top: max(12px, env(safe-area-inset-top)); }
+      .sidebar nav a { padding: 10px 16px; font-size: 14px; }
+    }
     * { -webkit-tap-highlight-color: transparent; }
     /* auto sulla root: manipulation su html può rompere select e tap su contenuti dinamici (iOS/Android). */
     html { touch-action: auto; }
@@ -2377,8 +2386,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       .client-section-tabs { display: flex; margin-top: 40px; }
       .header .hamburger { display: none !important; }
     }
-    @media (min-width: 481px) {
+    @media (min-width: 481px) and (orientation: portrait) {
       .client-section-tabs { display: none !important; }
+    }
+    @media (min-width: 481px) and (orientation: landscape) and (max-height: 500px) {
+      .client-section-tabs { display: flex; margin-top: 32px; }
+      .header .hamburger { display: none !important; }
     }
   </style>
 </head>
@@ -3023,11 +3036,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (m) { m.style.display = 'block'; m.textContent = 'Microfono non disponibile: consenti l\\'accesso (Dispositivi) e riprova.'; }
       });
     }
-    /** Dopo «Hey G1»: se nessun turno utile per questo tempo, torna solo ad ascoltare la wake word. */
-    const WAKE_COMMAND_SILENCE_MS = 12000;
-    /** Dopo startWakeRecorder: programma la prossima slice solo quando il round (risposta+TTS) è finito. */
+    const WAKE_SLICE_MS = 3000;
+    const CMD_SLICE_MS  = 6000;
+    const CMD_TIMEOUT_MS = 12000;
     let scheduleNextWakeSliceIfListening = function(){};
-    const WAKE_SLICE_MS = 6000;
     /** Coda riproduzione TTS: evita che due risposte MP3 si sovrappongano. */
     let ttsPlaybackQueue = [];
     let ttsPlaybackBusy = false;
@@ -3330,8 +3342,24 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         setTimeout(function(){ ctx.close().catch(function(){}); }, 500);
       } catch(_){}
     }
-    function resetWakeCommandMode(){ /* no-op, one-shot mode only */ }
-    function startWakeCommandIdleTimer(){ /* no-op */ }
+    function resetWakeCommandMode(){
+      wakeCommandMode = false;
+      stopListeningHum();
+      if (wakeCommandIdleTimer) { clearTimeout(wakeCommandIdleTimer); wakeCommandIdleTimer = null; }
+      var wst = document.getElementById('wakeListenStatus');
+      if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked)
+        wst.textContent = 'In ascolto per \u00abHey G1\u00bb\u2026';
+    }
+    function startWakeCommandIdleTimer(){
+      if (wakeCommandIdleTimer) clearTimeout(wakeCommandIdleTimer);
+      wakeCommandIdleTimer = setTimeout(function(){
+        if (wakeCommandMode) {
+          wakeLog('Timeout comando, torno in ascolto wake', '#71717a');
+          resetWakeCommandMode();
+          scheduleNextWakeSliceIfListening();
+        }
+      }, CMD_TIMEOUT_MS);
+    }
     function stopWakeLevelMeter(){
       if (wakeLevelSampleInterval) { clearInterval(wakeLevelSampleInterval); wakeLevelSampleInterval = null; }
       if (wakeLevelCtx) { try { wakeLevelCtx.close(); } catch(_){} wakeLevelCtx = null; }
@@ -3415,8 +3443,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       fr.onload = function(){
         const b64 = arrayBufferToBase64(fr.result);
         try {
+          if (wakeCommandMode) { stopListeningHum(); playStopChime(); }
           startThinkingFeedback();
-          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: false });
+          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: wakeCommandMode });
         } catch(_){
           wakeListenPending = false;
           wakeAudioInFlight = false;
@@ -3598,14 +3627,16 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (!wakeListenActive || !document.getElementById('wakeListenToggle').checked) return;
         if (isRecording) { setTimeout(runWakeSlice, 350); return; }
         if (!wakeStream) return;
+        const isCmd = wakeCommandMode;
+        const sliceMs = isCmd ? CMD_SLICE_MS : WAKE_SLICE_MS;
         const mr = new MediaRecorder(wakeStream, { mimeType: wakeMimeType, audioBitsPerSecond: 128000 });
         wakeActiveMr = mr;
         const ch = [];
         wakeSlicePeak = 0;
-        let voiceDetected = false, lastVoiceTs = 0;
-        const SILENCE_AFTER_VOICE_MS = 1500;
+        let voiceDurationMs = 0, lastVoiceTs = 0, stopped = false;
         let sliceInterval = null;
-        function stopMrEarly(){
+        function stopMr(){
+          if (stopped) return; stopped = true;
           if (sliceInterval) { clearInterval(sliceInterval); sliceInterval = null; }
           try { if (mr.state !== 'inactive') { if (typeof mr.requestData === 'function') mr.requestData(); mr.stop(); } } catch(_){}
         }
@@ -3619,9 +3650,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             for (let i = 0; i < buf.length; i++) if (buf[i] > s) s = buf[i];
             if (s > wakeSlicePeak) wakeSlicePeak = s;
             const th = getWakeVoiceThreshold();
-            if (s >= th) { voiceDetected = true; lastVoiceTs = Date.now(); }
-            else if (voiceDetected && lastVoiceTs > 0 && (Date.now() - lastVoiceTs >= SILENCE_AFTER_VOICE_MS)) {
-              stopMrEarly();
+            if (s >= th) { voiceDurationMs += 50; lastVoiceTs = Date.now(); }
+            if (isCmd && voiceDurationMs >= 500 && lastVoiceTs > 0 && (Date.now() - lastVoiceTs >= 1500)) {
+              stopMr();
             }
           }, 50);
           wakeLevelSampleInterval = sliceInterval;
@@ -3639,11 +3670,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           else scheduleNextWakeSliceIfListening();
         };
         mr.start();
-        setTimeout(function(){ stopMrEarly(); }, WAKE_SLICE_MS);
+        setTimeout(function(){ stopMr(); }, sliceMs);
       }
       runWakeSlice();
       const st = document.getElementById('wakeListenStatus');
-      if (st) st.textContent = 'In ascolto \u2014 di \u00abHey G1\u00bb + comando';
+      if (st) st.textContent = 'In ascolto per \u00abHey G1\u00bb\u2026';
     }
     const wakeListenToggleEl = document.getElementById('wakeListenToggle');
     if (wakeListenToggleEl) {
@@ -3722,24 +3753,21 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               return;
             }
             if (r.wake_ack) {
-              wakeLog('Solo "Hey G1". Dì Hey G1 + domanda.', '#f59e0b');
+              wakeLog('WAKE! Ti ascolto\u2026', '#22c55e');
               playWakeChime();
+              wakeCommandMode = true;
+              startWakeCommandIdleTimer();
               btn.disabled = false;
-              var ackB64 = r.audio_base64 && String(r.audio_base64).length > 50 ? r.audio_base64 : null;
-              if (ackB64 && lastPlayOn === 'browser') {
-                deferWakeDone = true;
-                document.getElementById('result').innerHTML = '<div class="warn">'+(r.response||'Dì Hey G1 seguito dalla domanda.')+'</div>';
-                enqueueTtsPlayback(ackB64, onWakeResponseDone);
-              } else {
-                document.getElementById('result').innerHTML = '<div class="warn">'+(r.response||'Dì Hey G1 seguito dalla domanda.')+'</div>';
-                onWakeResponseDone();
-              }
+              var wst = document.getElementById('wakeListenStatus');
+              if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
+              setTimeout(function(){ startListeningHum(); }, 250);
+              onWakeResponseDone();
               return;
             }
             if (!r.response && r.message) {
               wakeLog('msg: '+r.message, '#f59e0b');
               const wst = document.getElementById('wakeListenStatus');
-              if (wst) wst.textContent = 'In ascolto \u2014 di \u00abHey G1\u00bb + comando';
+              if (wst) wst.textContent = wakeCommandMode ? 'Ti ascolto\u2026' : 'In ascolto per \u00abHey G1\u00bb\u2026';
               document.getElementById('result').innerHTML = '<div class="warn">'+r.message+'</div>';
               btn.disabled = false;
               return;
@@ -3758,9 +3786,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             deferWakeDone = true;
             enqueueTtsPlayback(r.audio_base64, onWakeResponseDone);
           }
-          wakeLog('Comando completato, torno in ascolto wake', '#71717a');
-          const wst = document.getElementById('wakeListenStatus');
-          if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) wst.textContent = 'In ascolto \u2014 di \u00abHey G1\u00bb + comando';
+          if (wakeCommandMode) {
+            resetWakeCommandMode();
+            wakeLog('Comando completato, torno in ascolto wake', '#71717a');
+          }
         } finally {
           if (!deferWakeDone) onWakeResponseDone();
         }
@@ -5039,7 +5068,7 @@ LISTEN_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <h1>Ascolto continuo</h1>
-  <p style="color:#71717a;">Di &laquo;Hey G1&raquo; + domanda in un&apos;unica frase. Slice 6 sec. Non toccare nulla.</p>
+  <p style="color:#71717a;">Di &laquo;Hey G1&raquo;, aspetta il chime, poi parla. Non toccare nulla.</p>
   <div class="status" id="status">Connessione...</div>
   <div class="status" id="result" style="display:none"></div>
   <p style="margin-top:24px;"><a href="/" style="color:#3b82f6;">Setup</a> | <a href="/local" style="color:#3b82f6;">Parla (push)</a></p>
