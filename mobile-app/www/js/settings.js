@@ -52,6 +52,7 @@ const Settings = (() => {
   async function clearCache() {
     if (!confirm("Svuotare tutta la cache della soundboard?")) return;
     await Storage.clearSlots();
+    sessionStorage.removeItem("g1tr_sb_autosync_attempted");
     await Soundboard.init();
     updateCacheStats();
     App.toast("Cache svuotata");
@@ -68,12 +69,11 @@ const Settings = (() => {
     } catch {}
   }
 
-  // ── UI ↔ Config ───────────────────────────
-
   function _toUI() {
     document.getElementById("setIp").value = _cfg.ip;
     document.getElementById("setPort").value = _cfg.port;
     document.getElementById("setWdPort").value = _cfg.wdPort;
+    document.getElementById("setWdToken").value = _cfg.wdToken;
     document.getElementById("setHttps").classList.toggle("on", _cfg.https);
     document.getElementById("setApiKey").value = _cfg.apiKey;
     document.getElementById("setTtsVoice").value = _cfg.ttsVoice;
@@ -84,6 +84,7 @@ const Settings = (() => {
     _cfg.ip = document.getElementById("setIp").value.trim() || DEFAULTS.ip;
     _cfg.port = parseInt(document.getElementById("setPort").value) || DEFAULTS.port;
     _cfg.wdPort = parseInt(document.getElementById("setWdPort").value) || DEFAULTS.wdPort;
+    _cfg.wdToken = document.getElementById("setWdToken").value.trim();
     _cfg.apiKey = document.getElementById("setApiKey").value.trim();
     _cfg.ttsVoice = document.getElementById("setTtsVoice").value;
     _cfg.ttsModel = document.getElementById("setTtsModel").value;

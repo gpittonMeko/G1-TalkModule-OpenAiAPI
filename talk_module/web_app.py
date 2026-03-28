@@ -217,6 +217,18 @@ if HAS_FASTAPI:
         version="1.0.0",
     )
 
+    try:
+        from talk_module.teaching_api import router as teaching_router
+        app.include_router(teaching_router)
+    except Exception as _tea_err:
+        print(f"[web_app] teaching_api router not loaded: {_tea_err}")
+
+    try:
+        from talk_module.vr_teleop_api import router as vr_router
+        app.include_router(vr_router)
+    except Exception as _vr_err:
+        print(f"[web_app] vr_teleop_api router not loaded: {_vr_err}")
+
     @app.exception_handler(Exception)
     def _json_exception_handler(request, exc):
         """Ritorna sempre JSON, mai HTML."""
@@ -351,6 +363,11 @@ self.addEventListener('activate', () => self.clients.claim());
         """Pagina telecomando robot: joystick + gesti braccia G1."""
         return ROBOT_CONTROL_TEMPLATE
 
+    @app.get("/vr-control", response_class=HTMLResponse)
+    def vr_control_page():
+        """Pagina VR control per Quest 3: hand tracking + gamepad locomotion."""
+        return VR_CONTROL_TEMPLATE
+
     @app.get("/local")
     @app.get("/listen")
     @app.get("/local-fetch")
@@ -385,12 +402,70 @@ self.addEventListener('activate', () => self.clients.claim());
         return Response(content=fp.read_bytes(), media_type="audio/webm",
                         headers={"Content-Disposition": f'inline; filename="{safe}"'})
 
+    _LED_EFFECT_MAP = {
+        "rainbow": ("rainbow", (255, 180, 0), 1.2),
+        "breathe_blue": ("breathe", (0, 120, 255), 1.0),
+        "breathe_green": ("breathe", (0, 255, 80), 1.0),
+        "breathe_red": ("breathe", (255, 40, 40), 1.0),
+        "breathe_purple": ("breathe", (168, 85, 247), 1.0),
+        "blink_red": ("blink", (255, 0, 0), 1.5),
+        "blink_blue": ("blink", (0, 100, 255), 1.5),
+        "solid_blue": ("solid", (0, 120, 255), 0),
+        "solid_green": ("solid", (0, 255, 80), 0),
+        "solid_red": ("solid", (255, 0, 0), 0),
+        "solid_amber": ("solid", (255, 180, 0), 0),
+        "solid_purple": ("solid", (168, 85, 247), 0),
+        "solid_cyan": ("solid", (0, 220, 220), 0),
+        "solid_white": ("solid", (255, 255, 255), 0),
+    }
+
+    def _fire_led_effect(effect_name: str) -> None:
+        """Activate a named LED effect (used by soundboard)."""
+        if not effect_name:
+            return
+        entry = _LED_EFFECT_MAP.get(effect_name)
+        if not entry:
+            return
+        mode, color, speed = entry
+        try:
+            from talk_module.robot_actions import led_start_animation, led_stop_animation, set_led_color
+            if mode == "solid":
+                led_stop_animation()
+                set_led_color(*color)
+            else:
+                led_start_animation(mode=mode, color=color, speed=speed)
+        except Exception:
+            pass
+
     @app.post("/api/led")
     def api_set_led(data: dict = Body(...)):
-        """Set LED color: {r, g, b} or {state: 'idle'|'listening'|'thinking'|'speaking'}."""
-        from talk_module.robot_actions import set_led_color, LED_LISTENING, LED_THINKING, LED_SPEAKING, LED_IDLE
+        """Set LED color or animation.
+        {state: 'idle'|'listening'|'thinking'|'speaking'}
+        {r, g, b} for solid color
+        {animation: 'rainbow'|'breathe'|'blink', color: [r,g,b], speed: 1.0}
+        """
+        from talk_module.robot_actions import (
+            set_led_color, led_start_animation, led_stop_animation,
+            LED_LISTENING, LED_THINKING, LED_SPEAKING, LED_IDLE,
+        )
+        effect = (data.get("effect") or "").strip().lower()
+        if effect and effect in _LED_EFFECT_MAP:
+            _fire_led_effect(effect)
+            return {"ok": True, "message": f"LED effect '{effect}' started"}
+        anim = (data.get("animation") or "").strip().lower()
+        if anim:
+            color = tuple(data.get("color", [255, 180, 0]))[:3]
+            speed = float(data.get("speed", 1.0))
+            led_start_animation(mode=anim, color=color, speed=speed)
+            return {"ok": True, "message": f"Animation '{anim}' started"}
         state = (data.get("state") or "").strip().lower()
-        presets = {"idle": LED_IDLE, "listening": LED_LISTENING, "thinking": LED_THINKING, "speaking": LED_SPEAKING}
+        anim_states = {"thinking": ("rainbow", LED_THINKING, 1.2), "speaking": ("breathe", LED_SPEAKING, 1.0)}
+        if state in anim_states:
+            mode, color, speed = anim_states[state]
+            led_start_animation(mode=mode, color=color, speed=speed)
+            return {"ok": True, "message": f"LED {state} animation started"}
+        led_stop_animation()
+        presets = {"idle": LED_IDLE, "listening": LED_LISTENING}
         if state in presets:
             r, g, b = presets[state]
         else:
@@ -678,6 +753,7 @@ self.addEventListener('activate', () => self.clients.claim());
                     "format_clean": "mp3",
                     "robot_arm": "",
                     "robot_loco": "",
+                    "led_effect": "",
                 }
                 for i in range(n)
             ]
@@ -698,6 +774,7 @@ self.addEventListener('activate', () => self.clients.claim());
                         "format_clean": "mp3",
                         "robot_arm": "",
                         "robot_loco": "",
+                        "led_effect": "",
                     }
                 )
             for i in range(len(slots)):
@@ -710,6 +787,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 s.setdefault("format_clean", "mp3")
                 s.setdefault("robot_arm", "")
                 s.setdefault("robot_loco", "")
+                s.setdefault("led_effect", "")
             out = slots[:n]
             _soundboard_cache = (mtime_ns, out)
             return out
@@ -725,6 +803,7 @@ self.addEventListener('activate', () => self.clients.claim());
                     "format_clean": "mp3",
                     "robot_arm": "",
                     "robot_loco": "",
+                    "led_effect": "",
                 }
                 for i in range(n)
             ]
@@ -745,6 +824,7 @@ self.addEventListener('activate', () => self.clients.claim());
                     "has_clean": len(ac) > 50,
                     "robot_arm": str(s.get("robot_arm") or ""),
                     "robot_loco": str(s.get("robot_loco") or ""),
+                    "led_effect": str(s.get("led_effect") or ""),
                 }
             )
         return lite
@@ -806,6 +886,7 @@ self.addEventListener('activate', () => self.clients.claim());
             "format_clean": s.get("format_clean") or "mp3",
             "robot_arm": str(s.get("robot_arm") or ""),
             "robot_loco": str(s.get("robot_loco") or ""),
+            "led_effect": str(s.get("led_effect") or ""),
         }
 
     @app.get("/api/run-sheet")
@@ -871,22 +952,25 @@ self.addEventListener('activate', () => self.clients.claim());
         slot = int(data.get("slot", 0))
         if slot < 0 or slot >= SOUNDBOARD_SLOT_COUNT:
             return {"ok": False, "error": f"slot 0-{SOUNDBOARD_SLOT_COUNT - 1}"}
-        audio_b64 = str(data.get("audio_base64", ""))
+        audio_b64 = str(data.get("audio_base64") or "")
         fmt = str(data.get("format", "webm"))
-        clean_b64 = str(data.get("audio_base64_clean", "")) if "audio_base64_clean" in data else None
+        clean_b64 = str(data.get("audio_base64_clean") or "") if "audio_base64_clean" in data else None
         clean_fmt = str(data.get("format_clean", "mp3") or "mp3")
         slots = _load_soundboard()
-        if clean_b64 is None:
-            prev = slots[slot] if slot < len(slots) else {}
+        prev = slots[slot] if slot < len(slots) else {}
+        if not audio_b64 and prev.get("audio_base64"):
+            audio_b64 = str(prev["audio_base64"])
+            fmt = str(prev.get("format") or "webm")
+        if clean_b64 is None or (not clean_b64 and prev.get("audio_base64_clean")):
             clean_b64 = str(prev.get("audio_base64_clean") or "")
             clean_fmt = str(prev.get("format_clean") or "mp3")
         elif not clean_b64 and audio_b64:
             clean_b64 = audio_b64
             clean_fmt = fmt
         txt = str(data.get("text", "")).strip()[:SOUNDBOARD_TEXT_MAX_LEN] or f"Comando {slot+1}"
-        prev = slots[slot] if slot < len(slots) else {}
         ra = data.get("robot_arm")
         rl = data.get("robot_loco")
+        le = data.get("led_effect")
         slots[slot] = {
             "icon": str(data.get("icon", "🎤")).strip()[:20],
             "text": txt,
@@ -896,6 +980,7 @@ self.addEventListener('activate', () => self.clients.claim());
             "format_clean": clean_fmt if clean_b64 else "mp3",
             "robot_arm": str(ra if ra is not None else (prev.get("robot_arm") or "")),
             "robot_loco": str(rl if rl is not None else (prev.get("robot_loco") or "")),
+            "led_effect": str(le if le is not None else (prev.get("led_effect") or "")),
         }
         try:
             SOUNDBOARD_PATH.write_text(json.dumps({"slots": slots}, indent=2), encoding="utf-8")
@@ -1051,18 +1136,25 @@ self.addEventListener('activate', () => self.clients.claim());
             raise HTTPException(400, "Audio troppo corto")
         arm = str(s.get("robot_arm") or "").strip()
         loco = str(s.get("robot_loco") or "").strip()
+        led_fx = str(s.get("led_effect") or "").strip()
         if not arm and not loco:
             arm = "face_wave"
-        if arm or loco:
+        if arm or loco or led_fx:
             import threading as _thr
 
-            def _sb_robot(a, l):
+            def _sb_robot(a, l, led):
                 try:
                     from talk_module.robot_actions import (
                         execute_g1_loco_command,
                         execute_robot_action,
                         loco_command_requires_confirm,
                     )
+                    if led:
+                        try:
+                            from talk_module.processing import _led_animate, set_led_safe
+                            _fire_led_effect(led)
+                        except Exception as le:
+                            print(f"[soundboard-play-local] led: {le}", flush=True)
                     if a:
                         ok, msg = execute_robot_action(a)
                         print(f"[soundboard-play-local] arm={a!r} ok={ok} msg={msg}", flush=True)
@@ -1071,7 +1163,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 except Exception as e:
                     print(f"[soundboard-play-local] robot: {e}", flush=True)
 
-            _thr.Thread(target=_sb_robot, args=(arm, loco), daemon=True).start()
+            _thr.Thread(target=_sb_robot, args=(arm, loco, led_fx), daemon=True).start()
         from talk_module.audio import AudioPlayer
 
         try:
@@ -1201,6 +1293,9 @@ self.addEventListener('activate', () => self.clients.claim());
 
         def _fire():
             try:
+                le = (getattr(rm, "led_effect", None) or "").strip()
+                if le:
+                    _fire_led_effect(le)
                 from talk_module.robot_actions import (
                     execute_g1_loco_command,
                     execute_robot_action,
@@ -1221,8 +1316,9 @@ self.addEventListener('activate', () => self.clients.claim());
         return ((rm.response or "").strip() or "Ok")
 
     def _stt_and_wake_check(audio_bytes: bytes, format_hint: str = "webm") -> dict:
-        """STT + wake word detection. Always returns wake_ack on any wake detection
-        (command comes in a separate slice with skipWake=true).
+        """STT + wake word detection.
+        - wkind 'ack' (solo wake word) → wake_ack (client entra in command mode)
+        - wkind 'ok' (wake + comando nello stesso slice) → processa subito il comando
         Uses a dedicated STT prompt biased toward recognising "Hey G1"."""
         t0 = time.perf_counter()
         _ms = lambda: int((time.perf_counter() - t0) * 1000)
@@ -1244,6 +1340,12 @@ self.addEventListener('activate', () => self.clients.claim());
             print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r} ({_ms()}ms)", flush=True)
             if wkind == "miss":
                 return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
+            if wkind == "ok" and rest and rest.strip():
+                prompt = _apply_stt_fuzzy_correction(rest.strip())
+                print(f"[Wake] comando inline: {prompt!r}", flush=True)
+                result = _process_after_wake(prompt, raw_text, t0)
+                result["wake_cmd_inline"] = True
+                return result
             return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_ack": True, "duration_ms": _ms()}
         except Exception as e:
             print(f"[Wake] STT error: {e}", flush=True)
@@ -2528,6 +2630,22 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         return false;
       };
     })();
+    (function(){
+      function g1ApplyClientHash(){
+        var h = (location.hash||'').replace(/^#/, '').trim();
+        if (!h) return;
+        var allowed = {soundboard:1,runsheet:1,parla:1,knowledge:1,devices:1,robot:1,info:1};
+        if (allowed[h] && typeof window.g1ActivateClientSection === 'function') {
+          window.g1ActivateClientSection(h);
+        }
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', g1ApplyClientHash);
+      } else {
+        g1ApplyClientHash();
+      }
+      window.addEventListener('hashchange', g1ApplyClientHash);
+    })();
     </script>
     <section id="section-soundboard" class="section active">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Soundboard</h2>
@@ -2618,10 +2736,35 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               <option value="double_step_forward">Due passi avanti</option>
               <option value="double_step_back">Due passi indietro</option>
               <option value="spin_inplace">Gira su se stesso</option>
+              <option value="gentle_sway">Dondolio leggero</option>
             </select>
           </div>
         </div>
         <p class="hint" style="margin:4px 0 0;font-size:10px;color:#64748b;">Se nessun gesto selezionato, il robot far&agrave; &quot;Saluto (ciao)&quot; di default alla riproduzione locale.</p>
+      </div>
+      <div style="margin-bottom:12px;padding:12px;background:rgba(168,85,247,0.06);border-radius:10px;border:1px solid rgba(168,85,247,0.15);">
+        <label style="font-size:12px;color:#c4b5fd;font-weight:600;display:block;margin-bottom:6px;">LED colore (opzionale)</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <select id="sbModalLed" style="flex:1;min-width:140px;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;">
+            <option value="">Nessuno (default)</option>
+            <option value="rainbow">&#127752; Arcobaleno</option>
+            <option value="breathe_blue">&#128153; Blu pulsante</option>
+            <option value="breathe_green">&#128154; Verde pulsante</option>
+            <option value="breathe_red">&#10084;&#65039; Rosso pulsante</option>
+            <option value="breathe_purple">&#128156; Viola pulsante</option>
+            <option value="blink_red">&#128308; Rosso lampeggiante</option>
+            <option value="blink_blue">&#128309; Blu lampeggiante</option>
+            <option value="solid_blue">&#128309; Blu fisso</option>
+            <option value="solid_green">&#128994; Verde fisso</option>
+            <option value="solid_red">&#128308; Rosso fisso</option>
+            <option value="solid_amber">&#128992; Ambra fisso</option>
+            <option value="solid_purple">&#128995; Viola fisso</option>
+            <option value="solid_cyan">&#129525; Ciano fisso</option>
+            <option value="solid_white">&#11036; Bianco fisso</option>
+          </select>
+          <div id="sbModalLedPreview" style="width:28px;height:28px;border-radius:50%;border:2px solid #3f3f46;background:#27272a;"></div>
+        </div>
+        <p class="hint" style="margin:4px 0 0;font-size:10px;color:#64748b;">Il LED si attiva durante la riproduzione dello slot.</p>
       </div>
       <div style="display:flex;gap:8px;margin-top:16px;">
         <button type="button" id="sbModalSave" style="flex:1;padding:12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Salva</button>
@@ -3241,12 +3384,16 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (!sd) return;
       var arm = (sd.robot_arm && String(sd.robot_arm).trim()) || '';
       var loco = (sd.robot_loco && String(sd.robot_loco).trim()) || '';
+      var led = (sd.led_effect && String(sd.led_effect).trim()) || '';
       if (!arm && !loco) arm = 'face_wave';
       var ip = '192.168.123.161';
       try {
         var ls = localStorage.getItem('g1_robot_ip');
         if (ls && ls.trim()) ip = ls.trim();
       } catch(_) {}
+      if (led) {
+        fetch('/api/led', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ effect: led }) }).catch(function(){});
+      }
       if (arm) {
         fetch('/api/robot-action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ action_id: arm, robot_ip: ip }) }).catch(function(){});
       }
@@ -3533,6 +3680,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       wakeCommandMode = false;
       stopListeningHum();
       if (wakeCommandIdleTimer) { clearTimeout(wakeCommandIdleTimer); wakeCommandIdleTimer = null; }
+      wakeQueuedBlob = null;
+      if (wakeActiveMr) {
+        wakeDiscardCurrentSlice = true;
+        try { if (wakeActiveMr.state !== 'inactive') wakeActiveMr.stop(); } catch(_){}
+      }
       var wst = document.getElementById('wakeListenStatus');
       if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked)
         wst.textContent = 'In ascolto per \u00abHey G1\u00bb\u2026';
@@ -3603,9 +3755,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
       wakeAudioInFlight = false;
       wakeQueuedBlob = null;
+      wakeDiscardCurrentSlice = false;
       _wakeDropSlicesAfterTts = 2;
       setRobotLed('idle');
       setTimeout(function(){
+        wakeDiscardCurrentSlice = false;
         setRobotLed('listening');
         scheduleNextWakeSliceIfListening();
       }, WAKE_POST_TTS_PAUSE_MS);
@@ -3971,6 +4125,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               if (btn) btn.disabled = false;
               return;
             }
+            if (r.wake_cmd_inline) {
+              wakeDiscardCurrentSlice = true;
+              wakeQueuedBlob = null;
+              if (wakeActiveMr) {
+                try { if (wakeActiveMr.state !== 'inactive') wakeActiveMr.stop(); } catch(_){}
+              }
+              wakeLog('WAKE + CMD inline: "'+String(r.text||'')+'"', '#22c55e');
+              playWakeChime();
+            }
             if (r.wake_ack) {
               if (wakeCommandMode) {
                 wakeListenPending = false;
@@ -3992,6 +4155,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               var wst = document.getElementById('wakeListenStatus');
               if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
               setTimeout(function(){ startListeningHum(); }, 250);
+              scheduleNextWakeSliceIfListening();
               return;
             }
             if (!r.response && r.message) {
@@ -4556,8 +4720,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       var armSel = document.getElementById('sbModalArm');
       var locoSel = document.getElementById('sbModalLoco');
+      var ledSel = document.getElementById('sbModalLed');
       if (armSel) armSel.value = s.robot_arm || '';
       if (locoSel) locoSel.value = s.robot_loco || '';
+      if (ledSel) { ledSel.value = s.led_effect || ''; sbUpdateLedPreview(); }
       document.getElementById('sbModal').style.display = 'flex';
       if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
         applyFull(s);
@@ -4570,10 +4736,26 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         applyFull(full);
         if (armSel) armSel.value = full.robot_arm || '';
         if (locoSel) locoSel.value = full.robot_loco || '';
+        if (ledSel) { ledSel.value = full.led_effect || ''; sbUpdateLedPreview(); }
       }).catch(function(e){
         if (st) st.innerHTML = 'Errore: '+(e.message||String(e));
       });
     }
+    var _sbLedColorMap = {
+      'rainbow':'linear-gradient(90deg,red,orange,yellow,green,blue,violet)','breathe_blue':'#0078ff','breathe_green':'#00ff50',
+      'breathe_red':'#ff2828','breathe_purple':'#a855f7','blink_red':'#ff0000','blink_blue':'#0064ff',
+      'solid_blue':'#0078ff','solid_green':'#00ff50','solid_red':'#ff0000','solid_amber':'#ffb400',
+      'solid_purple':'#a855f7','solid_cyan':'#00dcdc','solid_white':'#ffffff'
+    };
+    function sbUpdateLedPreview(){
+      var sel = document.getElementById('sbModalLed');
+      var prev = document.getElementById('sbModalLedPreview');
+      if (!sel || !prev) return;
+      var c = _sbLedColorMap[sel.value] || '#27272a';
+      prev.style.background = c;
+    }
+    var _sbLedSel = document.getElementById('sbModalLed');
+    if (_sbLedSel) _sbLedSel.onchange = sbUpdateLedPreview;
     const sbModalTextEl = document.getElementById('sbModalText');
     if (sbModalTextEl) { sbModalTextEl.oninput = updateSbCharCount; }
     function closeSbModal(){ document.getElementById('sbModal').style.display = 'none'; sbEditIdx = -1; sbEditAudio = null; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; }
@@ -4584,7 +4766,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const text = (document.getElementById('sbModalText').value || 'Comando '+(sbEditIdx+1)).trim().substring(0, sbTextMax);
       const robot_arm = (document.getElementById('sbModalArm')||{}).value || '';
       const robot_loco = (document.getElementById('sbModalLoco')||{}).value || '';
-      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
+      const led_effect = (document.getElementById('sbModalLed')||{}).value || '';
+      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco, led_effect})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
     };
     document.getElementById('sbModalSynth').onclick = async ()=>{
@@ -5392,6 +5575,39 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
 #robotIp{width:140px;padding:6px 8px;background:#1e1e2e;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:12px;font-family:monospace;}
 .log-area{max-height:60px;overflow-y:auto;padding:4px 8px;font-size:10px;color:#52525b;font-family:monospace;line-height:1.4;}
 .log-area .ok{color:#22c55e;}.log-area .err{color:#ef4444;}
+.teach-section{margin-top:12px;padding:12px;background:#111318;border:1px solid #27272a;border-radius:12px;}
+.teach-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.teach-header h2{font-size:13px;color:#a78bfa;font-weight:700;text-transform:uppercase;letter-spacing:1px;}
+.teach-status{font-size:11px;padding:3px 8px;border-radius:6px;background:#27272a;color:#a1a1aa;}
+.teach-status.recording{background:#ef444430;color:#ef4444;animation:pulse-rec 1s infinite;}
+.teach-status.replaying{background:#14b8a630;color:#14b8a6;}
+@keyframes pulse-rec{0%,100%{opacity:1;}50%{opacity:0.5;}}
+.teach-btns{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;}
+.teach-btn{padding:10px 16px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid #3f3f46;background:#27272a;color:#e4e4e7;-webkit-tap-highlight-color:transparent;transition:background 0.15s;}
+.teach-btn:active{transform:scale(0.96);}
+.teach-btn.rec{background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.4);color:#fca5a5;}
+.teach-btn.rec:active{background:rgba(239,68,68,0.3);}
+.teach-btn.play{background:rgba(20,184,166,0.15);border-color:rgba(20,184,166,0.4);color:#5eead4;}
+.teach-btn.play:active{background:rgba(20,184,166,0.3);}
+.teach-btn.save{background:rgba(99,102,241,0.15);border-color:rgba(99,102,241,0.4);color:#a5b4fc;}
+.teach-btn.save:active{background:rgba(99,102,241,0.3);}
+.teach-btn.stop{background:rgba(245,158,11,0.15);border-color:rgba(245,158,11,0.4);color:#fcd34d;}
+.teach-btn.stop:active{background:rgba(245,158,11,0.3);}
+.teach-btn:disabled{opacity:0.35;pointer-events:none;}
+.joints-vis{display:flex;flex-direction:column;gap:4px;margin-top:8px;}
+.joint-group-label{font-size:9px;color:#71717a;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;}
+.joint-row{display:flex;align-items:center;gap:4px;}
+.joint-label{font-size:9px;color:#52525b;width:20px;text-align:right;font-family:monospace;}
+.joint-bar-wrap{flex:1;height:8px;background:#1e1e2e;border-radius:4px;overflow:hidden;position:relative;}
+.joint-bar{height:100%;background:#14b8a6;border-radius:4px;transition:width 0.1s;width:50%;}
+.joint-bar.waist{background:#a78bfa;}
+.joint-val{font-size:9px;color:#52525b;width:36px;font-family:monospace;}
+.teach-timer{font-size:24px;font-weight:700;color:#ef4444;font-family:monospace;text-align:center;margin:6px 0;}
+.teach-slot-row{display:flex;align-items:center;gap:6px;margin-top:8px;}
+.teach-slot-row label{font-size:11px;color:#71717a;}
+.teach-slot-row input{width:60px;padding:4px 6px;background:#1e1e2e;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:12px;font-family:monospace;text-align:center;}
+.stick-wrap{display:flex;justify-content:center;margin:8px 0;}
+.stick-wrap canvas{background:#0a0b10;border:1px solid #27272a;border-radius:10px;}
 </style>
 </head>
 <body>
@@ -5422,6 +5638,36 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
     </div>
     <div class="log-area" id="logArea"></div>
   </div>
+
+  <div class="teach-section">
+    <div class="teach-header">
+      <h2>Teaching (braccia)</h2>
+      <span id="teachStatus" class="teach-status">idle</span>
+    </div>
+    <div id="teachTimer" class="teach-timer" style="display:none;">00:00</div>
+    <div class="teach-btns">
+      <button type="button" class="teach-btn rec" id="btnRec" onclick="teachAction('start_record')">REC</button>
+      <button type="button" class="teach-btn stop" id="btnStop" onclick="teachAction('stop_record')" disabled>STOP</button>
+      <button type="button" class="teach-btn play" id="btnPlay" onclick="teachAction('replay_temp')" disabled>PLAY</button>
+      <button type="button" class="teach-btn stop" id="btnEmStop" onclick="teachAction('emergency_stop')">E-STOP</button>
+    </div>
+    <div class="teach-slot-row">
+      <label>Slot:</label>
+      <input id="teachSlotId" type="number" min="0" max="99" value="0" />
+      <button type="button" class="teach-btn save" id="btnSave" onclick="teachSaveSlot()" disabled>SAVE</button>
+      <button type="button" class="teach-btn play" id="btnPlaySlot" onclick="teachPlaySlot()">PLAY SLOT</button>
+    </div>
+    <div class="stick-wrap"><canvas id="stickCanvas" width="320" height="280"></canvas></div>
+    <div class="joints-vis" id="jointsVis">
+      <div class="joint-group-label">Vita</div>
+      <div id="jgWaist"></div>
+      <div class="joint-group-label">Braccio SX</div>
+      <div id="jgLeft"></div>
+      <div class="joint-group-label">Braccio DX</div>
+      <div id="jgRight"></div>
+    </div>
+  </div>
+
   <div class="joystick-area">
     <div class="joy-col">
       <div class="joy-col-label">Movimento</div>
@@ -5639,6 +5885,444 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
     jVyaw.textContent = '0.00';
     stopSendingIfIdle();
   });
+
+  /* ── Teaching section ── */
+  var teachState = 'idle';
+  var teachEvt = null;
+  var timerEl = document.getElementById('teachTimer');
+  var timerStart = 0, timerIv = null;
+
+  var JOINT_NAMES_W = ['Y','R','P'];
+  var JOINT_NAMES_A = ['SP','SR','SY','E','WR','WP','WY'];
+  buildJointBars('jgWaist', JOINT_NAMES_W, 'waist');
+  buildJointBars('jgLeft', JOINT_NAMES_A, '');
+  buildJointBars('jgRight', JOINT_NAMES_A, '');
+
+  function buildJointBars(containerId, names, cls) {
+    var c = document.getElementById(containerId);
+    names.forEach(function(n, i) {
+      var row = document.createElement('div');
+      row.className = 'joint-row';
+      row.innerHTML = '<span class="joint-label">' + n + '</span>' +
+        '<div class="joint-bar-wrap"><div class="joint-bar ' + cls + '" id="' + containerId + '_b' + i + '"></div></div>' +
+        '<span class="joint-val" id="' + containerId + '_v' + i + '">0.00</span>';
+      c.appendChild(row);
+    });
+  }
+
+  function updateBars(groupId, vals) {
+    if (!vals) return;
+    vals.forEach(function(v, i) {
+      var bar = document.getElementById(groupId + '_b' + i);
+      var lbl = document.getElementById(groupId + '_v' + i);
+      if (!bar) return;
+      var pct = Math.min(100, Math.max(0, 50 + (v / Math.PI) * 50));
+      bar.style.width = pct + '%';
+      if (lbl) lbl.textContent = v.toFixed(2);
+    });
+  }
+
+  function connectSSE() {
+    if (teachEvt) { try { teachEvt.close(); } catch(e){} }
+    teachEvt = new EventSource('/api/teaching/stream');
+    teachEvt.onmessage = function(e) {
+      try {
+        var d = JSON.parse(e.data);
+        updateTeachUI(d);
+        if (d.joints) {
+          updateBars('jgWaist', d.joints.waist);
+          updateBars('jgLeft', d.joints.left_arm);
+          updateBars('jgRight', d.joints.right_arm);
+        }
+      } catch(err) {}
+    };
+    teachEvt.onerror = function() {
+      setTimeout(connectSSE, 3000);
+    };
+  }
+  connectSSE();
+
+  function updateTeachUI(d) {
+    var st = d.state || 'idle';
+    var badge = document.getElementById('teachStatus');
+    badge.textContent = st;
+    badge.className = 'teach-status ' + st;
+
+    document.getElementById('btnRec').disabled = (st !== 'idle');
+    document.getElementById('btnStop').disabled = (st !== 'recording');
+    document.getElementById('btnPlay').disabled = (st !== 'idle');
+    document.getElementById('btnSave').disabled = (st !== 'idle');
+
+    if (st === 'recording') {
+      timerEl.style.display = '';
+      if (!timerIv) {
+        timerStart = Date.now();
+        timerIv = setInterval(function() {
+          var s = Math.floor((Date.now() - timerStart) / 1000);
+          var m = Math.floor(s / 60);
+          timerEl.textContent = String(m).padStart(2,'0') + ':' + String(s % 60).padStart(2,'0');
+        }, 500);
+      }
+    } else {
+      timerEl.style.display = 'none';
+      if (timerIv) { clearInterval(timerIv); timerIv = null; }
+    }
+  }
+
+  window.teachAction = function(action) {
+    log('Teaching: ' + action);
+    fetch('/api/teaching/' + action, { method: 'POST' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.ok) log('Teaching OK: ' + action, 'ok');
+        else log('Teaching ERR: ' + (d.error || JSON.stringify(d)), 'err');
+      })
+      .catch(function(e){ log('Teaching rete: ' + e, 'err'); });
+  };
+
+  window.teachSaveSlot = function() {
+    var slotId = parseInt(document.getElementById('teachSlotId').value) || 0;
+    log('Teaching: save to slot ' + slotId);
+    fetch('/api/teaching/save_to_slot/' + slotId, { method: 'POST' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.ok) log('Saved to slot ' + slotId, 'ok');
+        else log('Save ERR: ' + (d.error || ''), 'err');
+      })
+      .catch(function(e){ log('Save rete: ' + e, 'err'); });
+  };
+
+  window.teachPlaySlot = function() {
+    var slotId = parseInt(document.getElementById('teachSlotId').value) || 0;
+    log('Teaching: replay slot ' + slotId);
+    fetch('/api/teaching/replay_slot/' + slotId, { method: 'POST' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.ok) log('Replay slot ' + slotId + ' OK', 'ok');
+        else log('Replay ERR: ' + (d.error || ''), 'err');
+      })
+      .catch(function(e){ log('Replay rete: ' + e, 'err'); });
+  };
+})();
+</script>
+</body>
+</html>
+"""
+
+
+VR_CONTROL_TEMPLATE = """<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>G1 VR Control</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{min-height:100vh;background:#08090d;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;overflow-x:hidden;}
+body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
+.top-bar{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:#111318;border-bottom:1px solid #27272a;position:sticky;top:0;z-index:20;}
+.top-bar h1{font-size:18px;font-weight:700;color:#a78bfa;}
+.estop-btn{padding:12px 24px;background:#dc2626;color:#fff;font-size:16px;font-weight:800;border:2px solid #ef4444;border-radius:12px;cursor:pointer;text-transform:uppercase;letter-spacing:1px;animation:none;}
+.estop-btn:active{background:#991b1b;transform:scale(0.95);}
+.main{padding:12px 16px;display:flex;flex-direction:column;gap:14px;}
+.panel{background:#111318;border:1px solid #27272a;border-radius:14px;padding:14px;}
+.panel-title{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#71717a;font-weight:700;margin-bottom:10px;}
+.status-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;background:#27272a;color:#a1a1aa;}
+.badge.ok{background:#14532d;color:#4ade80;}
+.badge.warn{background:#78350f;color:#fbbf24;}
+.badge.err{background:#7f1d1d;color:#fca5a5;}
+.badge.active{background:#312e81;color:#a78bfa;}
+.tracking-hands{display:flex;gap:16px;margin-top:10px;}
+.hand-card{flex:1;padding:10px;background:#0a0b10;border:1px solid #27272a;border-radius:10px;text-align:center;}
+.hand-card .hand-icon{font-size:28px;line-height:1;}
+.hand-card .hand-label{font-size:10px;color:#71717a;margin:4px 0;}
+.hand-card .hand-pos{font-size:10px;color:#52525b;font-family:monospace;}
+.hand-card.tracking{border-color:#14b8a680;}
+.hand-card.lost{border-color:#ef444440;opacity:0.5;}
+.stick-wrap{display:flex;justify-content:center;margin:4px 0;}
+.stick-wrap canvas{background:#0a0b10;border:1px solid #27272a;border-radius:12px;}
+.ctrl-btns{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;}
+.ctrl-btn{padding:14px 28px;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;border:1px solid #3f3f46;background:#27272a;color:#e4e4e7;-webkit-tap-highlight-color:transparent;transition:background 0.15s,transform 0.1s;}
+.ctrl-btn:active{transform:scale(0.95);}
+.ctrl-btn.start{background:rgba(20,184,166,0.2);border-color:rgba(20,184,166,0.5);color:#5eead4;font-size:18px;padding:16px 40px;}
+.ctrl-btn.stop{background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.4);color:#fca5a5;}
+.ctrl-btn.cal{background:rgba(99,102,241,0.15);border-color:rgba(99,102,241,0.4);color:#a5b4fc;}
+.ctrl-btn:disabled{opacity:0.3;pointer-events:none;}
+.loco-panel{display:flex;align-items:center;gap:12px;justify-content:center;}
+.loco-circle{width:100px;height:100px;border-radius:50%;background:#0a0b10;border:2px solid #27272a;position:relative;display:flex;align-items:center;justify-content:center;}
+.loco-dot{width:16px;height:16px;border-radius:50%;background:#14b8a6;box-shadow:0 0 8px #14b8a640;position:absolute;transition:transform 0.05s;}
+.loco-label{font-size:10px;color:#52525b;text-align:center;font-family:monospace;}
+.loco-vals{font-size:11px;color:#71717a;font-family:monospace;text-align:center;}
+.log-area{max-height:80px;overflow-y:auto;padding:6px 8px;font-size:10px;color:#52525b;font-family:monospace;line-height:1.5;background:#0a0b10;border-radius:8px;margin-top:8px;}
+.log-area .ok{color:#22c55e;}.log-area .err{color:#ef4444;}.log-area .warn{color:#fbbf24;}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <h1>G1 VR Control</h1>
+  <button type="button" class="estop-btn" onclick="vrEmergencyStop()">E-STOP</button>
+</div>
+<div class="main">
+
+  <div class="panel">
+    <div class="panel-title">Stato</div>
+    <div class="status-row">
+      <span class="badge" id="vrStateBadge">idle</span>
+      <span class="badge" id="vrTrackBadge">no tracking</span>
+      <span style="font-size:11px;color:#52525b;">HTS porta: <span id="vrPort">9000</span></span>
+    </div>
+    <div class="tracking-hands">
+      <div class="hand-card lost" id="handLeft">
+        <div class="hand-icon">&#x1F91A;</div>
+        <div class="hand-label">Sinistra</div>
+        <div class="hand-pos" id="handLeftPos">--</div>
+      </div>
+      <div class="hand-card lost" id="handRight">
+        <div class="hand-icon">&#x270B;</div>
+        <div class="hand-label">Destra</div>
+        <div class="hand-pos" id="handRightPos">--</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Robot</div>
+    <div class="stick-wrap"><canvas id="vrStickCanvas" width="480" height="360"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Controlli</div>
+    <div class="ctrl-btns">
+      <button type="button" class="ctrl-btn start" id="btnVrStart" onclick="vrStart()">START VR</button>
+      <button type="button" class="ctrl-btn cal" id="btnVrCal" onclick="vrCalibrate()" disabled>CALIBRA</button>
+      <button type="button" class="ctrl-btn stop" id="btnVrStop" onclick="vrStop()" disabled>STOP</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Locomozione (controller)</div>
+    <div class="loco-panel">
+      <div>
+        <div class="loco-label">Move</div>
+        <div class="loco-circle" id="locoMoveCircle">
+          <div class="loco-dot" id="locoMoveDot"></div>
+        </div>
+      </div>
+      <div class="loco-vals">
+        <div>vx: <span id="locoVx">0.00</span></div>
+        <div>vy: <span id="locoVy">0.00</span></div>
+        <div>vyaw: <span id="locoVyaw">0.00</span></div>
+      </div>
+      <div>
+        <div class="loco-label">Rotate</div>
+        <div class="loco-circle" id="locoRotCircle">
+          <div class="loco-dot" id="locoRotDot" style="background:#a78bfa;box-shadow:0 0 8px #a78bfa40;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="log-area" id="vrLogArea"></div>
+</div>
+
+<script>
+(function(){
+  var logEl = document.getElementById('vrLogArea');
+  function log(msg, cls) {
+    var d = document.createElement('div');
+    d.className = cls || '';
+    d.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+    logEl.appendChild(d);
+    if (logEl.children.length > 40) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  /* ── API calls ── */
+  function apiPost(path) {
+    return fetch('/api/vr/' + path, { method: 'POST', headers: {'Content-Type':'application/json'} })
+      .then(function(r){ return r.json(); });
+  }
+
+  window.vrStart = function() {
+    log('Starting VR...');
+    apiPost('start').then(function(d) {
+      if (d.ok) { log('VR started - open HTS on Quest, then press CALIBRA', 'ok'); }
+      else { log('Start error: ' + (d.error || ''), 'err'); }
+    }).catch(function(e){ log('Network: ' + e, 'err'); });
+  };
+
+  window.vrCalibrate = function() {
+    log('Calibrating neutral pose...');
+    apiPost('calibrate').then(function(d) {
+      if (d.ok) { log('Calibrated! VR control active', 'ok'); }
+      else { log('Calibrate error: ' + (d.error || ''), 'err'); }
+    }).catch(function(e){ log('Network: ' + e, 'err'); });
+  };
+
+  window.vrStop = function() {
+    log('Stopping VR...');
+    apiPost('stop').then(function(d) {
+      if (d.ok) log('VR stopped', 'ok');
+    }).catch(function(e){ log('Network: ' + e, 'err'); });
+  };
+
+  window.vrEmergencyStop = function() {
+    log('EMERGENCY STOP!', 'err');
+    apiPost('emergency_stop').catch(function(){});
+  };
+
+  /* ── SSE stream ── */
+  var vrEvt = null;
+  function connectVrSSE() {
+    if (vrEvt) { try { vrEvt.close(); } catch(e){} }
+    vrEvt = new EventSource('/api/vr/stream');
+    vrEvt.onmessage = function(e) {
+      try {
+        var d = JSON.parse(e.data);
+        updateVrUI(d);
+        if (d.joints) {
+          vrStickTarget.waist = d.joints.waist || [0,0,0];
+          vrStickTarget.left = d.joints.left_arm || [0,0,0,0,0,0,0];
+          vrStickTarget.right = d.joints.right_arm || [0,0,0,0,0,0,0];
+        }
+      } catch(err){}
+    };
+    vrEvt.onerror = function() { setTimeout(connectVrSSE, 3000); };
+  }
+  connectVrSSE();
+
+  function updateVrUI(d) {
+    var st = d.state || 'idle';
+    var sb = document.getElementById('vrStateBadge');
+    sb.textContent = st;
+    sb.className = 'badge' + (st === 'active' ? ' active' : st === 'error' ? ' err' : '');
+
+    var tb = document.getElementById('vrTrackBadge');
+    tb.textContent = d.tracking ? 'tracking OK' : 'no tracking';
+    tb.className = 'badge' + (d.tracking ? ' ok' : ' warn');
+
+    document.getElementById('vrPort').textContent = d.port || '9000';
+
+    var hl = document.getElementById('handLeft');
+    var hr = document.getElementById('handRight');
+    hl.className = 'hand-card ' + (d.tracking_left ? 'tracking' : 'lost');
+    hr.className = 'hand-card ' + (d.tracking_right ? 'tracking' : 'lost');
+
+    if (d.left_wrist) {
+      document.getElementById('handLeftPos').textContent = d.left_wrist.map(function(v){return v.toFixed(3);}).join(', ');
+    }
+    if (d.right_wrist) {
+      document.getElementById('handRightPos').textContent = d.right_wrist.map(function(v){return v.toFixed(3);}).join(', ');
+    }
+
+    document.getElementById('btnVrStart').disabled = (st !== 'idle' && st !== 'error');
+    document.getElementById('btnVrCal').disabled = (st !== 'calibrating' && st !== 'active');
+    document.getElementById('btnVrStop').disabled = (st === 'idle');
+  }
+
+  /* ── Stick figure (larger for VR) ── */
+  var vrCvs = document.getElementById('vrStickCanvas');
+  var vrCtx = vrCvs ? vrCvs.getContext('2d') : null;
+  var vrStickTarget = {waist:[0,0,0], left:[0,0,0,0,0,0,0], right:[0,0,0,0,0,0,0]};
+  var vrStickCur = {waist:[0,0,0], left:[0,0,0,0,0,0,0], right:[0,0,0,0,0,0,0]};
+
+  function lerpArr(cur, tgt, a) { for (var i=0;i<cur.length;i++) cur[i]+=(tgt[i]-cur[i])*a; }
+
+  function drawVrStick() {
+    if (!vrCtx) return;
+    var W=vrCvs.width, H=vrCvs.height, ctx=vrCtx;
+    ctx.clearRect(0,0,W,H);
+    lerpArr(vrStickCur.waist, vrStickTarget.waist, 0.25);
+    lerpArr(vrStickCur.left, vrStickTarget.left, 0.25);
+    lerpArr(vrStickCur.right, vrStickTarget.right, 0.25);
+
+    var cx=W/2, hipY=240, neckY=100;
+    var wY=vrStickCur.waist[0], wR=vrStickCur.waist[1];
+    ctx.save();
+    ctx.translate(cx, hipY);
+    ctx.rotate(wR*0.3);
+    var shX=-wY*0.15;
+
+    ctx.strokeStyle='#52525b'; ctx.lineWidth=4; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(shX,neckY-hipY); ctx.stroke();
+
+    var hr=18;
+    ctx.fillStyle='#3f3f46';
+    ctx.beginPath(); ctx.arc(shX,neckY-hipY-hr-3,hr,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#71717a'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.arc(shX,neckY-hipY-hr-3,hr,0,Math.PI*2); ctx.stroke();
+
+    var sy=neckY-hipY+10, UP=72, FO=65;
+    function drawArm(j,side){
+      var sx=shX+side*24, sp=j[0],sr=j[1],el=j[3],wr=j[4];
+      var ba=(side<0)?(Math.PI/2+sr*0.8-sp*0.3):(Math.PI/2-sr*0.8+sp*0.3);
+      var ux=sx+Math.cos(ba)*UP, uy=sy+Math.sin(ba)*UP;
+      var ea=ba+el*0.8;
+      var wx=ux+Math.cos(ea)*FO, wy=uy+Math.sin(ea)*FO;
+      ctx.strokeStyle=(side<0)?'#14b8a6':'#a78bfa'; ctx.lineWidth=5;
+      ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ux,uy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ux,uy); ctx.lineTo(wx,wy); ctx.stroke();
+      ctx.fillStyle='#fbbf24'; ctx.strokeStyle='#92400e'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(ux,uy,5,0,Math.PI*2); ctx.fill(); ctx.stroke();
+      var wh=Math.abs(wr)*60;
+      ctx.fillStyle='hsl('+(side<0?170+wh:270+wh)+',70%,60%)';
+      ctx.beginPath(); ctx.arc(wx,wy,6,0,Math.PI*2); ctx.fill();
+    }
+    drawArm(vrStickCur.left,-1);
+    drawArm(vrStickCur.right,1);
+    ctx.restore();
+    requestAnimationFrame(drawVrStick);
+  }
+  requestAnimationFrame(drawVrStick);
+
+  /* ── Gamepad (Quest controllers) ── */
+  var locoVx=0, locoVy=0, locoVyaw=0;
+  var locoSendIv=null;
+  var SPEED_MAX=0.5, YAW_MAX=0.8;
+
+  function pollGamepad() {
+    var gps = navigator.getGamepads ? navigator.getGamepads() : [];
+    var lx=0,ly=0,rx=0,ry=0, found=false;
+    for (var i=0; i<gps.length; i++) {
+      var g=gps[i];
+      if (!g || !g.connected) continue;
+      found = true;
+      if (g.axes.length >= 2) { lx=g.axes[0]||0; ly=g.axes[1]||0; }
+      if (g.axes.length >= 4) { rx=g.axes[2]||0; ry=g.axes[3]||0; }
+      break;
+    }
+    var dead=0.12;
+    if (Math.abs(lx)<dead) lx=0; if (Math.abs(ly)<dead) ly=0;
+    if (Math.abs(rx)<dead) rx=0;
+
+    locoVx = Math.round(-ly * SPEED_MAX * 100) / 100;
+    locoVy = Math.round(-lx * SPEED_MAX * 100) / 100;
+    locoVyaw = Math.round(-rx * YAW_MAX * 100) / 100;
+
+    document.getElementById('locoVx').textContent = locoVx.toFixed(2);
+    document.getElementById('locoVy').textContent = locoVy.toFixed(2);
+    document.getElementById('locoVyaw').textContent = locoVyaw.toFixed(2);
+
+    var md=document.getElementById('locoMoveDot');
+    md.style.transform='translate('+(-lx*36)+'px,'+(ly*36)+'px)';
+    var rd=document.getElementById('locoRotDot');
+    rd.style.transform='translate('+(-rx*36)+'px,0px)';
+
+    requestAnimationFrame(pollGamepad);
+  }
+  requestAnimationFrame(pollGamepad);
+
+  function sendLoco() {
+    if (Math.abs(locoVx)>0.01 || Math.abs(locoVy)>0.01 || Math.abs(locoVyaw)>0.01) {
+      fetch('/api/vr/locomotion', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({vx:locoVx, vy:locoVy, vyaw:locoVyaw})
+      }).catch(function(){});
+    }
+  }
+  locoSendIv = setInterval(sendLoco, 200);
+
 })();
 </script>
 </body>
@@ -5691,6 +6375,7 @@ def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False,
     print("  Parla (push): /local")
     print("  Client rete: /client")
     print("  Robot Control (joystick+gesti): /robot-control")
+    print("  VR Control (Quest 3): /vr-control")
     if ssl_keyfile:
         print("  Da telefono (stessa rete): https://192.168.10.191:8081/client")
     uvicorn.run(app, host=host, port=port, ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)

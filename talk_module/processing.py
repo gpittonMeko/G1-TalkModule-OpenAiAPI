@@ -11,11 +11,29 @@ from typing import Optional
 from talk_module.config import settings
 
 
+def _led_animate(mode: str, color: tuple[int, int, int] = (255, 180, 0), speed: float = 1.0) -> None:
+    """Start a LED animation without blocking; swallow all errors."""
+    try:
+        from talk_module.robot_actions import led_start_animation
+        led_start_animation(mode=mode, color=color, speed=speed)
+    except Exception:
+        pass
+
+
+def _led_stop() -> None:
+    """Stop any running LED animation."""
+    try:
+        from talk_module.robot_actions import led_stop_animation
+        led_stop_animation()
+    except Exception:
+        pass
+
+
 def set_led_safe(r: int, g: int, b: int) -> None:
-    """Request an LED color change without blocking; swallow all errors."""
+    """Stop animations and set a solid LED color without blocking; swallow all errors."""
+    _led_stop()
     try:
         from talk_module.robot_actions import set_led_color
-
         threading.Thread(target=set_led_color, args=(r, g, b), daemon=True).start()
     except Exception:
         pass
@@ -25,7 +43,6 @@ def do_gesture_after_response() -> None:
     """Fire the post-response arm gesture (right_hand_up); errors are ignored."""
     try:
         from talk_module.robot_actions import execute_robot_action
-
         threading.Thread(target=execute_robot_action, args=("right_hand_up",), daemon=True).start()
     except Exception:
         pass
@@ -49,7 +66,7 @@ def process_after_wake(
     try:
         from talk_module.robot_actions import LED_THINKING, LED_SPEAKING, LED_IDLE
 
-        set_led_safe(*LED_THINKING)
+        _led_animate("rainbow", speed=1.2)
         _, llm, tts, _, _ = get_services_fn()
         if prompt == PROMPT_HEY_G1_ACK_ONLY:
             resp = (settings.hey_g1_ack_text or "").strip() or "Sì?"
@@ -89,8 +106,10 @@ def process_after_wake(
                         pass
         audio_out = tts.synthesize(resp, format="mp3") if resp else b""
         if audio_out:
-            set_led_safe(*LED_SPEAKING)
+            _led_animate("breathe", color=LED_SPEAKING, speed=1.0)
             do_gesture_after_response()
+        else:
+            set_led_safe(*LED_IDLE)
         return {
             "text": raw_text,
             "response": resp or "",
@@ -101,7 +120,6 @@ def process_after_wake(
     except Exception as e:
         try:
             from talk_module.robot_actions import LED_IDLE
-
             set_led_safe(*LED_IDLE)
         except Exception:
             pass

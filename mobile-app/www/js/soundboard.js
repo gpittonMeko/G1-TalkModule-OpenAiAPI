@@ -4,13 +4,13 @@
  * Soundboard tab: 20-slot grid with FULL standalone support.
  *
  * Standalone workflow:
- *   1. Apri uno slot vuoto → scrivi testo + icona
+ *   1. Apri uno slot vuoto -> scrivi testo + icona
  *   2. "Genera TTS" crea audio via OpenAI direttamente dal telefono
- *   3. "Salva" memorizza audio in IndexedDB (permanente, sopravvive a riavvii)
- *   4. Tap sullo slot → riproduce dalla cache locale via cassa BT
- *   5. "Genera tutti TTS" pre-genera audio per TUTTI gli slot con testo senza audio
+ *   3. "Salva" memorizza audio in IndexedDB (permanente)
+ *   4. Tap sullo slot -> riproduce dalla cache locale via cassa BT
+ *   5. "Genera tutti TTS" pre-genera audio per TUTTI gli slot con testo
  *
- * Non serve MAI la Jetson per riprodurre audio già memorizzati.
+ * Non serve MAI la Jetson per riprodurre audio gia memorizzati.
  */
 const Soundboard = (() => {
   const SLOT_COUNT = 20;
@@ -27,6 +27,7 @@ const Soundboard = (() => {
     await _loadFromCache();
     render();
     refreshOutputs();
+    updateSyncHint();
   }
 
   function _emptySlot() {
@@ -35,7 +36,7 @@ const Soundboard = (() => {
       audio_base64: "", format: "mp3",
       audio_base64_clean: "", format_clean: "",
       has_robot: false, has_clean: false,
-      robot_arm: "", robot_loco: "",
+      robot_arm: "", robot_loco: "", led_effect: "",
     };
   }
 
@@ -62,20 +63,12 @@ const Soundboard = (() => {
       };
 
       let html = "";
-      if (s.robot_arm || s.robot_loco) {
-        html += '<span class="sb-robot-badge">\u{1F916}</span>';
-      }
+      if (s.robot_arm || s.robot_loco) html += '<span class="sb-robot-badge">\u{1F916}</span>';
       html += `<span class="sb-edit-badge" onclick="Soundboard.openModal(${i})">\u270F\uFE0F</span>`;
       html += `<span class="sb-icon">${s.icon || (empty ? "\u2795" : "\u{1F50A}")}</span>`;
-      html += `<span class="sb-label">${_escHtml(s.text) || (empty ? "Vuoto" : "...")}</span>`;
-
-      // Audio status badge
-      if (hasText && hasAudio) {
-        html += '<span class="sb-cached-badge">\u2705</span>';
-      } else if (hasText && !hasAudio) {
-        html += '<span class="sb-cached-badge" style="opacity:.7">\u26A0\uFE0F</span>';
-      }
-
+      html += `<span class="sb-label">${_esc(s.text) || (empty ? "Vuoto" : "...")}</span>`;
+      if (hasText && hasAudio)  html += '<span class="sb-cached-badge">\u2705</span>';
+      else if (hasText)         html += '<span class="sb-cached-badge" style="opacity:.7">\u26A0\uFE0F</span>';
       div.innerHTML = html;
       grid.appendChild(div);
     }
@@ -86,16 +79,10 @@ const Soundboard = (() => {
   async function _playSlot(idx) {
     const s = _slots[idx];
     if (!s) return;
-
     const hasAudio = s.audio_base64 || s.audio_base64_clean;
 
-    // Empty slot → open editor
-    if (!hasAudio && !s.text) {
-      openModal(idx);
-      return;
-    }
+    if (!hasAudio && !s.text) { openModal(idx); return; }
 
-    // Has text but no cached audio → generate and cache it
     if (!hasAudio && s.text) {
       App.toast("Genero e memorizzo audio...");
       try {
@@ -105,16 +92,17 @@ const Soundboard = (() => {
         await Storage.putSlot(idx, s);
         render();
         App.toast("Audio memorizzato!");
-      } catch (e) {
-        App.toast("Errore TTS: " + e.message);
-        return;
-      }
+      } catch (e) { App.toast("Errore TTS: " + e.message); return; }
     }
 
     const dest = document.getElementById("sbPlayDest").value;
 
+    // Robot actions + LED when connected
     if (Services.isConnected()) {
       _fireRobotActions(s);
+      if (s.led_effect) {
+        try { await Api.ledEffect(s.led_effect); } catch {}
+      }
     }
 
     if (dest === "server" && Services.isConnected()) {
@@ -132,36 +120,24 @@ const Soundboard = (() => {
 
     const mime = fmt === "wav" ? "audio/wav" : "audio/mpeg";
     _audioEl = new Audio(`data:${mime};base64,${b64}`);
-
     if (_outputDeviceId && _audioEl.setSinkId) {
       _audioEl.setSinkId(_outputDeviceId).catch(() => {});
     }
-
-    _playing = idx;
-    render();
-
+    _playing = idx; render();
     _audioEl.onended = () => { _playing = -1; render(); };
     _audioEl.onerror = () => { _playing = -1; render(); App.toast("Errore riproduzione"); };
     _audioEl.play().catch((e) => { _playing = -1; render(); App.toast("Play: " + e.message); });
   }
 
   async function _playOnServer(idx, slot) {
-    _playing = idx;
-    render();
-    try {
-      await Api.soundboardPlayLocal(slot);
-    } catch (e) {
-      App.toast("Errore server: " + e.message);
-    }
+    _playing = idx; render();
+    try { await Api.soundboardPlayLocal({ slot: idx }); }
+    catch (e) { App.toast("Errore server: " + e.message); }
     setTimeout(() => { _playing = -1; render(); }, 3000);
   }
 
   function _stopCurrent() {
-    if (_audioEl) {
-      _audioEl.pause();
-      _audioEl.src = "";
-      _audioEl = null;
-    }
+    if (_audioEl) { _audioEl.pause(); _audioEl.src = ""; _audioEl = null; }
     _playing = -1;
   }
 
@@ -176,7 +152,6 @@ const Soundboard = (() => {
   // ── TTS Generation ────────────────────────
 
   async function _generateTTS(text) {
-    // Prefer Jetson if connected (no API key needed), fallback to direct OpenAI
     if (Services.isConnected()) {
       try {
         const r = await Api.soundboardSynth(text);
@@ -186,24 +161,13 @@ const Soundboard = (() => {
     return OpenAiTts.synthesize(text);
   }
 
-  /**
-   * Bulk-generate TTS for ALL slots that have text but no cached audio.
-   * Audio is saved permanently in IndexedDB.
-   */
   async function generateAllTTS() {
     const toGen = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
       const s = _slots[i];
-      if (s && s.text && !s.audio_base64 && !s.audio_base64_clean) {
-        toGen.push(i);
-      }
+      if (s && s.text && !s.audio_base64 && !s.audio_base64_clean) toGen.push(i);
     }
-
-    if (toGen.length === 0) {
-      App.toast("Tutti gli slot con testo hanno gia audio memorizzato");
-      return;
-    }
-
+    if (!toGen.length) { App.toast("Tutti gli slot con testo hanno gia audio memorizzato"); return; }
     if (!Services.isConnected() && !OpenAiTts.hasKey()) {
       App.toast("Serve API Key OpenAI nelle Impostazioni per generare offline");
       return;
@@ -215,12 +179,10 @@ const Soundboard = (() => {
     progress.style.display = "block";
     document.getElementById("btnSbGenAll").disabled = true;
 
-    let done = 0;
-    let errors = 0;
+    let done = 0, errors = 0;
     for (const idx of toGen) {
       const s = _slots[idx];
       progress.textContent = `Generazione ${done + 1}/${toGen.length}: "${s.text.slice(0, 30)}..."`;
-
       try {
         const result = await _generateTTS(s.text);
         s.audio_base64 = result.base64;
@@ -228,17 +190,13 @@ const Soundboard = (() => {
         await Storage.putSlot(idx, s);
         done++;
         render();
-      } catch (e) {
-        errors++;
-        console.warn(`TTS slot ${idx} failed:`, e);
-      }
+      } catch { errors++; }
     }
 
     spinner.style.display = "none";
     document.getElementById("btnSbGenAll").disabled = false;
-    progress.textContent = `Completato: ${done} generati, ${errors} errori`;
+    progress.textContent = `Completato: ${done} generati` + (errors ? `, ${errors} errori` : "");
     setTimeout(() => { progress.style.display = "none"; }, 5000);
-
     Settings.updateCacheStats();
     App.toast(`${done} audio memorizzati nel telefono`);
   }
@@ -246,10 +204,7 @@ const Soundboard = (() => {
   // ── Sync from Jetson ──────────────────────
 
   async function syncFromJetson() {
-    if (!Services.isConnected()) {
-      App.toast("Jetson non raggiungibile");
-      return;
-    }
+    if (!Services.isConnected()) { App.toast("Jetson non raggiungibile"); return; }
 
     const spinner = document.getElementById("sbSyncSpinner");
     const banner = document.getElementById("sbSyncBanner");
@@ -261,31 +216,31 @@ const Soundboard = (() => {
       const liteSlots = lite.slots || [];
 
       for (let i = 0; i < Math.min(liteSlots.length, SLOT_COUNT); i++) {
-        const meta = liteSlots[i];
+        const m = liteSlots[i];
         _slots[i] = {
           ..._emptySlot(),
-          icon: meta.icon || "",
-          text: meta.text || "",
-          format: meta.format || "mp3",
-          format_clean: meta.format_clean || "",
-          has_robot: !!meta.has_robot,
-          has_clean: !!meta.has_clean,
-          robot_arm: meta.robot_arm || "",
-          robot_loco: meta.robot_loco || "",
+          icon: m.icon || "", text: m.text || "",
+          format: m.format || "mp3", format_clean: m.format_clean || "",
+          has_robot: !!m.has_robot, has_clean: !!m.has_clean,
+          robot_arm: m.robot_arm || "", robot_loco: m.robot_loco || "",
+          led_effect: m.led_effect || "",
         };
       }
       render();
 
       let fetched = 0;
       for (let i = 0; i < SLOT_COUNT; i++) {
-        if (!_slots[i].text && !_slots[i].icon) continue;
+        const si = _slots[i];
+        const hasMeta = si.text || si.icon || si.has_robot || si.has_clean;
+        if (!hasMeta) continue;
         try {
           const full = await Api.soundboardSlot(i);
           if (full) {
-            if (full.audio_base64) _slots[i].audio_base64 = full.audio_base64;
+            if (full.audio_base64)       _slots[i].audio_base64 = full.audio_base64;
             if (full.audio_base64_clean) _slots[i].audio_base64_clean = full.audio_base64_clean;
-            if (full.format) _slots[i].format = full.format;
-            if (full.format_clean) _slots[i].format_clean = full.format_clean;
+            if (full.format)             _slots[i].format = full.format;
+            if (full.format_clean)       _slots[i].format_clean = full.format_clean;
+            if (full.led_effect !== undefined) _slots[i].led_effect = full.led_effect || "";
           }
           await Storage.putSlot(i, _slots[i]);
           fetched++;
@@ -298,25 +253,55 @@ const Soundboard = (() => {
       App.toast("Audio scaricati e memorizzati nel telefono");
       render();
       Settings.updateCacheStats();
-
     } catch (e) {
       banner.className = "sync-banner err";
       banner.textContent = "Errore sync: " + e.message;
       banner.style.display = "flex";
     }
-
     spinner.style.display = "none";
+    updateSyncHint();
   }
 
-  // ── Cache Load ────────────────────────────
+  /**
+   * Prima volta con cache vuota e Jetson raggiungibile: scarica soundboard automaticamente.
+   */
+  async function maybeAutoSyncFromJetson() {
+    updateSyncHint();
+    if (!Services.isConnected()) return;
+    const has = await Storage.hasAnySlotContent();
+    if (has) return;
+    // Una sola prova automatica per sessione browser (evita loop se la sync fallisce)
+    if (sessionStorage.getItem("g1tr_sb_autosync_attempted") === "1") return;
+    sessionStorage.setItem("g1tr_sb_autosync_attempted", "1");
+    App.toast("Prima sync dalla Jetson in corso...");
+    await syncFromJetson();
+  }
+
+  function updateSyncHint() {
+    const el = document.getElementById("sbSyncHint");
+    if (!el) return;
+    Storage.hasAnySlotContent().then((has) => {
+      const ok = Services.isConnected();
+      if (has) {
+        el.style.display = "none";
+        return;
+      }
+      el.style.display = "block";
+      if (ok) {
+        el.innerHTML = "Cache <strong>vuota</strong>: tocca <strong>Sincronizza</strong> se la sync automatica non è partita, oppure attendi il completamento.";
+      } else {
+        el.innerHTML = "Cache <strong>vuota</strong>: connettiti alla stessa rete della Jetson (IP in Impostazioni, stato <strong>Connesso</strong>), poi apri di nuovo questa tab o premi <strong>Sincronizza</strong>.";
+      }
+    }).catch(() => {});
+  }
+
+  // ── Cache ─────────────────────────────────
 
   async function _loadFromCache() {
     try {
       const cached = await Storage.getAllSlots();
       for (const c of cached) {
-        if (c.idx >= 0 && c.idx < SLOT_COUNT) {
-          _slots[c.idx] = { ..._emptySlot(), ...c };
-        }
+        if (c.idx >= 0 && c.idx < SLOT_COUNT) _slots[c.idx] = { ..._emptySlot(), ...c };
       }
     } catch {}
   }
@@ -350,6 +335,7 @@ const Soundboard = (() => {
     document.getElementById("sbmText").value = s.text || "";
     document.getElementById("sbmRobotArm").value = s.robot_arm || "";
     document.getElementById("sbmRobotLoco").value = s.robot_loco || "";
+    document.getElementById("sbmLedEffect").value = s.led_effect || "";
     _updateModalAudioInfo(s);
     document.getElementById("sbModal").classList.add("open");
   }
@@ -366,7 +352,7 @@ const Soundboard = (() => {
       const kb = Math.round((b64.length * 3) / 4 / 1024);
       el.innerHTML = `<span style="color:var(--green)">\u2705 Audio memorizzato</span> (${s.format || "?"}, ~${kb} KB)`;
     } else if (s.text) {
-      el.innerHTML = `<span style="color:var(--yellow)">\u26A0\uFE0F Solo testo, audio non generato</span> &mdash; premi "Genera TTS" per memorizzare`;
+      el.innerHTML = `<span style="color:var(--yellow)">\u26A0\uFE0F Solo testo</span> &mdash; premi "Genera TTS"`;
     } else {
       el.textContent = "Nessun contenuto";
     }
@@ -375,7 +361,6 @@ const Soundboard = (() => {
   async function modalGenerateTTS() {
     const text = document.getElementById("sbmText").value.trim();
     if (!text) { App.toast("Inserisci un testo"); return; }
-
     const spinner = document.getElementById("sbmTtsSpinner");
     spinner.style.display = "inline-block";
     try {
@@ -385,10 +370,8 @@ const Soundboard = (() => {
         _slots[_editIdx].format = result.format;
         _updateModalAudioInfo(_slots[_editIdx]);
       }
-      App.toast("Audio generato e pronto per il salvataggio");
-    } catch (e) {
-      App.toast("Errore: " + e.message);
-    }
+      App.toast("Audio generato");
+    } catch (e) { App.toast("Errore: " + e.message); }
     spinner.style.display = "none";
   }
 
@@ -399,15 +382,10 @@ const Soundboard = (() => {
     _stopCurrent();
     const mime = (s.format === "wav") ? "audio/wav" : "audio/mpeg";
     const audio = new Audio(`data:${mime};base64,${s.audio_base64}`);
-    if (_outputDeviceId && audio.setSinkId) {
-      audio.setSinkId(_outputDeviceId).catch(() => {});
-    }
+    if (_outputDeviceId && audio.setSinkId) audio.setSinkId(_outputDeviceId).catch(() => {});
     audio.play().catch((e) => App.toast("Play: " + e.message));
   }
 
-  /**
-   * Save slot: if text present but no audio, auto-generate TTS before saving.
-   */
   async function modalSave() {
     if (_editIdx < 0) return;
     const s = _slots[_editIdx];
@@ -415,8 +393,9 @@ const Soundboard = (() => {
     s.text = document.getElementById("sbmText").value.trim();
     s.robot_arm = document.getElementById("sbmRobotArm").value.trim();
     s.robot_loco = document.getElementById("sbmRobotLoco").value.trim();
+    s.led_effect = document.getElementById("sbmLedEffect").value.trim();
 
-    // Auto-generate TTS if text changed and no audio yet
+    // Auto-generate TTS if text present but no audio
     if (s.text && !s.audio_base64 && !s.audio_base64_clean) {
       App.toast("Genero audio automaticamente...");
       try {
@@ -424,41 +403,39 @@ const Soundboard = (() => {
         s.audio_base64 = result.base64;
         s.format = result.format;
       } catch (e) {
-        App.toast("TTS fallito: " + e.message + " — slot salvato senza audio");
+        App.toast("TTS fallito: " + e.message + " — salvato senza audio");
       }
     }
 
     await Storage.putSlot(_editIdx, s);
 
+    // Push to Jetson if connected (single-slot save)
     if (Services.isConnected()) {
-      try { await Api.soundboardSave(_slots); } catch {}
+      try { await Api.soundboardSaveSlot(_editIdx, s); } catch {}
     }
 
-    render();
-    closeModal();
+    render(); closeModal();
     Settings.updateCacheStats();
-    App.toast(s.audio_base64 ? "Slot salvato con audio memorizzato" : "Slot salvato (solo testo)");
+    App.toast(s.audio_base64 ? "Slot salvato con audio" : "Slot salvato (solo testo)");
   }
 
   async function modalClear() {
     if (_editIdx < 0) return;
     _slots[_editIdx] = _emptySlot();
     await Storage.deleteSlot(_editIdx);
-    render();
-    closeModal();
+    render(); closeModal();
     Settings.updateCacheStats();
     App.toast("Slot svuotato");
   }
 
-  // ── Helpers ───────────────────────────────
-
-  function _escHtml(s) {
+  function _esc(s) {
     if (!s) return "";
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
   return {
     init, render, syncFromJetson, generateAllTTS, refreshOutputs,
+    maybeAutoSyncFromJetson, updateSyncHint,
     openModal, closeModal, modalGenerateTTS, modalPlayPreview, modalSave, modalClear,
   };
 })();

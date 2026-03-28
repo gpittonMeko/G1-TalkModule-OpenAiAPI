@@ -1,191 +1,191 @@
 {
   "dare la mano": {
     "action": "shake_hand",
-    "response": "Ecco la mano!"
+    "response": "Piacere mio! Stretta salda, eh?"
   },
   "dammi la mano": {
     "action": "shake_hand",
-    "response": "Ecco la mano!"
+    "response": "Piacere mio! Stretta salda, eh?"
   },
   "dai la mano": {
     "action": "shake_hand",
-    "response": "Ecco la mano!"
+    "response": "Piacere! Mano d'acciaio, cuore di silicio."
   },
   "stringi la mano": {
     "action": "shake_hand",
-    "response": "Ecco la mano!"
+    "response": "Stretta professionale in arrivo!"
   },
   "stretta di mano": {
     "action": "shake_hand",
-    "response": "Ecco la mano!"
+    "response": "Affare fatto! O almeno, piacere."
   },
   "la mano": {
     "action": "shake_hand",
-    "response": "Ecco la mano!"
+    "response": "Eccola! Attenzione, grip da robot."
   },
   "ecco la mano": {
     "action": "shake_hand",
-    "response": "Ecco la mano!"
+    "response": "Toh, batti qui!"
   },
   "dai la zampa": {
     "action": "shake_hand",
-    "response": "Ecco la zampa!"
+    "response": "Bau! Scherzo, sono un robot. Ma la zampa te la do!"
   },
   "saluta": {
     "action": "wave_hand",
-    "response": "Ciao!"
+    "response": "Ciao! Bello vederti!"
   },
   "fai ciao": {
     "action": "wave_hand",
-    "response": "Ciao!"
+    "response": "Ciaooo! Alla prossima!"
   },
   "dì ciao": {
     "action": "wave_hand",
-    "response": "Ciao!"
+    "response": "Ciao! Un saluto dal futuro."
   },
   "salutalo": {
     "action": "wave_hand",
-    "response": "Ciao!"
+    "response": "Ehi! Un salutone da G1!"
   },
   "salutali": {
     "action": "wave_hand",
-    "response": "Ciao a tutti!"
+    "response": "Ciao a tutti! Che bel pubblico oggi!"
   },
   "mani in alto": {
     "action": "hands_up",
-    "response": "Mani in alto!"
+    "response": "Mani in alto! Non sparate, sono solo un robot!"
   },
   "alza le mani": {
     "action": "hands_up",
-    "response": "Mani in alto!"
+    "response": "Eccole su! Come dopo un gol al novantesimo!"
   },
   "mani su": {
     "action": "hands_up",
-    "response": "Mani in alto!"
+    "response": "Su le mani! Momento celebrazione!"
   },
   "applaudi": {
     "action": "clap",
-    "response": "Applauso!"
+    "response": "Bravi! Un applauso meritato!"
   },
   "fai un applauso": {
     "action": "clap",
-    "response": "Applauso!"
+    "response": "Standing ovation! Beh, io sono già in piedi."
   },
   "applauso": {
     "action": "clap",
-    "response": "Applauso!"
+    "response": "Clap clap! Grande spettacolo!"
   },
   "batti le mani": {
     "action": "clap",
-    "response": "Applauso!"
+    "response": "E via con gli applausi! Che energia!"
   },
   "high five": {
     "action": "high_five",
-    "response": "High five!"
+    "response": "Daje! Cinque!"
   },
   "batti il cinque": {
     "action": "high_five",
-    "response": "Cinque!"
+    "response": "Cinque! Squadra fortissimi!"
   },
   "dammi il cinque": {
     "action": "high_five",
-    "response": "Cinque!"
+    "response": "Toh, battilo forte! Non mi faccio male."
   },
   "abbraccio": {
     "action": "hug",
-    "response": "Abbraccio!"
+    "response": "Dai, vieni qui! Abbraccio robotico!"
   },
   "abbracciami": {
     "action": "hug",
-    "response": "Abbraccio!"
+    "response": "Aww! Abbraccio in arrivo, attenzione!"
   },
   "fai un abbraccio": {
     "action": "hug",
-    "response": "Abbraccio!"
+    "response": "Abbraccio! Caldo come il mio processore."
   },
   "cuore": {
     "action": "heart",
-    "response": "Un cuore per te!"
+    "response": "Un cuoricino per te! Anche i robot hanno sentimenti."
   },
   "fai un cuore": {
     "action": "heart",
-    "response": "Un cuore per te!"
+    "response": "Ecco un cuore! Fatto con le mani, come si deve."
   },
   "bacio": {
     "action": "kiss",
-    "response": "Un bacio!"
+    "response": "Smack! Un bacio digitale!"
   },
   "mandami un bacio": {
     "action": "kiss",
-    "response": "Un bacio!"
+    "response": "Eccolo! Bacio volante in arrivo!"
   },
   "fai un bacio": {
     "action": "kiss",
-    "response": "Un bacio!"
+    "response": "Mwah! Un bacio per te!"
   },
   "fai due passi avanti": {
     "loco_command": "double_step_forward",
-    "response": "Ok, due passi avanti."
+    "response": "In marcia! Due passi avanti, come il progresso."
   },
   "due passi avanti": {
     "loco_command": "double_step_forward",
-    "response": "Ok, due passi avanti."
+    "response": "Avanzo! Fate largo al robot!"
   },
   "cammina due passi": {
     "loco_command": "double_step_forward",
-    "response": "Due passi avanti."
+    "response": "Due passettini eleganti in arrivo!"
   },
   "passi avanti": {
     "loco_command": "double_step_forward",
-    "response": "Due passi avanti."
+    "response": "Avanti tutta! Strada!"
   },
   "vieni avanti": {
     "loco_command": "double_step_forward",
-    "response": "Ok, avanzo."
+    "response": "Arrivo! Attenzione, peso centodieci chili!"
   },
   "fai due passi indietro": {
     "loco_command": "double_step_back",
-    "response": "Ok, due passi indietro."
+    "response": "Retromarcia! Bip bip bip!"
   },
   "due passi indietro": {
     "loco_command": "double_step_back",
-    "response": "Ok, due passi indietro."
+    "response": "Mi ritiro strategicamente!"
   },
   "vai indietro": {
     "loco_command": "double_step_back",
-    "response": "Indietro."
+    "response": "Indietro! Come Marty McFly, ma senza DeLorean."
   },
   "passi indietro": {
     "loco_command": "double_step_back",
-    "response": "Indietro."
+    "response": "Passo indietro! Spazio per tutti."
   },
   "indietreggia": {
     "loco_command": "double_step_back",
-    "response": "Indietro."
+    "response": "Mi ritiro con eleganza robotica!"
   },
   "gira su te stesso": {
     "loco_command": "spin_inplace",
-    "response": "Mi giro!"
+    "response": "Piroetta! Mangio i ballerini a colazione."
   },
   "girati": {
     "loco_command": "spin_inplace",
-    "response": "Mi giro!"
+    "response": "Rotazione in corso! Wheee!"
   },
   "ruotati": {
     "loco_command": "spin_inplace",
-    "response": "Ruoto!"
+    "response": "Come una trottola! Ma più stiloso."
   },
   "fai un giro su te stesso": {
     "loco_command": "spin_inplace",
-    "response": "Giro su me stesso."
+    "response": "Giro completo! Trecentosessanta gradi di pura tecnologia."
   },
   "fai un giro": {
     "loco_command": "spin_inplace",
-    "response": "Mi giro!"
+    "response": "Via col giro! Tenete le mani dentro il robot!"
   },
   "fai una giravolta": {
     "loco_command": "spin_inplace",
-    "response": "Giravolta!"
+    "response": "Giravolta! Nessun robot è stato maltrattato in questa mossa."
   },
   "_comment_teaching": "Per azioni teaching: usa action 'teaching_X' dove X è l'ID dalla app Unitree (Demo Teaching). Es: teaching_1, teaching_2"
 }

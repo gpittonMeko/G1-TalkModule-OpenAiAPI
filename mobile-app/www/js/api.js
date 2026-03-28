@@ -38,62 +38,80 @@ const Api = (() => {
     return r.json();
   }
 
+  function _post(url, body, opts) {
+    return _json(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      ...opts,
+    });
+  }
+
   // ── Talk Service (:8081) ──────────────────
 
-  async function health() {
-    return _json(`${_cfg().talk}/api/health`);
-  }
+  function health()  { return _json(`${_cfg().talk}/api/health`); }
+  function version() { return _json(`${_cfg().talk}/api/version`); }
+  function sttInfo() { return _json(`${_cfg().talk}/api/stt-info`); }
 
-  async function version() {
-    return _json(`${_cfg().talk}/api/version`);
-  }
+  // Soundboard
+  function soundboardLite()       { return _json(`${_cfg().talk}/api/soundboard?lite=1`); }
+  function soundboardFull()       { return _json(`${_cfg().talk}/api/soundboard`); }
+  function soundboardSlot(idx)    { return _json(`${_cfg().talk}/api/soundboard-slot/${idx}`); }
+  function soundboardPlayLocal(data) { return _post(`${_cfg().talk}/api/soundboard-play-local`, data); }
+  function soundboardSynth(text)  { return _post(`${_cfg().talk}/api/soundboard-synth`, { text }); }
 
-  async function soundboardLite() {
-    return _json(`${_cfg().talk}/api/soundboard?lite=1`);
-  }
-
-  async function soundboardSlot(idx) {
-    return _json(`${_cfg().talk}/api/soundboard-slot/${idx}`);
-  }
-
-  async function soundboardPlayLocal(slotData) {
-    return _json(`${_cfg().talk}/api/soundboard-play-local`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slot: slotData }),
+  /**
+   * Save a single soundboard slot. Server expects:
+   * { slot: int, audio_base64, format, audio_base64_clean?, format_clean?,
+   *   text?, icon?, robot_arm?, robot_loco?, led_effect? }
+   */
+  function soundboardSaveSlot(slotIdx, slotData) {
+    return _post(`${_cfg().talk}/api/soundboard`, {
+      slot: slotIdx,
+      audio_base64:       slotData.audio_base64 || "",
+      format:             slotData.format || "mp3",
+      audio_base64_clean: slotData.audio_base64_clean || undefined,
+      format_clean:       slotData.format_clean || undefined,
+      text:               slotData.text || "",
+      icon:               slotData.icon || "",
+      robot_arm:          slotData.robot_arm || "",
+      robot_loco:         slotData.robot_loco || "",
+      led_effect:         slotData.led_effect || "",
     });
   }
 
-  async function soundboardSave(slots) {
-    return _json(`${_cfg().talk}/api/soundboard`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slots }),
-    });
+  // Robot
+  function robotActions() { return _json(`${_cfg().talk}/api/robot-actions`); }
+
+  function robotAction(actionId, robotIp) {
+    const body = { action_id: actionId };
+    if (robotIp) body.robot_ip = robotIp;
+    return _post(`${_cfg().talk}/api/robot-action`, body);
   }
 
-  async function soundboardSynth(text) {
-    return _json(`${_cfg().talk}/api/soundboard-synth`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
+  function robotMove(vx, vy, vyaw, robotIp) {
+    const body = { vx, vy, vyaw };
+    if (robotIp) body.robot_ip = robotIp;
+    return _post(`${_cfg().talk}/api/robot-move`, body);
   }
 
-  async function robotAction(action) {
-    return _json(`${_cfg().talk}/api/robot-action`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
-    });
+  function robotLoco(command, robotIp) {
+    const body = { command };
+    if (robotIp) body.robot_ip = robotIp;
+    return _post(`${_cfg().talk}/api/robot-loco`, body);
   }
 
-  async function robotLoco(command) {
-    return _json(`${_cfg().talk}/api/robot-loco`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ command }),
-    });
+  // LED
+  function ledEffect(effect)   { return _post(`${_cfg().talk}/api/led`, { effect }); }
+  function ledState(state)     { return _post(`${_cfg().talk}/api/led`, { state }); }
+  function ledColor(r, g, b)   { return _post(`${_cfg().talk}/api/led`, { r, g, b }); }
+  function ledAnimation(anim, color, speed) {
+    return _post(`${_cfg().talk}/api/led`, { animation: anim, color, speed });
+  }
+
+  // Text chat
+  function textChat(text) {
+    return _post(`${_cfg().talk}/api/text-chat`, { text }, { timeout: 30000 });
   }
 
   // ── Watchdog (:8082) ──────────────────────
@@ -105,62 +123,38 @@ const Api = (() => {
     return h;
   }
 
-  async function wdHealth() {
-    return _json(`${_cfg().wd}/health`, { headers: _wdHeaders() });
+  function wdHealth()     { return _json(`${_cfg().wd}/health`, { headers: _wdHeaders() }); }
+  function wdTalkStatus() { return _json(`${_cfg().wd}/talk-status`, { headers: _wdHeaders() }); }
+  function wdTalkLog()    { return _json(`${_cfg().wd}/talk-log`, { headers: _wdHeaders() }); }
+
+  function wdTalkRestart() {
+    return _json(`${_cfg().wd}/talk-restart`, { method: "POST", headers: _wdHeaders(), timeout: 60000 });
+  }
+  function wdTalkStop() {
+    return _json(`${_cfg().wd}/talk-stop`, { method: "POST", headers: _wdHeaders() });
+  }
+  function wdTalkStart() {
+    return _json(`${_cfg().wd}/talk-start`, { method: "POST", headers: _wdHeaders(), timeout: 60000 });
   }
 
-  async function wdTalkStatus() {
-    return _json(`${_cfg().wd}/talk-status`, { headers: _wdHeaders() });
-  }
+  // ── Reachability ──────────────────────────
 
-  async function wdTalkRestart() {
-    return _json(`${_cfg().wd}/talk-restart`, {
-      method: "POST",
-      headers: _wdHeaders(),
-      timeout: 60000,
-    });
-  }
-
-  async function wdTalkStop() {
-    return _json(`${_cfg().wd}/talk-stop`, {
-      method: "POST",
-      headers: _wdHeaders(),
-    });
-  }
-
-  async function wdTalkStart() {
-    return _json(`${_cfg().wd}/talk-start`, {
-      method: "POST",
-      headers: _wdHeaders(),
-      timeout: 60000,
-    });
-  }
-
-  async function wdTalkLog() {
-    return _json(`${_cfg().wd}/talk-log`, { headers: _wdHeaders() });
-  }
-
-  /**
-   * Quick reachability check: resolves true/false, never throws.
-   */
   async function isReachable() {
-    try {
-      await _fetch(`${_cfg().talk}/api/health`, { timeout: 3000 });
-      return true;
-    } catch { return false; }
+    try { await _fetch(`${_cfg().talk}/api/health`, { timeout: 3000 }); return true; }
+    catch { return false; }
   }
-
   async function isWatchdogReachable() {
-    try {
-      await _fetch(`${_cfg().wd}/health`, { timeout: 3000, headers: _wdHeaders() });
-      return true;
-    } catch { return false; }
+    try { await _fetch(`${_cfg().wd}/health`, { timeout: 3000, headers: _wdHeaders() }); return true; }
+    catch { return false; }
   }
 
   return {
-    health, version, soundboardLite, soundboardSlot,
-    soundboardPlayLocal, soundboardSave, soundboardSynth,
-    robotAction, robotLoco,
+    health, version, sttInfo,
+    soundboardLite, soundboardFull, soundboardSlot, soundboardPlayLocal,
+    soundboardSaveSlot, soundboardSynth,
+    robotActions, robotAction, robotMove, robotLoco,
+    ledEffect, ledState, ledColor, ledAnimation,
+    textChat,
     wdHealth, wdTalkStatus, wdTalkRestart, wdTalkStop, wdTalkStart, wdTalkLog,
     isReachable, isWatchdogReachable,
   };

@@ -26,8 +26,12 @@ const App = (() => {
 
     localStorage.setItem("g1tr_tab", name);
 
-    if (name === "soundboard") Soundboard.render();
+    if (name === "soundboard") {
+      Soundboard.render();
+      Soundboard.maybeAutoSyncFromJetson();
+    }
     if (name === "settings") Settings.updateCacheStats();
+    if (name === "robot") RobotPanel.loadActions();
   }
 
   function _restoreTab() {
@@ -45,25 +49,31 @@ const App = (() => {
     _toastTimer = setTimeout(() => el.classList.remove("show"), duration || 2500);
   }
 
-  // ── Quick Links ───────────────────────────
-
-  function openWebUI() {
+  function _baseUrl() {
     const s = Settings.get();
     const proto = s.https ? "https" : "http";
-    const url = `${proto}://${s.ip}:${s.port}/client`;
-    window.open(url, "_blank");
+    return `${proto}://${s.ip}:${s.port}`;
   }
 
+  /** Apre una pagina sul server Jetson (path con / iniziale). */
+  function openPath(path) {
+    window.open(_baseUrl() + path, "_blank");
+  }
+
+  /** Web UI principale /client; sezione opzionale (#parla, #soundboard, …). */
+  function openWebUI(hash) {
+    const h = hash && String(hash).replace(/^#/, "") ? "#" + String(hash).replace(/^#/, "") : "";
+    window.open(_baseUrl() + "/client" + h, "_blank");
+  }
+
+  /** Joystick + gesti + Teaching (braccia) sulla stessa pagina. */
   function openRobotControl() {
-    const s = Settings.get();
-    const proto = s.https ? "https" : "http";
-    const url = `${proto}://${s.ip}:${s.port}/robot-control`;
-    window.open(url, "_blank");
+    openPath("/robot-control");
   }
 
   // ── Boot ──────────────────────────────────
 
   document.addEventListener("DOMContentLoaded", init);
 
-  return { switchTab, toast, openWebUI, openRobotControl };
+  return { switchTab, toast, openWebUI, openRobotControl, openPath };
 })();

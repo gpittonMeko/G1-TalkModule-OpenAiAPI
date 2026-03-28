@@ -84,6 +84,17 @@ const Storage = (() => {
     return { count: all.length, sizeBytes: bytes };
   }
 
+  /** True se esiste almeno uno slot con contenuto utile (cache non vuota). */
+  async function hasAnySlotContent() {
+    const all = await getAllSlots();
+    for (const r of all) {
+      if (r.text || r.audio_base64 || r.audio_base64_clean || (r.icon && String(r.icon).trim())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // ── Meta (key-value) ──────────────────────
 
   async function getMeta(key) {
@@ -113,7 +124,7 @@ const Storage = (() => {
   }
 
   return {
-    getSlot, putSlot, deleteSlot, getAllSlots, clearSlots, countSlots, cacheStats,
+    getSlot, putSlot, deleteSlot, getAllSlots, clearSlots, countSlots, cacheStats, hasAnySlotContent,
     getMeta, putMeta,
     loadSettings, saveSettings,
   };

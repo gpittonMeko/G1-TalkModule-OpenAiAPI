@@ -4,11 +4,35 @@ App Android per gestire e monitorare il servizio G1 Talk sulla Jetson, con sound
 
 ## Funzionalita
 
+### Web sul robot dall'APK
+
+- **Client** apre `/client` (stessa UI del browser). **Deep link**: `/client#parla`, `#soundboard`, `#runsheet`, `#knowledge`, `#devices`, `#info`, `#robot`.
+- **Parla** (`/client#parla`): ascolto continuo, wake word, STT, LLM, TTS — tutto sul **processo `web_app` sulla Jetson** (WebSocket `/ws` ecc.). Serve **`.env` configurato sul server**, non nell'APK.
+- **Robot + Teaching** → `/robot-control`.
+- **VR Control** → `/vr-control` (telemetria Quest, API `/api/vr/*` — vedi `vr_teleop_api.py`).
+- **Setup** `/setup`, **Listen** `/listen`.
+
+### Dove sta il `.env`
+
+| Cosa | Dove |
+|------|------|
+| `OPENAI_API_KEY`, STT, wake, LLM per **Parla / pipeline vocale** | File **`.env` nella root del repo sulla Jetson** (caricato da `talk_module.config`) |
+| API Key in **Impostazioni APK** | Solo **TTS offline** per soundboard quando la Jetson non c'è; non sostituisce il `.env` del server |
+
+L'APK **non** “installa” il `.env`: è un client. Per far funzionare ascolto continuo e risposta testuale/vocale, la Jetson deve essere raggiungibile e `restart_server.sh` deve aver avviato `web_app` con `.env` valido.
+
 ### Dashboard (Tab 1)
 - Stato servizio Talk in tempo reale (polling ogni 5 secondi)
 - Avvia / Riavvia / Ferma il servizio tramite watchdog
 - Visualizzazione log del servizio
 - Accesso rapido alla Web UI e Robot Control
+
+### Soundboard: perché non è uguale al robot all'installazione?
+
+L'APK **non** legge `soundboard.json` dal robot finché non fai una **sincronizzazione**: salva una copia in **IndexedDB** sul telefono (offline, BT, ecc.). Alla prima installazione la cache è **vuota**.
+
+1. Imposta l'IP Jetson in **Impostazioni** e assicurati che il badge sia **Connesso** (stessa WiFi, porta 8081, HTTPS se usi SSL).
+2. Apri la tab **Soundboard** e tocca **Sincronizza**, oppure lascia che parta la **sync automatica** (una volta per sessione, se cache vuota e Jetson raggiungibile).
 
 ### Soundboard (Tab 2)
 - Griglia 20 slot (stessa struttura della soundboard web)

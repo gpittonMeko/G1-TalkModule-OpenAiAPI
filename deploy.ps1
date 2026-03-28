@@ -56,9 +56,16 @@ scp @sshCommon `
     "$root\talk_module\audio_robot_effect.py" `
     "$root\talk_module\quick_lookup.py" `
     "$root\talk_module\robot_actions.py" `
-    "$root\talk_module\llm\openai_client.py" `
+    "$root\talk_module\arm_sdk.py" `
+    "$root\talk_module\teaching.py" `
+    "$root\talk_module\teaching_store.py" `
+    "$root\talk_module\teaching_api.py" `
+    "$root\talk_module\vr_teleop.py" `
+    "$root\talk_module\vr_teleop_api.py" `
     "${sshHost}:${remote}/talk_module/"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1a] codice $LASTEXITCODE (SSH/chiave/host?)" -ForegroundColor Red; exit $LASTEXITCODE }
+scp @sshCommon "$root\talk_module\llm\openai_client.py" "${sshHost}:${remote}/talk_module/llm/"
+if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1a-llm] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 scp @sshCommon "$root\talk_module\tts\openai_tts.py" "${sshHost}:${remote}/talk_module/tts/"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1b] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 scp @sshCommon `
@@ -94,7 +101,7 @@ if ($env:G1_PUSH_SOUNDBOARD_JSON -eq "1") {
 
 # Installa dipendenze (duckduckgo-search per quick_lookup)
 Write-Host "  [3] Dipendenze (max 180s)..." -NoNewline
-ssh @sshExec $sshHost "cd $remote && timeout 180 .venv/bin/pip install -q ddgs imageio-ffmpeg"
+ssh @sshExec $sshHost "cd $remote && timeout 180 .venv/bin/pip install -q ddgs imageio-ffmpeg hand-tracking-sdk"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE pip $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
@@ -137,6 +144,9 @@ if ($env:G1_SKIP_OPENSSL -eq "1") {
         }
     }
 }
+
+# Crea directory teachings sul server (per i movimenti registrati)
+ssh @sshExec $sshHost "mkdir -p $remote/config/teachings"
 
 # Riavvia server (timeout 50s: script ~2+8+5*2=20s max)
 Write-Host "  [4] Restart server..." -ForegroundColor Gray

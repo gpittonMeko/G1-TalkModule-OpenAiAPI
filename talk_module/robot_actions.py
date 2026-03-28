@@ -25,6 +25,7 @@ class RobotMatch:
     response: str
     arm_action: str = ""
     loco_command: str = ""
+    led_effect: str = ""
 
 # Comandi che mettono il G1 in smorzamento / coppia zero o sequenze da caduta: richiedono confirmed=true (client «Sei sicuro?»).
 _LOCO_REQUIRES_CONFIRM = frozenset(
@@ -210,7 +211,8 @@ def check_robot_action(user_input: str) -> Optional[RobotMatch]:
             loco = (cfg.get("loco_command") or cfg.get("loco") or "").strip()
             response = (cfg.get("response") or "Ok").strip()
             if arm or loco:
-                return RobotMatch(response=response, arm_action=arm, loco_command=loco)
+                le = str(cfg.get("led_effect") or "").strip()
+                return RobotMatch(response=response, arm_action=arm, loco_command=loco, led_effect=le)
     return None
 
 
@@ -319,6 +321,12 @@ def _do_arm_action(action_id: int, robot_ip: str) -> tuple[bool, str]:
     """Esegue G1 Arm Action via SDK (API 7106 = ExecuteAction)."""
     global _sdk_client
     try:
+        from talk_module.arm_sdk import is_arm_sdk_active
+        if is_arm_sdk_active():
+            return False, "rt/arm_sdk occupato da teaching/VR — attendi o premi STOP"
+    except ImportError:
+        pass
+    try:
         from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
 
         with _sdk_lock:
@@ -379,9 +387,99 @@ LED_THINKING = (255, 180, 0)     # amber: processing/thinking
 LED_SPEAKING = (0, 255, 80)      # green: TTS playing
 LED_IDLE = (255, 255, 255)       # white: idle/standby
 
+# --------------- LED animation engine ---------------
+_led_anim_stop = threading.Event()
+_led_anim_thread: Optional[threading.Thread] = None
+_led_anim_lock = threading.Lock()
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
+    """Convert HSV (h 0-360, s/v 0-1) to RGB 0-255."""
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(h / 360.0, s, v)
+    return int(r * 255), int(g * 255), int(b * 255)
+
+
+def _anim_rainbow(stop_ev: threading.Event, speed: float = 1.0):
+    """Smooth rainbow cycle on the LED. speed=1.0 → full cycle in ~4s."""
+    hue = 0.0
+    step = 3.0 * speed
+    while not stop_ev.is_set():
+        r, g, b = _hsv_to_rgb(hue % 360, 1.0, 1.0)
+        set_led_color(r, g, b)
+        hue += step
+        stop_ev.wait(0.05)
+
+
+def _anim_breathe(stop_ev: threading.Event, color: tuple[int, int, int], period: float = 1.5):
+    """Breathing/pulse effect: smoothly fades brightness up and down."""
+    import math
+    t = 0.0
+    dt = 0.05
+    while not stop_ev.is_set():
+        brightness = 0.3 + 0.7 * (0.5 + 0.5 * math.sin(2 * math.pi * t / period))
+        r = int(color[0] * brightness)
+        g = int(color[1] * brightness)
+        b = int(color[2] * brightness)
+        set_led_color(r, g, b)
+        t += dt
+        stop_ev.wait(dt)
+
+
+def _anim_blink(stop_ev: threading.Event, color: tuple[int, int, int], interval: float = 0.5):
+    """Blink on/off at given interval."""
+    on = True
+    while not stop_ev.is_set():
+        if on:
+            set_led_color(*color)
+        else:
+            set_led_color(0, 0, 0)
+        on = not on
+        stop_ev.wait(interval)
+
+
+def led_start_animation(mode: str = "rainbow", color: tuple[int, int, int] = (255, 180, 0),
+                         speed: float = 1.0) -> None:
+    """Start a LED animation in a background thread. Stops any running animation first.
+    Modes: 'rainbow', 'breathe', 'blink'."""
+    led_stop_animation()
+    with _led_anim_lock:
+        _led_anim_stop.clear()
+        if mode == "rainbow":
+            target = _anim_rainbow
+            args = (_led_anim_stop, speed)
+        elif mode == "breathe":
+            target = _anim_breathe
+            args = (_led_anim_stop, color, 1.5 / speed)
+        elif mode == "blink":
+            target = _anim_blink
+            args = (_led_anim_stop, color, 0.4 / speed)
+        else:
+            target = _anim_rainbow
+            args = (_led_anim_stop, speed)
+        global _led_anim_thread
+        _led_anim_thread = threading.Thread(target=target, args=args, daemon=True)
+        _led_anim_thread.start()
+
+
+def led_stop_animation() -> None:
+    """Stop any running LED animation."""
+    global _led_anim_thread
+    with _led_anim_lock:
+        _led_anim_stop.set()
+        if _led_anim_thread and _led_anim_thread.is_alive():
+            _led_anim_thread.join(timeout=1.0)
+        _led_anim_thread = None
+
 
 def _loco_pulse_forward_back(vx: float, n_pulses: int = 2) -> tuple[bool, str]:
     """Due (o n) impulsi di marcia senza tenere _sdk_lock durante sleep."""
+    if vx > 0:
+        try:
+            led_stop_animation()
+            set_led_color(255, 0, 0)
+        except Exception:
+            pass
     parts: list[str] = []
     svc_name = ""
     for i in range(n_pulses):
@@ -433,6 +531,33 @@ def _loco_spin_inplace_macro() -> tuple[bool, str]:
         rz = lc.SetVelocity(0.0, 0.0, 0.0, 0.35)
     msg = f"spin steps={steps} vyaw={vyaw} stop_rc={rz} svc={svc_name}"
     _loco_log(f"spin_inplace {msg}")
+    return True, msg
+
+
+def _loco_gentle_sway() -> tuple[bool, str]:
+    """Leggero dondolio del busto: piccole rotazioni yaw dx/sx stando dritto."""
+    cycles = 3
+    vyaw = 0.12
+    half_period = 0.45
+    parts: list[str] = []
+    svc_name = ""
+    for i in range(cycles):
+        direction = vyaw if (i % 2 == 0) else -vyaw
+        with _sdk_lock:
+            _ensure_dds_init()
+            lc, svc_name = _ensure_loco_client_locked()
+            rc = lc.SetVelocity(0.0, 0.0, direction, half_period + 0.1)
+        if rc != 0:
+            return False, _loco_rpc_message(rc, "gentle_sway")
+        parts.append(f"sway{i} d={direction:.2f} rc={rc}")
+        time.sleep(half_period)
+    with _sdk_lock:
+        _ensure_dds_init()
+        lc, svc_name = _ensure_loco_client_locked()
+        rz = lc.SetVelocity(0.0, 0.0, 0.0, 0.35)
+    parts.append(f"stop rc={rz}")
+    msg = "; ".join(parts) + f" svc={svc_name}"
+    _loco_log(f"gentle_sway {msg}")
     return True, msg
 
 
@@ -577,12 +702,15 @@ def execute_g1_loco_command(
         {"double_step_back", "due_passi_indietro", "two_steps_back", "due passi indietro"}
     )
     _macro_spin = frozenset({"spin_inplace", "gira_su_te_stesso", "turn_around", "ruotati", "gira"})
+    _macro_sway = frozenset({"gentle_sway", "sway", "dondola", "dondolio", "ondeggia"})
     if cmd in _macro_fwd:
         return _loco_pulse_forward_back(0.22, 2)
     if cmd in _macro_back:
         return _loco_pulse_forward_back(-0.2, 2)
     if cmd in _macro_spin:
         return _loco_spin_inplace_macro()
+    if cmd in _macro_sway:
+        return _loco_gentle_sway()
 
     try:
         with _sdk_lock:
