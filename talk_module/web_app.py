@@ -3751,7 +3751,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         } catch(__){ wakeAnalyser = null; }
       }
     }
-    var WAKE_POST_TTS_PAUSE_MS = 2500;
+    var WAKE_POST_TTS_PAUSE_MS = 800;
     var _wakeDropSlicesAfterTts = 0;
     function setRobotLed(state){
       try { fetch('/api/led', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({state:state})}); } catch(e){}
@@ -3761,9 +3761,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       wakeAudioInFlight = false;
       wakeQueuedBlob = null;
       wakeDiscardCurrentSlice = false;
-      _wakeDropSlicesAfterTts = 2;
+      _wakeDropSlicesAfterTts = 1;
       setRobotLed('idle');
       setTimeout(function(){
+        _wakeDropSlicesAfterTts = 0;
         wakeDiscardCurrentSlice = false;
         setRobotLed('listening');
         scheduleNextWakeSliceIfListening();

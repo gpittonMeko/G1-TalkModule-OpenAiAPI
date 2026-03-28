@@ -36,7 +36,7 @@ const Soundboard = (() => {
       audio_base64: "", format: "mp3",
       audio_base64_clean: "", format_clean: "",
       has_robot: false, has_clean: false,
-      robot_arm: "", robot_loco: "", led_effect: "",
+      robot_arm: "", robot_loco: "", led_effect: "", teaching_slot: "",
     };
   }
 
@@ -142,6 +142,11 @@ const Soundboard = (() => {
   }
 
   async function _fireRobotActions(slot) {
+    if (slot.teaching_slot != null && slot.teaching_slot !== "") {
+      try {
+        await fetch(Api._base() + "/api/teaching/replay_slot/" + slot.teaching_slot, { method: "POST" });
+      } catch {}
+    }
     const arm = slot.robot_arm || "face_wave";
     try { await Api.robotAction(arm); } catch {}
     if (slot.robot_loco) {
@@ -223,7 +228,7 @@ const Soundboard = (() => {
           format: m.format || "mp3", format_clean: m.format_clean || "",
           has_robot: !!m.has_robot, has_clean: !!m.has_clean,
           robot_arm: m.robot_arm || "", robot_loco: m.robot_loco || "",
-          led_effect: m.led_effect || "",
+          led_effect: m.led_effect || "", teaching_slot: m.teaching_slot || "",
         };
       }
       render();

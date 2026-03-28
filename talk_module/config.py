@@ -53,8 +53,9 @@ class Settings:
     tts_language: str = _str(os.getenv("TTS_LANGUAGE", "it"))
     whisper_prompt: str = _str(
         os.getenv("WHISPER_PROMPT"),
-        "Italiano. L'utente può usare frasi lunghe: trascrivi tutto ciò che dici, senza tagliare a metà periodo. "
-        "Esempi: hey g1, buonasera, grazie. Solo parole effettivamente pronunciate.",
+        "Trascrivi in italiano. NON tradurre in inglese. L'utente parla italiano. "
+        "Esempi: hey g1, mi dai il cinque, buonasera, fai un passo avanti, grazie. "
+        "Trascrivi fedelmente le parole pronunciate in italiano.",
     )
     # STT fuzzy: threshold e min_word_length in config/stt_config.json (opzionale override via .env)
     stt_fuzzy_threshold: float = float(os.getenv("STT_FUZZY_THRESHOLD", "0.85"))
