@@ -7,8 +7,8 @@
 #   $env:G1_SSH_KEY="C:\path\to\id_ed25519_jetson"   # consigliato se non usi ssh-agent
 #   $env:G1_SKIP_OPENSSL="1"   # opzionale: salta generate_ssl_cert (se i certificati ci sono gia)
 #   $env:G1_SKIP_STRIP_CRLF="1"   # opzionale: salta sed CRLF su scripts/*.sh (se quel passaggio si blocca)
-#   $env:G1_PUSH_SOUNDBOARD_JSON="1"   # OPZIONALE: copia config/soundboard.json dal PC al Jetson (default: NO — i suoni restano sul server)
-#   $env:G1_SKIP_SOUNDBOARD_JSON="1"   # (legacy) stesso effetto del default: non pushare soundboard.json
+#   soundboard.json NON viene MAI copiato dal deploy. I suoni restano SOLO sul Jetson.
+#   Backup manuale: .\scripts\pull_soundboard_from_jetson.ps1
 #   .\deploy.ps1
 # Backup suoni dal Jetson al PC: .\scripts\pull_soundboard_from_jetson.ps1
 #
@@ -53,6 +53,7 @@ scp @sshCommon `
     "$root\talk_module\wake.py" `
     "$root\talk_module\processing.py" `
     "$root\talk_module\config.py" `
+    "$root\talk_module\openai_http.py" `
     "$root\talk_module\audio_robot_effect.py" `
     "$root\talk_module\quick_lookup.py" `
     "$root\talk_module\robot_actions.py" `
@@ -91,13 +92,7 @@ scp @sshCommon `
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [2] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
-if ($env:G1_PUSH_SOUNDBOARD_JSON -eq "1") {
-    Write-Host "  [2b] soundboard.json (audio, ~5MB)..." -NoNewline
-    scp @sshCommon -C -o ServerAliveInterval=30 -o ServerAliveCountMax=120 "$root\config\soundboard.json" "${sshHost}:${remote}/config/"
-    if ($LASTEXITCODE -eq 0) { Write-Host " OK" -ForegroundColor Green } else { Write-Host " ERRORE scp $LASTEXITCODE" -ForegroundColor Red }
-} else {
-    Write-Host "  [2b] soundboard.json... saltato (protezione: non sovrascrivere i suoni sul Jetson). Push dal PC solo se serve: `$env:G1_PUSH_SOUNDBOARD_JSON='1'" -ForegroundColor Gray
-}
+Write-Host "  [2b] soundboard.json... PROTETTO (non viene MAI copiato dal deploy)" -ForegroundColor DarkGreen
 
 # Installa dipendenze (duckduckgo-search per quick_lookup)
 Write-Host "  [3] Dipendenze (max 180s)..." -NoNewline
@@ -147,6 +142,11 @@ if ($env:G1_SKIP_OPENSSL -eq "1") {
 
 # Crea directory teachings sul server (per i movimenti registrati)
 ssh @sshExec $sshHost "mkdir -p $remote/config/teachings"
+
+# Backup automatico soundboard.json sul Jetson (PRIMA del restart, per sicurezza)
+Write-Host "  [2c] Backup soundboard.json sul Jetson..." -NoNewline
+ssh @sshExec $sshHost "cd $remote && cp -f config/soundboard.json config/soundboard.json.bak 2>/dev/null; echo ok"
+Write-Host " OK" -ForegroundColor Green
 
 # Riavvia server (timeout 50s: script ~2+8+5*2=20s max)
 Write-Host "  [4] Restart server..." -ForegroundColor Gray

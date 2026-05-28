@@ -7,6 +7,7 @@ Tutto gira sulla macchina AI Accelerator.
 import asyncio
 import base64
 import json
+import os
 import subprocess
 import tempfile
 import queue
@@ -18,7 +19,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Optional
 
-_executor = ThreadPoolExecutor(max_workers=2)
+# Pool ampio: STT/LLM/TTS sono bloccanti; con 2 worker le richieste si accodavano e «gelavano» il server.
+_executor = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 4) * 4))
 
 # FastAPI + WebSocket
 try:
@@ -31,7 +33,6 @@ except ImportError:
 from talk_module.config import settings
 from talk_module.wake import WAKE_STT_PROMPT, find_wake_and_rest
 from talk_module.audio_robot_effect import apply_robot_effect_base64
-import os
 from talk_module.network_discovery import (
     register_web_client,
     unregister_web_client,
@@ -812,7 +813,6 @@ self.addEventListener('activate', () => self.clients.claim());
         """Solo metadati per la griglia UI: evita ~20MB JSON su mobile (crash/OOM su /api/soundboard)."""
         lite: list[dict] = []
         for s in slots:
-            ar = str(s.get("audio_base64") or "")
             ac = str(s.get("audio_base64_clean") or "")
             lite.append(
                 {
@@ -820,7 +820,7 @@ self.addEventListener('activate', () => self.clients.claim());
                     "text": s.get("text"),
                     "format": s.get("format") or "webm",
                     "format_clean": s.get("format_clean") or "mp3",
-                    "has_robot": len(ar) > 50,
+                    "has_robot": False,
                     "has_clean": len(ac) > 50,
                     "robot_arm": str(s.get("robot_arm") or ""),
                     "robot_loco": str(s.get("robot_loco") or ""),
@@ -878,13 +878,20 @@ self.addEventListener('activate', () => self.clients.claim());
         if slot_idx >= len(slots):
             raise HTTPException(400, "Slot non valido")
         s = slots[slot_idx]
+        ac = str(s.get("audio_base64_clean") or "")
+        ar = str(s.get("audio_base64") or "")
+        if len(ac) <= 50 and len(ar) > 50:
+            ac = ar
+            fc = str(s.get("format_clean") or s.get("format") or "mp3")
+        else:
+            fc = str(s.get("format_clean") or "mp3")
         return {
             "icon": s.get("icon"),
             "text": s.get("text"),
-            "audio_base64": s.get("audio_base64") or "",
-            "format": s.get("format") or "webm",
-            "audio_base64_clean": s.get("audio_base64_clean") or "",
-            "format_clean": s.get("format_clean") or "mp3",
+            "audio_base64": "",
+            "format": fc if ac else str(s.get("format") or "webm"),
+            "audio_base64_clean": ac,
+            "format_clean": fc if ac else "mp3",
             "robot_arm": str(s.get("robot_arm") or ""),
             "robot_loco": str(s.get("robot_loco") or ""),
             "led_effect": str(s.get("led_effect") or ""),
@@ -949,26 +956,23 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.post("/api/soundboard")
     def api_save_soundboard(data: dict = Body(...)):
-        """Salva slot: audio naturale (TTS/registrazione); audio_base64 e audio_base64_clean allineati."""
+        """Salva slot: solo traccia clean (naturale). audio_base64 non viene più persistito."""
         global _soundboard_cache
         slot = int(data.get("slot", 0))
         if slot < 0 or slot >= SOUNDBOARD_SLOT_COUNT:
             return {"ok": False, "error": f"slot 0-{SOUNDBOARD_SLOT_COUNT - 1}"}
-        audio_b64 = str(data.get("audio_base64") or "")
-        fmt = str(data.get("format", "webm"))
-        clean_b64 = str(data.get("audio_base64_clean") or "") if "audio_base64_clean" in data else None
-        clean_fmt = str(data.get("format_clean", "mp3") or "mp3")
+        na = str(data.get("audio_base64") or "").strip()
         slots = _load_soundboard()
         prev = slots[slot] if slot < len(slots) else {}
-        if not audio_b64 and prev.get("audio_base64"):
-            audio_b64 = str(prev["audio_base64"])
-            fmt = str(prev.get("format") or "webm")
-        if clean_b64 is None or (not clean_b64 and prev.get("audio_base64_clean")):
-            clean_b64 = str(prev.get("audio_base64_clean") or "")
+        if "audio_base64_clean" in data:
+            clean_b64 = str(data.get("audio_base64_clean") or "").strip()
+            clean_fmt = str(data.get("format_clean", "mp3") or "mp3")
+        else:
+            clean_b64 = str(prev.get("audio_base64_clean") or "").strip()
             clean_fmt = str(prev.get("format_clean") or "mp3")
-        elif not clean_b64 and audio_b64:
-            clean_b64 = audio_b64
-            clean_fmt = fmt
+        if not clean_b64 and na:
+            clean_b64 = na
+            clean_fmt = str(data.get("format_clean") or data.get("format") or "mp3")
         txt = str(data.get("text", "")).strip()[:SOUNDBOARD_TEXT_MAX_LEN] or f"Comando {slot+1}"
         ra = data.get("robot_arm")
         rl = data.get("robot_loco")
@@ -977,8 +981,8 @@ self.addEventListener('activate', () => self.clients.claim());
         slots[slot] = {
             "icon": str(data.get("icon", "🎤")).strip()[:20],
             "text": txt,
-            "audio_base64": audio_b64,
-            "format": fmt,
+            "audio_base64": "",
+            "format": clean_fmt if clean_b64 else str(prev.get("format_clean") or prev.get("format") or "mp3"),
             "audio_base64_clean": clean_b64,
             "format_clean": clean_fmt if clean_b64 else "mp3",
             "robot_arm": str(ra if ra is not None else (prev.get("robot_arm") or "")),
@@ -1112,15 +1116,13 @@ self.addEventListener('activate', () => self.clients.claim());
         if slot_idx < 0 or slot_idx >= len(slots):
             raise HTTPException(400, "Slot non valido")
         s = slots[slot_idx] or {}
-        b64: Optional[str] = None
-        fmt = "mp3"
-        if s.get("audio_base64_clean") and len(str(s.get("audio_base64_clean", ""))) > 50:
-            b64 = str(s["audio_base64_clean"])
-            fmt = str(s.get("format_clean") or "mp3")
-        elif s.get("audio_base64") and len(str(s.get("audio_base64", ""))) > 50:
-            b64 = str(s["audio_base64"])
-            fmt = str(s.get("format") or "mp3")
-        if not b64:
+        ac = str(s.get("audio_base64_clean") or "")
+        ar = str(s.get("audio_base64") or "")
+        if len(ac) > 50:
+            b64, fmt = ac, str(s.get("format_clean") or "mp3")
+        elif len(ar) > 50:
+            b64, fmt = ar, str(s.get("format_clean") or s.get("format") or "mp3")
+        else:
             raise HTTPException(400, "Slot senza audio")
         cfg = load_device_config()
         spk = cfg.get("speaker") or {}
@@ -1200,7 +1202,7 @@ self.addEventListener('activate', () => self.clients.claim());
             b64_clean = base64.b64encode(raw).decode()
             return {
                 "ok": True,
-                "audio_base64": b64_clean,
+                "audio_base64": "",
                 "format": "wav",
                 "audio_base64_clean": b64_clean,
                 "format_clean": "wav",
@@ -1548,7 +1550,8 @@ self.addEventListener('activate', () => self.clients.claim());
             raise HTTPException(400, "audio base64 non valido")
         if len(audio_bytes) < 500:
             raise HTTPException(400, "Audio troppo corto")
-        return _process_audio(audio_bytes, skip_wake_word=True)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_executor, partial(_process_audio, audio_bytes, True, "webm"))
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
@@ -1681,7 +1684,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 if isinstance(item, dict) and "error" in item:
                     await ws.send_text(json.dumps({"type": "error", "data": item["error"]}))
                     break
-                result = _process_audio(item, skip_wake_word=False)
+                result = await loop.run_in_executor(_executor, partial(_process_audio, item, False, "wav"))
                 await ws.send_text(json.dumps({"type": "response", "data": result}))
                 if result.get("audio_base64") and play_local and player:
                     import base64 as b64
@@ -1761,7 +1764,7 @@ self.addEventListener('activate', () => self.clients.claim());
                     if len(item) < 500:
                         await ws.send_text(json.dumps({"type": "response", "data": {"text": "", "response": "", "audio_base64": "", "message": "Registrazione troppo corta"}}))
                         continue
-                    result = _process_audio(item, skip_wake_word=True)
+                    result = await loop.run_in_executor(_executor, partial(_process_audio, item, True, "wav"))
                     await ws.send_text(json.dumps({"type": "response", "data": result}))
                     if result.get("audio_base64") and spk.get("type") == "local":
                         _, _, _, player, _ = get_services()
@@ -2698,98 +2701,75 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         <p class="hint" style="margin:6px 0 0;font-size:11px;">Dettagli in menu <strong>Info</strong> · Leggi anche <code>LEGGIMI.txt</code> nel pacchetto.</p>
       </details>
     </div>
-  <div id="sbModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:15000;padding:20px;flex-direction:column;align-items:center;justify-content:center;overflow-y:auto;-webkit-overflow-scrolling:touch;">
-    <div style="background:#1a1d24;border-radius:16px;padding:24px;max-width:400px;width:100%;border:1px solid rgba(255,255,255,0.1);margin:auto;">
-      <h3 style="margin:0 0 16px;font-size:1.1rem;">Modifica slot <span id="sbModalSlot">0</span></h3>
-      <div style="margin-bottom:12px;">
-        <label style="font-size:12px;color:#9ca3af;">Icona</label>
-        <input type="text" id="sbModalIcon" placeholder="🎤" style="width:60px;padding:8px;margin-left:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#fff;font-size:18px;" />
+  <div id="sbModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:15000;padding:8px;flex-direction:column;align-items:center;justify-content:flex-start;overflow-y:auto;-webkit-overflow-scrolling:touch;">
+    <div style="background:#1a1d24;border-radius:12px;padding:14px;max-width:400px;width:100%;border:1px solid rgba(255,255,255,0.1);margin:8px auto;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <h3 style="margin:0;font-size:1rem;flex:1;">Slot <span id="sbModalSlot">0</span></h3>
+        <input type="text" id="sbModalIcon" placeholder="🎤" style="width:50px;padding:4px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#fff;font-size:18px;text-align:center;" />
       </div>
-      <div style="margin-bottom:12px;">
-        <label style="font-size:12px;color:#9ca3af;">Testo (etichetta e per TTS)</label>
-        <textarea id="sbModalText" placeholder="Frase da sintetizzare" maxlength="1000"></textarea>
-        <p class="hint" style="margin:4px 0 0;font-size:11px;"><span id="sbModalCharCount">0</span> / <span id="sbModalCharMax">280</span></p>
-      </div>
-      <div style="margin-bottom:12px;padding:12px;background:rgba(255,255,255,0.04);border-radius:10px;border:1px solid rgba(255,255,255,0.06);">
-        <div id="sbModalAudioStatus" style="font-size:13px;color:#9ca3af;margin-bottom:8px;">Nessun audio</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" id="sbModalSynth" style="padding:10px 16px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Genera TTS dal testo</button>
-          <button type="button" id="sbModalRecord" style="padding:10px 16px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Registra 3 sec</button>
-          <label style="padding:10px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border-radius:8px;cursor:pointer;font-size:13px;">Importa file<input type="file" id="sbModalFile" accept="audio/*" style="display:none;" /></label>
-          <button type="button" id="sbModalTts" style="padding:10px 16px;background:#8b5cf6;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;" title="Riprocessa con TTS">Voce TTS da audio</button>
-          <button type="button" id="sbModalClear" style="padding:10px 16px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Rimuovi audio</button>
+      <textarea id="sbModalText" placeholder="Testo per TTS" maxlength="1000" style="width:100%;min-height:50px;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#fff;font-size:13px;resize:vertical;margin-bottom:2px;"></textarea>
+      <p class="hint" style="margin:0 0 6px;font-size:10px;"><span id="sbModalCharCount">0</span>/<span id="sbModalCharMax">280</span></p>
+      <div style="margin-bottom:6px;padding:8px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid rgba(255,255,255,0.06);">
+        <div id="sbModalAudioStatus" style="font-size:11px;color:#9ca3af;margin-bottom:4px;">Nessun audio</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+          <button type="button" id="sbModalSynth" style="padding:6px 10px;background:#6366f1;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:11px;">TTS</button>
+          <button type="button" id="sbModalRecord" style="padding:6px 10px;background:#14b8a6;color:#0c0e14;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:11px;">Rec 3s</button>
+          <label style="padding:6px 10px;background:rgba(255,255,255,0.1);color:#e8eaed;border-radius:6px;cursor:pointer;font-size:11px;">File<input type="file" id="sbModalFile" accept="audio/*" style="display:none;" /></label>
+          <button type="button" id="sbModalTts" style="padding:6px 10px;background:#8b5cf6;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;">TTS da audio</button>
+          <button type="button" id="sbModalClear" style="padding:6px 10px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:11px;">Rimuovi</button>
         </div>
       </div>
-      <div style="margin-bottom:12px;padding:12px;background:rgba(99,102,241,0.06);border-radius:10px;border:1px solid rgba(99,102,241,0.15);">
-        <label style="font-size:12px;color:#a5b4fc;font-weight:600;display:block;margin-bottom:6px;">Azione robot (opzionale)</label>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <div style="flex:1;min-width:140px;">
-            <label style="font-size:11px;color:#9ca3af;">Gesto braccia</label>
-            <select id="sbModalArm" style="width:100%;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;margin-top:2px;">
-              <option value="">Nessuno</option>
-              <option value="face_wave">Saluto (ciao)</option>
-              <option value="shake_hand">Stretta di mano</option>
-              <option value="hands_up">Mani in alto</option>
-              <option value="clap">Applauso</option>
-              <option value="high_five">High Five</option>
-              <option value="hug">Abbraccio</option>
-              <option value="heart">Cuore (due mani)</option>
-              <option value="right_heart">Cuore (mano dx)</option>
-              <option value="kiss">Bacio</option>
-              <option value="two_hand_kiss">Bacio (due mani)</option>
-              <option value="reject">Rifiuto / No</option>
-              <option value="right_hand_up">Mano destra su</option>
-              <option value="x_ray">Braccia incrociate</option>
-              <option value="high_wave">Saluto alto</option>
-            </select>
-          </div>
-          <div style="flex:1;min-width:140px;">
-            <label style="font-size:11px;color:#9ca3af;">Locomozione</label>
-            <select id="sbModalLoco" style="width:100%;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;margin-top:2px;">
-              <option value="">Nessuna</option>
-              <option value="double_step_forward">Due passi avanti</option>
-              <option value="double_step_back">Due passi indietro</option>
-              <option value="spin_inplace">Gira su se stesso</option>
-              <option value="gentle_sway">Dondolio leggero</option>
-            </select>
-          </div>
-        </div>
-        <p class="hint" style="margin:4px 0 0;font-size:10px;color:#64748b;">Se nessun gesto selezionato, il robot far&agrave; &quot;Saluto (ciao)&quot; di default alla riproduzione locale.</p>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;">
+        <select id="sbModalArm" style="flex:1;min-width:100px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;">
+          <option value="">Gesto: nessuno</option>
+          <option value="face_wave">Saluto</option>
+          <option value="shake_hand">Stretta mano</option>
+          <option value="hands_up">Mani in alto</option>
+          <option value="clap">Applauso</option>
+          <option value="high_five">High Five</option>
+          <option value="hug">Abbraccio</option>
+          <option value="heart">Cuore</option>
+          <option value="right_heart">Cuore dx</option>
+          <option value="kiss">Bacio</option>
+          <option value="two_hand_kiss">Bacio 2 mani</option>
+          <option value="reject">Rifiuto</option>
+          <option value="right_hand_up">Mano dx su</option>
+          <option value="x_ray">Braccia incr.</option>
+          <option value="high_wave">Saluto alto</option>
+        </select>
+        <select id="sbModalLoco" style="flex:1;min-width:100px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;">
+          <option value="">Loco: nessuna</option>
+          <option value="double_step_forward">2 passi avanti</option>
+          <option value="double_step_back">2 passi indietro</option>
+          <option value="walk_forward_10">10 passi avanti</option>
+          <option value="spin_inplace">Gira</option>
+          <option value="gentle_sway">Dondolio</option>
+        </select>
       </div>
-      <div style="margin-bottom:12px;padding:12px;background:rgba(168,85,247,0.06);border-radius:10px;border:1px solid rgba(168,85,247,0.15);">
-        <label style="font-size:12px;color:#c4b5fd;font-weight:600;display:block;margin-bottom:6px;">LED colore (opzionale)</label>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <select id="sbModalLed" style="flex:1;min-width:140px;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:12px;">
-            <option value="">Nessuno (default)</option>
-            <option value="rainbow">&#127752; Arcobaleno</option>
-            <option value="breathe_blue">&#128153; Blu pulsante</option>
-            <option value="breathe_green">&#128154; Verde pulsante</option>
-            <option value="breathe_red">&#10084;&#65039; Rosso pulsante</option>
-            <option value="breathe_purple">&#128156; Viola pulsante</option>
-            <option value="blink_red">&#128308; Rosso lampeggiante</option>
-            <option value="blink_blue">&#128309; Blu lampeggiante</option>
-            <option value="solid_blue">&#128309; Blu fisso</option>
-            <option value="solid_green">&#128994; Verde fisso</option>
-            <option value="solid_red">&#128308; Rosso fisso</option>
-            <option value="solid_amber">&#128992; Ambra fisso</option>
-            <option value="solid_purple">&#128995; Viola fisso</option>
-            <option value="solid_cyan">&#129525; Ciano fisso</option>
-            <option value="solid_white">&#11036; Bianco fisso</option>
-          </select>
-          <div id="sbModalLedPreview" style="width:28px;height:28px;border-radius:50%;border:2px solid #3f3f46;background:#27272a;"></div>
-        </div>
-        <p class="hint" style="margin:4px 0 0;font-size:10px;color:#64748b;">Il LED si attiva durante la riproduzione dello slot.</p>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;align-items:center;">
+        <select id="sbModalLed" style="flex:1;min-width:110px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;">
+          <option value="">LED: nessuno</option>
+          <option value="rainbow">&#127752; Arcobaleno</option>
+          <option value="breathe_blue">&#128153; Blu pulsante</option>
+          <option value="breathe_green">&#128154; Verde pulsante</option>
+          <option value="breathe_red">&#10084;&#65039; Rosso pulsante</option>
+          <option value="breathe_purple">&#128156; Viola pulsante</option>
+          <option value="blink_red">&#128308; Rosso blink</option>
+          <option value="blink_blue">&#128309; Blu blink</option>
+          <option value="solid_blue">&#128309; Blu</option>
+          <option value="solid_green">&#128994; Verde</option>
+          <option value="solid_red">&#128308; Rosso</option>
+          <option value="solid_amber">&#128992; Ambra</option>
+          <option value="solid_purple">&#128995; Viola</option>
+          <option value="solid_cyan">&#129525; Ciano</option>
+          <option value="solid_white">&#11036; Bianco</option>
+        </select>
+        <div id="sbModalLedPreview" style="width:22px;height:22px;border-radius:50%;border:2px solid #3f3f46;background:#27272a;flex-shrink:0;"></div>
+        <input type="number" id="sbModalTeaching" min="" max="99" value="" placeholder="Teach" style="width:60px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;text-align:center;" title="Teaching slot (numero)" />
       </div>
-      <div style="margin-bottom:12px;padding:12px;background:rgba(20,184,166,0.06);border-radius:10px;border:1px solid rgba(20,184,166,0.15);">
-        <label style="font-size:12px;color:#5eead4;font-weight:600;display:block;margin-bottom:6px;">Teaching slot (opzionale)</label>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <input type="number" id="sbModalTeaching" min="" max="99" value="" placeholder="--" style="width:70px;padding:8px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;font-family:monospace;text-align:center;" />
-          <span style="font-size:11px;color:#71717a;">Se impostato, riproduce il teaching registrato insieme all'audio.</span>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;margin-top:16px;">
-        <button type="button" id="sbModalSave" style="flex:1;padding:12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Salva</button>
-        <button type="button" id="sbModalCancel" style="padding:12px 20px;background:rgba(255,255,255,0.1);color:#e8eaed;border:none;border-radius:10px;cursor:pointer;">Annulla</button>
+      <div style="display:flex;gap:6px;margin-top:8px;">
+        <button type="button" id="sbModalSave" style="flex:1;padding:10px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva</button>
+        <button type="button" id="sbModalCancel" style="padding:10px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Annulla</button>
       </div>
     </div>
   </div>
@@ -3815,7 +3795,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           stopThinkingFeedback();
           scheduleNextWakeSliceIfListening();
         }
-      }, 45000);
+      }, 70000);
       const fr = new FileReader();
       fr.onload = function(){
         const b64 = arrayBufferToBase64(fr.result);
@@ -4598,14 +4578,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         return;
       }
       function playFromData(sd){
-        let b64 = null, fmt = 'mp3';
-        if(sd.audio_base64_clean && sd.audio_base64_clean.length>50){ b64 = sd.audio_base64_clean; fmt = sd.format_clean||'mp3'; }
-        else if(sd.audio_base64 && sd.audio_base64.length>50){ b64 = sd.audio_base64; fmt = sd.format||'mp3'; }
-        if(!b64) return;
+        if(!sd.audio_base64_clean || sd.audio_base64_clean.length<=50) return;
+        const b64 = sd.audio_base64_clean, fmt = sd.format_clean||'mp3';
         sbFireSlotRobotIfConfigured(sd);
         playSoundboardBrowser(b64, fmt);
       }
-      if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
+      if (s.audio_base64_clean && s.audio_base64_clean.length>50) {
         var arm0 = (s.robot_arm && String(s.robot_arm).trim()) || '';
         var loco0 = (s.robot_loco && String(s.robot_loco).trim()) || '';
         if ((!arm0 && !loco0) && typeof slotIndex === 'number') {
@@ -4643,9 +4621,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const grid = document.getElementById('soundboardGrid');
       if (!grid) return;
       grid.innerHTML = soundboardSlots.map((s,i)=>{
-        const hasR = (typeof s.has_robot === 'boolean') ? s.has_robot : !!(s.audio_base64 && s.audio_base64.length > 50);
         const hasN = (typeof s.has_clean === 'boolean') ? s.has_clean : !!(s.audio_base64_clean && s.audio_base64_clean.length > 50);
-        const hasAudio = hasR || hasN;
+        const hasAudio = hasN;
         const border = hasAudio ? '2px solid #14b8a6' : '1px solid rgba(255,255,255,0.08)';
         const bg = hasAudio ? 'rgba(20,184,166,0.08)' : 'rgba(255,255,255,0.05)';
         let badgeTitle = 'Vuoto', badgeHtml = '&#8212;';
@@ -4723,8 +4700,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     function updateSbModalStatus(){
       const st = document.getElementById('sbModalAudioStatus');
       if(!st) return;
-      const kb = sbEditAudio ? Math.round((sbEditAudio.length||0)/1024) : 0;
-      st.innerHTML = sbEditAudio ? '&#128266; <span style="color:#14b8a6;">Audio naturale</span> '+kb+' KB' : '&#128266; <span style="color:#71717a;">Nessun audio</span>';
+      const kb = sbEditAudioClean ? Math.round((sbEditAudioClean.length||0)/1024) : 0;
+      st.innerHTML = sbEditAudioClean ? '&#128266; <span style="color:#14b8a6;">Audio</span> '+kb+' KB' : '&#128266; <span style="color:#71717a;">Nessun audio</span>';
     }
     function editSoundboard(idx){
       sbEditIdx = idx;
@@ -4735,10 +4712,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('sbModalText').setAttribute('maxlength', String(sbTextMax));
       sbEditAudioRaw = null;
       function applyFull(full){
-        sbEditAudio = full.audio_base64 || null;
-        sbEditFmt = full.format || 'webm';
-        sbEditAudioClean = full.audio_base64_clean || null;
-        sbEditFmtClean = full.format_clean || 'mp3';
+        sbEditAudio = null; sbEditFmt = '';
+        sbEditAudioClean = full.audio_base64_clean || full.audio_base64 || null;
+        sbEditFmtClean = full.format_clean || full.format || 'mp3';
         updateSbModalStatus();
         updateSbCharCount();
       }
@@ -4751,7 +4727,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (ledSel) { ledSel.value = s.led_effect || ''; sbUpdateLedPreview(); }
       if (teachSel) teachSel.value = s.teaching_slot || '';
       document.getElementById('sbModal').style.display = 'flex';
-      if ((s.audio_base64 && s.audio_base64.length>50) || (s.audio_base64_clean && s.audio_base64_clean.length>50)) {
+      if (s.audio_base64_clean && s.audio_base64_clean.length>50) {
         applyFull(s);
         return;
       }
@@ -4795,7 +4771,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const robot_loco = (document.getElementById('sbModalLoco')||{}).value || '';
       const led_effect = (document.getElementById('sbModalLed')||{}).value || '';
       const teaching_slot = (document.getElementById('sbModalTeaching')||{}).value || '';
-      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: sbEditAudio||'', format: sbEditFmt||'wav', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco, led_effect, teaching_slot})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
+      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: '', format: sbEditFmtClean||'mp3', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco, led_effect, teaching_slot})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
     };
     document.getElementById('sbModalSynth').onclick = async ()=>{
@@ -4808,8 +4784,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         const r = await fetch('/api/soundboard-synth', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
         const d = await r.json();
         if (d.ok) {
-          sbEditAudio = d.audio_base64; sbEditFmt = d.format||'wav';
-          sbEditAudioClean = d.audio_base64_clean || d.audio_base64; sbEditFmtClean = d.format_clean || d.format || 'wav';
+          sbEditAudio = null; sbEditFmt = '';
+          sbEditAudioClean = d.audio_base64_clean || d.audio_base64 || null; sbEditFmtClean = d.format_clean || d.format || 'wav';
           sbEditAudioRaw = null; updateSbModalStatus();
         }
         else alert(d.error || 'Errore TTS');
@@ -4831,7 +4807,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           fr.onload = async ()=>{
             const b64 = arrayBufferToBase64(fr.result);
             document.getElementById('sbModalAudioStatus').innerHTML = 'Registrazione pronta';
-            sbEditAudio = b64; sbEditFmt = 'webm';
+            sbEditAudio = null; sbEditFmt = '';
             sbEditAudioClean = b64; sbEditFmtClean = 'webm';
             sbEditAudioRaw = null;
             updateSbModalStatus();
@@ -4858,16 +4834,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     };
     document.getElementById('sbModalClear').onclick = ()=>{ sbEditAudio = null; sbEditFmt = ''; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; sbEditAudioRaw = null; updateSbModalStatus(); };
     document.getElementById('sbModalTts').onclick = async ()=>{
-      if (!sbEditAudio || sbEditAudio.length < 100) { alert('Serve prima un audio (registra o importa)'); return; }
+      if (!sbEditAudioClean || sbEditAudioClean.length < 100) { alert('Serve prima un audio (registra o importa)'); return; }
       const btn = document.getElementById('sbModalTts');
       btn.disabled = true;
       document.getElementById('sbModalAudioStatus').innerHTML = 'Riprocessamento con TTS...';
       try {
-        const r = await fetch('/api/audio-to-robot-voice', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({audio_base64: sbEditAudio, format: sbEditFmt||'wav'})});
+        const r = await fetch('/api/audio-to-robot-voice', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({audio_base64: sbEditAudioClean, format: sbEditFmtClean||'wav'})});
         const d = await r.json();
         if (d.ok) {
-          sbEditAudio = d.audio_base64;
-          sbEditFmt = 'mp3';
+          sbEditAudio = null; sbEditFmt = '';
           sbEditAudioClean = d.audio_base64;
           sbEditFmtClean = 'mp3';
           updateSbModalStatus();
@@ -5600,6 +5575,28 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
 .quick-btn:active{background:#14b8a630;border-color:#14b8a6;}
 .quick-btn.loco{background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.35);color:#86efac;}
 .quick-btn.loco:active{background:rgba(34,197,94,0.28);}
+.motion-preview{display:grid;grid-template-columns:minmax(160px,1.2fr) minmax(140px,0.8fr);gap:12px;align-items:center;margin-top:12px;padding:12px;background:#0a0b10;border:1px solid #27272a;border-radius:12px;}
+.motion-stage{position:relative;min-height:160px;border-radius:14px;overflow:hidden;border:1px solid #30313a;background:
+  linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+  linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px),
+  radial-gradient(circle at 50% 50%, rgba(20,184,166,0.18), rgba(10,11,16,0.94) 60%);
+background-size:24px 24px,24px 24px,100% 100%;}
+.motion-stage::before,.motion-stage::after{content:'';position:absolute;background:rgba(148,163,184,0.16);}
+.motion-stage::before{left:50%;top:12px;bottom:12px;width:1px;transform:translateX(-0.5px);}
+.motion-stage::after{top:50%;left:12px;right:12px;height:1px;transform:translateY(-0.5px);}
+.motion-body{position:absolute;left:50%;top:50%;width:54px;height:74px;border-radius:20px 20px 28px 28px;background:linear-gradient(180deg,#2dd4bf 0%,#0f766e 100%);box-shadow:0 0 0 6px rgba(20,184,166,0.12),0 0 20px rgba(20,184,166,0.18);transform:translate(-50%,-50%);transition:transform 0.08s ease,box-shadow 0.15s ease,background 0.15s ease;}
+.motion-body::before{content:'';position:absolute;left:50%;top:8px;width:20px;height:10px;border-radius:999px;background:rgba(255,255,255,0.35);transform:translateX(-50%);}
+.motion-body::after{content:'';position:absolute;left:50%;top:10px;width:12px;height:28px;border-radius:999px;background:rgba(255,255,255,0.16);transform:translateX(-50%);}
+.motion-heading{position:absolute;left:50%;top:50%;width:0;height:0;transform:translate(-50%,-50%);border-left:12px solid transparent;border-right:12px solid transparent;border-bottom:34px solid rgba(45,212,191,0.95);filter:drop-shadow(0 0 10px rgba(45,212,191,0.35));transform-origin:50% 78%;transition:transform 0.08s ease;}
+.motion-orbit{position:absolute;left:50%;top:50%;width:110px;height:110px;border:1px dashed rgba(167,139,250,0.28);border-radius:50%;transform:translate(-50%,-50%);}
+.motion-orbit-dot{position:absolute;left:50%;top:50%;width:12px;height:12px;border-radius:50%;background:#a78bfa;box-shadow:0 0 12px rgba(167,139,250,0.55);transform:translate(-50%,-50%) rotate(0deg) translateY(-50px);transition:transform 0.08s ease;}
+.motion-meta{display:flex;flex-direction:column;gap:8px;font-size:11px;color:#a1a1aa;font-family:monospace;}
+.motion-command{font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:#71717a;}
+.motion-command strong{display:block;margin-top:2px;font-size:14px;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-transform:none;letter-spacing:0;}
+.motion-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 8px;border-radius:8px;background:#111318;border:1px solid #27272a;}
+.motion-row span:last-child{color:#e4e4e7;}
+.motion-row.speed span:last-child{color:#5eead4;}
+@media (max-width: 780px){.motion-preview{grid-template-columns:1fr;}.motion-stage{min-height:150px;}}
 #robotIp{width:140px;padding:6px 8px;background:#1e1e2e;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:12px;font-family:monospace;}
 .log-area{max-height:60px;overflow-y:auto;padding:4px 8px;font-size:10px;color:#52525b;font-family:monospace;line-height:1.4;}
 .log-area .ok{color:#22c55e;}.log-area .err{color:#ef4444;}
@@ -5669,6 +5666,23 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
     <div class="quick-btns">
       <button type="button" class="quick-btn" onclick="sendAction(99)">Rilascia braccia</button>
       <button type="button" class="quick-btn" onclick="sendMove(0,0,0)">STOP vel.</button>
+    </div>
+    <div class="section-label">Vista movimento</div>
+    <div class="motion-preview" aria-label="Anteprima movimento G1">
+      <div class="motion-stage">
+        <div class="motion-orbit" id="motionOrbit"><div class="motion-orbit-dot" id="motionOrbitDot"></div></div>
+        <div class="motion-body" id="motionBody"></div>
+        <div class="motion-heading" id="motionHeading"></div>
+      </div>
+      <div class="motion-meta">
+        <div class="motion-command">Comando
+          <strong id="motionCommand">idle</strong>
+        </div>
+        <div class="motion-row"><span>vx</span><span id="motionVx">0.00</span></div>
+        <div class="motion-row"><span>vy</span><span id="motionVy">0.00</span></div>
+        <div class="motion-row"><span>vyaw</span><span id="motionVyaw">0.00</span></div>
+        <div class="motion-row speed"><span>Velocità</span><span id="motionSpeed">0%</span></div>
+      </div>
     </div>
     <div class="log-area" id="logArea"></div>
   </div>
@@ -5826,6 +5840,44 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
     var el = document.getElementById('connStatus');
     el.className = 'status ' + s;
     el.textContent = s === 'ok' ? 'OK' : s === 'err' ? 'ERR' : '--';
+  }
+
+  function renderMotionPreview(vx, vy, vyaw, command) {
+    var body = document.getElementById('motionBody');
+    var heading = document.getElementById('motionHeading');
+    var orbitDot = document.getElementById('motionOrbitDot');
+    var cmd = document.getElementById('motionCommand');
+    var vxEl = document.getElementById('motionVx');
+    var vyEl = document.getElementById('motionVy');
+    var vyawEl = document.getElementById('motionVyaw');
+    var speedEl = document.getElementById('motionSpeed');
+    if (!body || !heading || !orbitDot || !cmd || !vxEl || !vyEl || !vyawEl || !speedEl) return;
+
+    var maxLin = Math.max(parseFloat(speedSlider.value) || 0.5, 0.1);
+    var maxYaw = Math.max(parseFloat(yawSlider.value) || 0.8, 0.1);
+    var linX = Math.max(-1, Math.min(1, (Number(vy) || 0) / maxLin));
+    var linY = Math.max(-1, Math.min(1, (Number(vx) || 0) / maxLin));
+    var yawN = Math.max(-1, Math.min(1, (Number(vyaw) || 0) / maxYaw));
+    var offsetX = Math.round(linX * 36);
+    var offsetY = Math.round(-linY * 36);
+    var headingDeg = Math.atan2(Number(vy) || 0, Number(vx) || 0) * 180 / Math.PI;
+    var orbitDeg = Math.round(yawN * 160);
+    var speedPct = Math.round(Math.min(1, Math.hypot(Number(vx) || 0, Number(vy) || 0) / maxLin) * 100);
+
+    body.style.transform = 'translate(calc(-50% + ' + offsetX + 'px), calc(-50% + ' + offsetY + 'px))';
+    heading.style.transform = 'translate(-50%, -50%) rotate(' + headingDeg + 'deg)';
+    orbitDot.style.transform = 'translate(-50%, -50%) rotate(' + orbitDeg + 'deg) translateY(-50px)';
+
+    cmd.textContent = command || 'idle';
+    vxEl.textContent = (Number(vx) || 0).toFixed(2);
+    vyEl.textContent = (Number(vy) || 0).toFixed(2);
+    vyawEl.textContent = (Number(vyaw) || 0).toFixed(2);
+    speedEl.textContent = speedPct + '%';
+    body.style.boxShadow = speedPct > 0 ? '0 0 0 6px rgba(20,184,166,0.12),0 0 24px rgba(20,184,166,0.24)' : '0 0 0 6px rgba(20,184,166,0.12),0 0 20px rgba(20,184,166,0.18)';
+  }
+
+  function motionIsForceStop(command) {
+    return /^(stop|stop_walk|ready|low_stand|damp|zero_torque|squat_up_damp|lie_standup)$/i.test(String(command || '').trim());
   }
 
   var speedSlider = document.getElementById('speedMax');
@@ -6166,14 +6218,28 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
         <span>Ultimo: <span id="vrUdpAge" style="color:#a1a1aa;">--</span></span>
         <span>Errori: <span id="vrUdpErr" style="color:#a1a1aa;">0</span></span>
       </div>
-      <div id="vrSetupHint" style="margin-top:6px;color:#fbbf24;font-size:10px;display:none;">
-        &#9888; Nessun dato UDP dal Quest.<br/>
-        <strong>Setup necessario:</strong><br/>
-        1. Sul Meta Quest installa l'app <strong>&quot;Hand Tracking Streamer&quot; (HTS)</strong> da SideQuest.<br/>
-        2. Apri HTS sul Quest e inserisci l'IP del <strong>Jetson/server</strong> (es. 192.168.123.161) e porta <strong>9000</strong>.<br/>
-        3. Premi &quot;Start&quot; in HTS — i dati mano vengono inviati <strong>dal Quest al Jetson</strong> via UDP.<br/>
-        4. Il Quest non ha bisogno di ricevere nulla — è solo un trasmettitore di posizioni mano.<br/>
-        <em>Il Quest e il Jetson devono essere sulla stessa rete WiFi/LAN.</em>
+    </div>
+  </div>
+
+  <div class="panel" style="border-color:rgba(251,191,36,0.3);background:linear-gradient(135deg,#111318 0%,#1a170e 100%);">
+    <div class="panel-title" style="color:#fbbf24;">&#128218; Guida Setup VR — Hand Tracking</div>
+    <div style="font-size:12px;line-height:1.7;color:#d4d4d8;">
+      <p style="margin:0 0 8px;"><strong style="color:#fbbf24;">Cosa serve:</strong> Meta Quest 2/3 + app <strong>&quot;Hand Tracking Streamer&quot; (HTS)</strong></p>
+      <ol style="margin:0 0 10px;padding-left:20px;color:#e4e4e7;">
+        <li>Installa <strong>HTS</strong> sul Quest da <strong>SideQuest</strong> (cerca &quot;Hand Tracking Streamer&quot;).</li>
+        <li>Apri HTS sul Quest.</li>
+        <li>In HTS inserisci l'<strong>IP del Jetson/server</strong>: <code id="vrGuideIp" style="background:#27272a;padding:2px 6px;border-radius:4px;color:#4ade80;font-size:13px;">caricamento...</code></li>
+        <li>Imposta <strong>porta: <code style="background:#27272a;padding:2px 6px;border-radius:4px;color:#4ade80;font-size:13px;">9000</code></strong></li>
+        <li>Premi <strong>&quot;Start&quot;</strong> in HTS.</li>
+        <li>Torna su questa pagina, premi <strong>START VR</strong>, poi <strong>CALIBRA</strong> con le braccia rilassate.</li>
+      </ol>
+      <div style="padding:8px 10px;background:rgba(20,184,166,0.1);border:1px solid rgba(20,184,166,0.3);border-radius:8px;font-size:11px;color:#5eead4;">
+        <strong>&#9432; Come funziona:</strong> HTS invia le posizioni delle mani <strong>dal Quest al Jetson</strong> via UDP.
+        Il Quest trasmette, il Jetson riceve. Non devi trovare l'IP del Quest.
+        Quest e Jetson devono essere sulla <strong>stessa rete WiFi/LAN</strong>.
+      </div>
+      <div id="vrSetupHint" style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;font-size:11px;color:#fca5a5;display:none;">
+        <strong>&#9888; Nessun dato UDP ricevuto.</strong> Controlla che HTS sia avviato sul Quest con IP e porta corretti.
       </div>
     </div>
   </div>
@@ -6237,30 +6303,30 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
   }
 
   window.vrStart = function() {
-    log('Starting VR...');
+    log('Avvio VR...');
     apiPost('start').then(function(d) {
-      if (d.ok) { log('VR started - open HTS on Quest, then press CALIBRA', 'ok'); }
-      else { log('Start error: ' + (d.error || ''), 'err'); }
+      if (d.ok) { log('VR avviato — apri HTS sul Quest (vedi guida sotto), poi premi CALIBRA', 'ok'); }
+      else { log('Errore avvio: ' + (d.error || ''), 'err'); }
     }).catch(function(e){ log('Network: ' + e, 'err'); });
   };
 
   window.vrCalibrate = function() {
-    log('Calibrating neutral pose...');
+    log('Calibrazione posa neutra...');
     apiPost('calibrate').then(function(d) {
-      if (d.ok) { log('Calibrated! VR control active', 'ok'); }
-      else { log('Calibrate error: ' + (d.error || ''), 'err'); }
+      if (d.ok) { log('Calibrato! Controllo VR attivo', 'ok'); }
+      else { log('Errore calibrazione: ' + (d.error || ''), 'err'); }
     }).catch(function(e){ log('Network: ' + e, 'err'); });
   };
 
   window.vrStop = function() {
-    log('Stopping VR...');
+    log('Fermo VR...');
     apiPost('stop').then(function(d) {
-      if (d.ok) log('VR stopped', 'ok');
+      if (d.ok) log('VR fermato', 'ok');
     }).catch(function(e){ log('Network: ' + e, 'err'); });
   };
 
   window.vrEmergencyStop = function() {
-    log('EMERGENCY STOP!', 'err');
+    log('ARRESTO DI EMERGENZA!', 'err');
     apiPost('emergency_stop').catch(function(){});
   };
 
@@ -6284,6 +6350,11 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
   }
   connectVrSSE();
 
+  (function setGuideIp(){
+    var el = document.getElementById('vrGuideIp');
+    if (el) el.textContent = window.location.hostname || '192.168.123.161';
+  })();
+
   function updateVrUI(d) {
     var st = d.state || 'idle';
     var sb = document.getElementById('vrStateBadge');
@@ -6291,7 +6362,7 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
     sb.className = 'badge' + (st === 'active' ? ' active' : st === 'error' ? ' err' : '');
 
     var tb = document.getElementById('vrTrackBadge');
-    tb.textContent = d.tracking ? 'tracking OK' : 'no tracking';
+    tb.textContent = d.tracking ? 'tracciamento OK' : 'nessun tracciamento';
     tb.className = 'badge' + (d.tracking ? ' ok' : ' warn');
 
     document.getElementById('vrPort').textContent = d.port || '9000';
@@ -6328,7 +6399,7 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
     document.getElementById('btnVrStop').disabled = (st === 'idle');
   }
 
-  /* ── Stick figure (larger for VR) ── */
+  /* ── Manichino robot (torso + braccia realistiche) ── */
   var vrCvs = document.getElementById('vrStickCanvas');
   var vrCtx = vrCvs ? vrCvs.getContext('2d') : null;
   var vrStickTarget = {waist:[0,0,0], left:[0,0,0,0,0,0,0], right:[0,0,0,0,0,0,0]};
@@ -6344,40 +6415,96 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
     lerpArr(vrStickCur.left, vrStickTarget.left, 0.25);
     lerpArr(vrStickCur.right, vrStickTarget.right, 0.25);
 
-    var cx=W/2, hipY=240, neckY=100;
-    var wY=vrStickCur.waist[0], wR=vrStickCur.waist[1];
+    var cx=W/2, hipY=255, neckY=105, shoulderW=50;
+    var wY=vrStickCur.waist[0], wR=vrStickCur.waist[1], wP=vrStickCur.waist[2]||0;
     ctx.save();
     ctx.translate(cx, hipY);
     ctx.rotate(wR*0.3);
-    var shX=-wY*0.15;
+    var tiltX=-wY*0.15;
 
-    ctx.strokeStyle='#52525b'; ctx.lineWidth=4; ctx.lineCap='round';
-    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(shX,neckY-hipY); ctx.stroke();
+    /* Busto (trapezio) */
+    ctx.fillStyle='#1e1e24';
+    ctx.strokeStyle='#3f3f46'; ctx.lineWidth=2; ctx.lineCap='round'; ctx.lineJoin='round';
+    ctx.beginPath();
+    ctx.moveTo(-18, 0);
+    ctx.lineTo(-shoulderW, neckY-hipY+12);
+    ctx.lineTo(shoulderW, neckY-hipY+12);
+    ctx.lineTo(18, 0);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
 
-    var hr=18;
+    /* Colonna vertebrale */
+    ctx.strokeStyle='#52525b'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(tiltX,0); ctx.lineTo(tiltX,neckY-hipY); ctx.stroke();
+
+    /* Testa */
+    var headR=20, headY=neckY-hipY-headR-5;
+    ctx.fillStyle='#27272a';
+    ctx.beginPath(); ctx.arc(tiltX,headY,headR,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#52525b'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(tiltX,headY,headR,0,Math.PI*2); ctx.stroke();
+    /* Occhi */
+    ctx.fillStyle='#14b8a6';
+    ctx.beginPath(); ctx.arc(tiltX-6,headY-3,2.5,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(tiltX+6,headY-3,2.5,0,Math.PI*2); ctx.fill();
+
+    /* Spalle (cerchi piccoli) */
+    var sy=neckY-hipY+12, lsx=tiltX-shoulderW, rsx=tiltX+shoulderW;
     ctx.fillStyle='#3f3f46';
-    ctx.beginPath(); ctx.arc(shX,neckY-hipY-hr-3,hr,0,Math.PI*2); ctx.fill();
-    ctx.strokeStyle='#71717a'; ctx.lineWidth=2.5;
-    ctx.beginPath(); ctx.arc(shX,neckY-hipY-hr-3,hr,0,Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(lsx,sy,6,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(rsx,sy,6,0,Math.PI*2); ctx.fill();
 
-    var sy=neckY-hipY+10, UP=72, FO=65;
-    function drawArm(j,side){
-      var sx=shX+side*24, sp=j[0],sr=j[1],el=j[3],wr=j[4];
-      var ba=(side<0)?(Math.PI/2+sr*0.8-sp*0.3):(Math.PI/2-sr*0.8+sp*0.3);
-      var ux=sx+Math.cos(ba)*UP, uy=sy+Math.sin(ba)*UP;
-      var ea=ba+el*0.8;
-      var wx=ux+Math.cos(ea)*FO, wy=uy+Math.sin(ea)*FO;
-      ctx.strokeStyle=(side<0)?'#14b8a6':'#a78bfa'; ctx.lineWidth=5;
+    var UP=75, FO=68;
+    function drawArm(j, side, sx) {
+      var sp=j[0], sr=j[1], sy_j=j[2]||0, el=j[3], wr=j[4], wp=j[5]||0;
+      /* Angolo braccio superiore */
+      var ba = (side<0) ? (Math.PI/2 + sr*0.8 - sp*0.35) : (Math.PI/2 - sr*0.8 + sp*0.35);
+      ba += sy_j * side * 0.15;
+      var ux = sx + Math.cos(ba)*UP;
+      var uy = sy + Math.sin(ba)*UP;
+      /* Avambraccio */
+      var ea = ba + el*0.85;
+      var wx = ux + Math.cos(ea)*FO;
+      var wy = uy + Math.sin(ea)*FO;
+
+      /* Braccio superiore */
+      var armColor = (side<0) ? '#14b8a6' : '#a78bfa';
+      var armGlow = (side<0) ? 'rgba(20,184,166,0.15)' : 'rgba(167,139,250,0.15)';
+      ctx.strokeStyle=armColor; ctx.lineWidth=8; ctx.lineCap='round';
       ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ux,uy); ctx.stroke();
+      /* Avambraccio */
+      ctx.lineWidth=7;
       ctx.beginPath(); ctx.moveTo(ux,uy); ctx.lineTo(wx,wy); ctx.stroke();
-      ctx.fillStyle='#fbbf24'; ctx.strokeStyle='#92400e'; ctx.lineWidth=2;
-      ctx.beginPath(); ctx.arc(ux,uy,5,0,Math.PI*2); ctx.fill(); ctx.stroke();
-      var wh=Math.abs(wr)*60;
-      ctx.fillStyle='hsl('+(side<0?170+wh:270+wh)+',70%,60%)';
-      ctx.beginPath(); ctx.arc(wx,wy,6,0,Math.PI*2); ctx.fill();
+
+      /* Gomito (cerchio giallo) */
+      ctx.fillStyle='#fbbf24'; ctx.strokeStyle='#a16207'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(ux,uy,6,0,Math.PI*2); ctx.fill(); ctx.stroke();
+
+      /* Mano (cerchio grande con alone) */
+      ctx.fillStyle=armGlow;
+      ctx.beginPath(); ctx.arc(wx,wy,16,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle=armColor; ctx.globalAlpha=0.9;
+      ctx.beginPath(); ctx.arc(wx,wy,10,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha=1.0;
+      ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.arc(wx,wy,10,0,Math.PI*2); ctx.stroke();
+
+      /* Polso: rotazione indicata come linea sulla mano */
+      var wrAngle = ea + (wr||0)*0.8;
+      ctx.strokeStyle='rgba(255,255,255,0.5)'; ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.moveTo(wx-Math.cos(wrAngle)*7, wy-Math.sin(wrAngle)*7);
+      ctx.lineTo(wx+Math.cos(wrAngle)*7, wy+Math.sin(wrAngle)*7);
+      ctx.stroke();
     }
-    drawArm(vrStickCur.left,-1);
-    drawArm(vrStickCur.right,1);
+    drawArm(vrStickCur.left, -1, lsx);
+    drawArm(vrStickCur.right, 1, rsx);
+
+    /* Etichette */
+    ctx.font='bold 10px monospace'; ctx.textAlign='center';
+    ctx.fillStyle='#14b8a6'; ctx.fillText('SX', lsx, sy-14);
+    ctx.fillStyle='#a78bfa'; ctx.fillText('DX', rsx, sy-14);
+
     ctx.restore();
     requestAnimationFrame(drawVrStick);
   }

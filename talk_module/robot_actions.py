@@ -699,10 +699,13 @@ def execute_g1_loco_command(
         {"double_step_forward", "due_passi_avanti", "two_steps_forward", "due passi avanti"}
     )
     _macro_back = frozenset(
-        {"double_step_back", "due_passi_indietro", "two_steps_back", "due passi indietro"}
+        {"double_step_back", "due_passi_indietro", "due passi indietro"}
     )
-    _macro_spin = frozenset({"spin_inplace", "gira_su_te_stesso", "turn_around", "ruotati", "gira"})
-    _macro_sway = frozenset({"gentle_sway", "sway", "dondola", "dondolio", "ondeggia"})
+    _macro_spin = frozenset({"spin_inplace", "gira_su_te_stesso", "ruotati", "gira"})
+    _macro_sway = frozenset({"gentle_sway", "dondola", "dondolio", "ondeggia"})
+    _macro_walk_long = frozenset(
+        {"walk_forward_10", "dieci_passi_avanti", "cammina_avanti"}
+    )
     if cmd in _macro_fwd:
         return _loco_pulse_forward_back(0.22, 2)
     if cmd in _macro_back:
@@ -711,6 +714,8 @@ def execute_g1_loco_command(
         return _loco_spin_inplace_macro()
     if cmd in _macro_sway:
         return _loco_gentle_sway()
+    if cmd in _macro_walk_long:
+        return _loco_pulse_forward_back(0.35, 10)
 
     try:
         with _sdk_lock:

@@ -61,22 +61,23 @@ const Api = (() => {
   function soundboardSynth(text)  { return _post(`${_cfg().talk}/api/soundboard-synth`, { text }); }
 
   /**
-   * Save a single soundboard slot. Server expects:
-   * { slot: int, audio_base64, format, audio_base64_clean?, format_clean?,
-   *   text?, icon?, robot_arm?, robot_loco?, led_effect? }
+   * Save a single soundboard slot. Server tiene solo la traccia clean.
    */
   function soundboardSaveSlot(slotIdx, slotData) {
+    const clean = slotData.audio_base64_clean || slotData.audio_base64 || "";
+    const fc = slotData.format_clean || slotData.format || "mp3";
     return _post(`${_cfg().talk}/api/soundboard`, {
       slot: slotIdx,
-      audio_base64:       slotData.audio_base64 || "",
-      format:             slotData.format || "mp3",
-      audio_base64_clean: slotData.audio_base64_clean || undefined,
-      format_clean:       slotData.format_clean || undefined,
-      text:               slotData.text || "",
-      icon:               slotData.icon || "",
-      robot_arm:          slotData.robot_arm || "",
-      robot_loco:         slotData.robot_loco || "",
-      led_effect:         slotData.led_effect || "",
+      audio_base64: "",
+      format: fc,
+      audio_base64_clean: clean,
+      format_clean: fc,
+      text: slotData.text || "",
+      icon: slotData.icon || "",
+      robot_arm: slotData.robot_arm || "",
+      robot_loco: slotData.robot_loco || "",
+      led_effect: slotData.led_effect || "",
+      teaching_slot: slotData.teaching_slot || "",
     });
   }
 

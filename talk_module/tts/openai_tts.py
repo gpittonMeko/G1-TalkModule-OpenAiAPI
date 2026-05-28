@@ -7,9 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
-
 from talk_module.config import settings
+from talk_module.openai_http import make_openai_client
 
 
 def _find_ffmpeg() -> Optional[str]:
@@ -64,7 +63,7 @@ class TTSClient:
     """Sintetizza testo in audio tramite OpenAI TTS API."""
 
     def __init__(self, api_key: Optional[str] = None, voice: Optional[str] = None):
-        self.client = OpenAI(api_key=api_key or settings.api_key)
+        self.client = make_openai_client(api_key or settings.api_key)
         self.voice = voice or settings.tts_voice
 
     def synthesize(self, text: str, format: str = "mp3") -> bytes:

@@ -53,7 +53,7 @@ class TeachingManager:
     def start_recording(self) -> dict:
         with self._lock:
             if self._state != TeachingState.IDLE:
-                return {"ok": False, "error": f"cannot record while {self._state}"}
+                return {"ok": False, "error": f"Impossibile registrare durante {self._state}"}
             self._state = TeachingState.RECORDING
 
         try:
@@ -61,7 +61,7 @@ class TeachingManager:
             self._sdk.start(mode="passive")
         except Exception as e:
             self._state = TeachingState.IDLE
-            return {"ok": False, "error": f"SDK init failed: {e}"}
+            return {"ok": False, "error": f"Errore init SDK: {e}"}
 
         self._rec_frames = []
         self._rec_start_t = time.time()
@@ -93,7 +93,7 @@ class TeachingManager:
 
         n = len(self._rec_frames)
         if n < 2:
-            return {"ok": False, "error": f"recording too short ({n} frames)"}
+            return {"ok": False, "error": f"Registrazione troppo corta ({n} frame)"}
 
         data = {
             "meta": {
@@ -117,11 +117,11 @@ class TeachingManager:
 
     def _replay(self, data: Optional[dict]) -> dict:
         if data is None:
-            return {"ok": False, "error": "no trajectory data"}
+            return {"ok": False, "error": "Nessun dato traiettoria"}
 
         with self._lock:
             if self._state != TeachingState.IDLE:
-                return {"ok": False, "error": f"cannot replay while {self._state}"}
+                return {"ok": False, "error": f"Impossibile riprodurre durante {self._state}"}
             self._state = TeachingState.REPLAYING
 
         frames = data["frames"]
@@ -198,7 +198,7 @@ class TeachingManager:
     def save_to_slot(self, slot_id: int) -> dict:
         data = teaching_store.load_temp()
         if data is None:
-            return {"ok": False, "error": "no temp recording to save"}
+            return {"ok": False, "error": "Nessuna registrazione temporanea da salvare"}
         teaching_store.save_trajectory(slot_id, data)
         return {"ok": True, "slot_id": slot_id}
 

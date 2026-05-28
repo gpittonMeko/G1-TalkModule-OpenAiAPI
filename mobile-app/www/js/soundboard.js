@@ -40,14 +40,28 @@ const Soundboard = (() => {
     };
   }
 
+  /** Solo traccia clean: migra vecchia cache e azzera audio_base64. */
+  function _normalizeSlotAudio(s) {
+    if (!s) return s;
+    if (!s.audio_base64_clean && s.audio_base64) {
+      s.audio_base64_clean = s.audio_base64;
+      s.format_clean = s.format_clean || s.format || "mp3";
+    }
+    s.audio_base64 = "";
+    s.has_robot = false;
+    s.has_clean = !!(s.audio_base64_clean && String(s.audio_base64_clean).length > 50);
+    return s;
+  }
+
   // ── Render Grid ───────────────────────────
 
   function render() {
     const grid = document.getElementById("sbGrid");
     grid.innerHTML = "";
     for (let i = 0; i < SLOT_COUNT; i++) {
-      const s = _slots[i] || _emptySlot();
-      const hasAudio = !!(s.audio_base64 || s.audio_base64_clean);
+      _slots[i] = _normalizeSlotAudio(_slots[i] || _emptySlot());
+      const s = _slots[i];
+      const hasAudio = !!(s.audio_base64_clean && String(s.audio_base64_clean).length > 50);
       const hasText = !!s.text;
       const empty = !hasText && !hasAudio;
 
@@ -79,7 +93,7 @@ const Soundboard = (() => {
   async function _playSlot(idx) {
     const s = _slots[idx];
     if (!s) return;
-    const hasAudio = s.audio_base64 || s.audio_base64_clean;
+    const hasAudio = s.audio_base64_clean && String(s.audio_base64_clean).length > 50;
 
     if (!hasAudio && !s.text) { openModal(idx); return; }
 
@@ -87,8 +101,11 @@ const Soundboard = (() => {
       App.toast("Genero e memorizzo audio...");
       try {
         const result = await _generateTTS(s.text);
-        s.audio_base64 = result.base64;
+        s.audio_base64 = "";
+        s.audio_base64_clean = result.base64;
+        s.format_clean = result.format;
         s.format = result.format;
+        _normalizeSlotAudio(s);
         await Storage.putSlot(idx, s);
         render();
         App.toast("Audio memorizzato!");
@@ -114,8 +131,8 @@ const Soundboard = (() => {
 
   function _playLocal(idx, slot) {
     _stopCurrent();
-    const b64 = slot.audio_base64_clean || slot.audio_base64;
-    const fmt = slot.audio_base64_clean ? (slot.format_clean || "mp3") : (slot.format || "mp3");
+    const b64 = slot.audio_base64_clean;
+    const fmt = slot.format_clean || "mp3";
     if (!b64) { App.toast("Nessun audio"); return; }
 
     const mime = fmt === "wav" ? "audio/wav" : "audio/mpeg";
@@ -160,7 +177,8 @@ const Soundboard = (() => {
     if (Services.isConnected()) {
       try {
         const r = await Api.soundboardSynth(text);
-        if (r.audio_base64) return { base64: r.audio_base64, format: r.format || "wav" };
+        const b = r.audio_base64_clean || r.audio_base64;
+        if (b) return { base64: b, format: r.format_clean || r.format || "wav" };
       } catch {}
     }
     return OpenAiTts.synthesize(text);
@@ -170,7 +188,7 @@ const Soundboard = (() => {
     const toGen = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
       const s = _slots[i];
-      if (s && s.text && !s.audio_base64 && !s.audio_base64_clean) toGen.push(i);
+      if (s && s.text && !(s.audio_base64_clean && String(s.audio_base64_clean).length > 50)) toGen.push(i);
     }
     if (!toGen.length) { App.toast("Tutti gli slot con testo hanno gia audio memorizzato"); return; }
     if (!Services.isConnected() && !OpenAiTts.hasKey()) {
@@ -190,8 +208,11 @@ const Soundboard = (() => {
       progress.textContent = `Generazione ${done + 1}/${toGen.length}: "${s.text.slice(0, 30)}..."`;
       try {
         const result = await _generateTTS(s.text);
-        s.audio_base64 = result.base64;
-        s.format = result.format;
+        s.audio_base64 = "";
+        s.audio_base64_clean = result.base64;
+        s.format_clean = result.format;
+        s.format = s.format_clean;
+        _normalizeSlotAudio(s);
         await Storage.putSlot(idx, s);
         done++;
         render();
@@ -241,11 +262,12 @@ const Soundboard = (() => {
         try {
           const full = await Api.soundboardSlot(i);
           if (full) {
-            if (full.audio_base64)       _slots[i].audio_base64 = full.audio_base64;
-            if (full.audio_base64_clean) _slots[i].audio_base64_clean = full.audio_base64_clean;
-            if (full.format)             _slots[i].format = full.format;
-            if (full.format_clean)       _slots[i].format_clean = full.format_clean;
+            _slots[i].audio_base64 = "";
+            _slots[i].audio_base64_clean = full.audio_base64_clean || full.audio_base64 || "";
+            _slots[i].format_clean = full.format_clean || full.format || "mp3";
+            _slots[i].format = _slots[i].format_clean;
             if (full.led_effect !== undefined) _slots[i].led_effect = full.led_effect || "";
+            _normalizeSlotAudio(_slots[i]);
           }
           await Storage.putSlot(i, _slots[i]);
           fetched++;
@@ -306,7 +328,7 @@ const Soundboard = (() => {
     try {
       const cached = await Storage.getAllSlots();
       for (const c of cached) {
-        if (c.idx >= 0 && c.idx < SLOT_COUNT) _slots[c.idx] = { ..._emptySlot(), ...c };
+        if (c.idx >= 0 && c.idx < SLOT_COUNT) _slots[c.idx] = _normalizeSlotAudio({ ..._emptySlot(), ...c });
       }
     } catch {}
   }
@@ -352,10 +374,9 @@ const Soundboard = (() => {
 
   function _updateModalAudioInfo(s) {
     const el = document.getElementById("sbmAudioInfo");
-    if (s.audio_base64 || s.audio_base64_clean) {
-      const b64 = s.audio_base64 || s.audio_base64_clean;
-      const kb = Math.round((b64.length * 3) / 4 / 1024);
-      el.innerHTML = `<span style="color:var(--green)">\u2705 Audio memorizzato</span> (${s.format || "?"}, ~${kb} KB)`;
+    if (s.audio_base64_clean && String(s.audio_base64_clean).length > 50) {
+      const kb = Math.round((s.audio_base64_clean.length * 3) / 4 / 1024);
+      el.innerHTML = `<span style="color:var(--green)">\u2705 Audio memorizzato</span> (${s.format_clean || "?"}, ~${kb} KB)`;
     } else if (s.text) {
       el.innerHTML = `<span style="color:var(--yellow)">\u26A0\uFE0F Solo testo</span> &mdash; premi "Genera TTS"`;
     } else {
@@ -371,8 +392,11 @@ const Soundboard = (() => {
     try {
       const result = await _generateTTS(text);
       if (_editIdx >= 0) {
-        _slots[_editIdx].audio_base64 = result.base64;
+        _slots[_editIdx].audio_base64 = "";
+        _slots[_editIdx].audio_base64_clean = result.base64;
+        _slots[_editIdx].format_clean = result.format;
         _slots[_editIdx].format = result.format;
+        _normalizeSlotAudio(_slots[_editIdx]);
         _updateModalAudioInfo(_slots[_editIdx]);
       }
       App.toast("Audio generato");
@@ -383,10 +407,10 @@ const Soundboard = (() => {
   function modalPlayPreview() {
     if (_editIdx < 0) return;
     const s = _slots[_editIdx];
-    if (!s || !s.audio_base64) { App.toast("Nessun audio — genera prima il TTS"); return; }
+    if (!s || !s.audio_base64_clean) { App.toast("Nessun audio — genera prima il TTS"); return; }
     _stopCurrent();
-    const mime = (s.format === "wav") ? "audio/wav" : "audio/mpeg";
-    const audio = new Audio(`data:${mime};base64,${s.audio_base64}`);
+    const mime = (s.format_clean === "wav") ? "audio/wav" : "audio/mpeg";
+    const audio = new Audio(`data:${mime};base64,${s.audio_base64_clean}`);
     if (_outputDeviceId && audio.setSinkId) audio.setSinkId(_outputDeviceId).catch(() => {});
     audio.play().catch((e) => App.toast("Play: " + e.message));
   }
@@ -401,12 +425,15 @@ const Soundboard = (() => {
     s.led_effect = document.getElementById("sbmLedEffect").value.trim();
 
     // Auto-generate TTS if text present but no audio
-    if (s.text && !s.audio_base64 && !s.audio_base64_clean) {
+    if (s.text && !(s.audio_base64_clean && String(s.audio_base64_clean).length > 50)) {
       App.toast("Genero audio automaticamente...");
       try {
         const result = await _generateTTS(s.text);
-        s.audio_base64 = result.base64;
+        s.audio_base64 = "";
+        s.audio_base64_clean = result.base64;
+        s.format_clean = result.format;
         s.format = result.format;
+        _normalizeSlotAudio(s);
       } catch (e) {
         App.toast("TTS fallito: " + e.message + " — salvato senza audio");
       }
@@ -421,7 +448,7 @@ const Soundboard = (() => {
 
     render(); closeModal();
     Settings.updateCacheStats();
-    App.toast(s.audio_base64 ? "Slot salvato con audio" : "Slot salvato (solo testo)");
+    App.toast(s.audio_base64_clean && String(s.audio_base64_clean).length > 50 ? "Slot salvato con audio" : "Slot salvato (solo testo)");
   }
 
   async function modalClear() {

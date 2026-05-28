@@ -5,9 +5,8 @@ Client OpenAI Whisper per Speech-to-Text.
 from io import BytesIO
 from typing import Optional
 
-from openai import OpenAI
-
 from talk_module.config import settings
+from talk_module.openai_http import make_openai_client
 from talk_module.stt.audio_convert import prepare_audio_for_stt_api
 
 
@@ -15,7 +14,7 @@ class WhisperClient:
     """Trascrive audio in testo tramite OpenAI Transcription API (whisper-1 / gpt-4o-transcribe / gpt-4o-mini-transcribe)."""
 
     def __init__(self, api_key: Optional[str] = None):
-        self.client = OpenAI(api_key=api_key or settings.api_key)
+        self.client = make_openai_client(api_key or settings.api_key)
         self.model = settings.stt_model or "gpt-4o-transcribe"
 
     def transcribe(self, audio_bytes: bytes, language: Optional[str] = None, format_hint: Optional[str] = None, prompt: Optional[str] = None, model: Optional[str] = None) -> str:

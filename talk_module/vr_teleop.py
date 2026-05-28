@@ -120,7 +120,7 @@ class VRTeleopManager:
             self._sdk.start(mode="active")
         except Exception as e:
             self._state = VRState.ERROR
-            return {"ok": False, "error": f"SDK init failed: {e}"}
+            return {"ok": False, "error": f"Errore init SDK: {e}"}
 
         self._neutral_joints = self._sdk.get_joint_positions()
         self._running = True
@@ -132,9 +132,9 @@ class VRTeleopManager:
 
     def calibrate(self) -> dict:
         if self._state != VRState.CALIBRATING and self._state != VRState.ACTIVE:
-            return {"ok": False, "error": f"cannot calibrate in state {self._state}"}
+            return {"ok": False, "error": f"Impossibile calibrare nello stato {self._state}"}
         if not self.tracking_ok:
-            return {"ok": False, "error": "No hand tracking data. Apri HTS sul Quest, inserisci IP Jetson (es. 192.168.123.161) e porta 9000, poi premi Start in HTS."}
+            return {"ok": False, "error": "Nessun dato hand tracking. Apri HTS sul Quest, inserisci IP Jetson (es. 192.168.123.161) e porta 9000, poi premi Start in HTS."}
 
         self._neutral_left = WristPose(
             self._left_smooth.x, self._left_smooth.y, self._left_smooth.z,

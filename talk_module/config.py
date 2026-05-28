@@ -30,6 +30,11 @@ def _str(value: str, default: str = "") -> str:
     return value.strip()
 
 
+def _openai_max_retries_from_env() -> int:
+    v = _int(os.getenv("OPENAI_MAX_RETRIES", "1"))
+    return 1 if v is None else max(0, v)
+
+
 class Settings:
     """Impostazioni del Talk Module."""
 
@@ -76,6 +81,11 @@ class Settings:
     sample_rate: int = _int(os.getenv("SAMPLE_RATE", "16000")) or 16000
     microphone_device_id: Optional[int] = _int(os.getenv("MICROPHONE_DEVICE_ID"))
     recording_timeout: float = float(os.getenv("RECORDING_TIMEOUT", "10"))
+
+    # OpenAI HTTP: default brevi — se l'API non risponde, errore netto (no attese lunghissime). Override .env se serve.
+    openai_connect_timeout: float = float(os.getenv("OPENAI_CONNECT_TIMEOUT", "20"))
+    openai_read_timeout: float = float(os.getenv("OPENAI_READ_TIMEOUT", "60"))
+    openai_max_retries: int = _openai_max_retries_from_env()  # 0 = nessun retry
 
     # Paths
     temp_dir: Path = _root / "temp"

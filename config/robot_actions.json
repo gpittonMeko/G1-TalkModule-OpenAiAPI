@@ -85,7 +85,7 @@
   },
   "fai un applauso": {
     "action": "clap",
-    "response": "Standing ovation! Beh, io sono già in piedi."
+    "response": "In piedi ad applaudire! Beh, io sono già in piedi."
   },
   "applauso": {
     "action": "clap",

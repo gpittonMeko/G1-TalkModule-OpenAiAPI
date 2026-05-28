@@ -5,9 +5,8 @@ Client OpenAI Chat per risposte LLM.
 from datetime import date
 from typing import Optional
 
-from openai import OpenAI
-
 from talk_module.config import settings
+from talk_module.openai_http import make_openai_client
 
 DEFAULT_SYSTEM = """Sei G1, robot umanoide Unitree, host digitale in sala durante un evento aziendale. Rispondi sempre in italiano.
 
@@ -92,7 +91,7 @@ class LLMClient:
     """Genera risposte tramite OpenAI Chat API."""
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        self.client = OpenAI(api_key=api_key or settings.api_key)
+        self.client = make_openai_client(api_key or settings.api_key)
         self.model = model or settings.llm_model
         self.system_prompt = DEFAULT_SYSTEM
         self.history: list[dict] = []

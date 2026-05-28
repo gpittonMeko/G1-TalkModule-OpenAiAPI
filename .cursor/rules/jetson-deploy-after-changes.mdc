@@ -1,0 +1,17 @@
+---
+description: Dopo modifiche al Talk Module, deploy e riavvio su Jetson
+alwaysApply: true
+---
+
+# Deploy e riavvio Jetson
+
+Quando modifichi codice che gira sul robot / Jetson (`talk_module/`, `config/` rilevanti, script server):
+
+1. **Non limitarti al commit locale** — l’utente si aspetta che il servizio remoto sia aggiornato.
+2. Esegui da root progetto (Windows): `powershell -ExecutionPolicy Bypass -File deploy.ps1`  
+   (copia file, dipendenze se serve, **`scripts/restart_server.sh`** → `OK:200` su `/api/health`).
+3. **`config/soundboard.json`**: il deploy **non** lo copia più sul Jetson di default (evita di cancellare TTS generati sul server). Push esplicito solo con `$env:G1_PUSH_SOUNDBOARD_JSON='1'`. Backup dal robot: `.\scripts\pull_soundboard_from_jetson.ps1`.
+4. Se l’utente chiede solo riavvio senza nuove copie: SSH su `jetson-g1` e `cd /home/unitree/G1-TalkModule-OpenAiAPI && timeout 45 bash scripts/restart_server.sh`.
+5. Ricorda **Ctrl+F5** sul client per evitare cache JS dopo cambi a `web_app.py`.
+
+Se il deploy fallisce (SSH/chiave), segnalarlo subito invece di dare per scontato che il server sia aggiornato.
