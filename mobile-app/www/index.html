@@ -119,7 +119,7 @@
           <label for="sbPlayDest">Riproduci su:</label>
           <select id="sbPlayDest">
             <option value="local">Telefono</option>
-            <option value="server">Cassa Jetson</option>
+            <option value="server" selected>Cassa robot (G1)</option>
           </select>
         </div>
       </div>
@@ -156,6 +156,18 @@
     <div id="tab-robot" class="tab-page">
       <div class="card">
         <div class="card-title">Chat con il Robot</div>
+        <p class="form-hint" style="margin:0 0 10px;font-size:12px;line-height:1.45">
+          Comandi come <strong>dammi la mano</strong> o <strong>fai due passi avanti</strong> usano
+          <code>config/robot_actions.json</code>. Il robot deve essere in <strong>sport mode (L1+A)</strong>.
+          Per la voce continua apri <strong>Listen</strong> (tab Dashboard) e di <em>Hey G1</em> + comando.
+        </p>
+        <div class="preset-chips" style="margin-bottom:10px">
+          <span class="preset-chip" onclick="RobotPanel.quickChat('dammi la mano')">Mano</span>
+          <span class="preset-chip" onclick="RobotPanel.quickChat('saluta')">Saluta</span>
+          <span class="preset-chip" onclick="RobotPanel.quickChat('fai due passi avanti')">2 passi avanti</span>
+          <span class="preset-chip" onclick="RobotPanel.quickChat('fai due passi indietro')">2 passi indietro</span>
+          <span class="preset-chip" onclick="RobotPanel.loco('ready')">Ready</span>
+        </div>
         <div class="form-group">
           <textarea class="form-textarea" id="chatInput" rows="2" placeholder="Scrivi qualcosa al robot..."></textarea>
         </div>
@@ -184,7 +196,7 @@
           <button class="btn btn-ghost btn-sm" onclick="RobotPanel.loco('walk')">Walk</button>
           <button class="btn btn-ghost btn-sm" onclick="RobotPanel.loco('stop_walk')">Stop Walk</button>
           <button class="btn btn-ghost btn-sm" onclick="RobotPanel.loco('double_step_forward')">Avanti</button>
-          <button class="btn btn-ghost btn-sm" onclick="RobotPanel.loco('double_step_backward')">Indietro</button>
+          <button class="btn btn-ghost btn-sm" onclick="RobotPanel.loco('double_step_back')">Indietro</button>
           <button class="btn btn-ghost btn-sm" onclick="RobotPanel.loco('spin_inplace')">Gira</button>
         </div>
       </div>
@@ -192,6 +204,7 @@
 
     <!-- ═══ SETTINGS TAB ═══ -->
     <div id="tab-settings" class="tab-page">
+      <form id="settingsForm" autocomplete="on" onsubmit="event.preventDefault(); Settings.save();">
       <div class="card">
         <div class="card-title">Connessione Jetson</div>
         <div class="form-group">
@@ -288,8 +301,9 @@
       </div>
 
       <div style="margin-top:12px">
-        <button class="btn btn-ghost btn-block btn-sm" onclick="Settings.save()">Salva Impostazioni</button>
+        <button type="submit" class="btn btn-ghost btn-block btn-sm">Salva Impostazioni</button>
       </div>
+      </form>
     </div>
   </div>
 

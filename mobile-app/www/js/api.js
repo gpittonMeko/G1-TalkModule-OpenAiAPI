@@ -10,12 +10,16 @@ const Api = (() => {
   function _cfg() {
     const s = Settings.get();
     const proto = s.https ? "https" : "http";
+    // Watchdog Jetson è solo HTTP (:8082): su dashboard HTTPS evita mixed-content.
+    const wd = s.https ? null : `http://${s.ip}:${s.wdPort}`;
     return {
       talk: `${proto}://${s.ip}:${s.port}`,
-      wd:   `http://${s.ip}:${s.wdPort}`,
+      wd,
       token: s.wdToken || "",
     };
   }
+
+  function _base() { return _cfg().talk; }
 
   async function _fetch(url, opts = {}) {
     const ctrl = new AbortController();
@@ -57,7 +61,9 @@ const Api = (() => {
   function soundboardLite()       { return _json(`${_cfg().talk}/api/soundboard?lite=1`); }
   function soundboardFull()       { return _json(`${_cfg().talk}/api/soundboard`); }
   function soundboardSlot(idx)    { return _json(`${_cfg().talk}/api/soundboard-slot/${idx}`); }
-  function soundboardPlayLocal(data) { return _post(`${_cfg().talk}/api/soundboard-play-local`, data); }
+  function soundboardPlayLocal(data) {
+    return _post(`${_cfg().talk}/api/soundboard-play-local`, data, { timeout: 180000 });
+  }
   function soundboardSynth(text)  { return _post(`${_cfg().talk}/api/soundboard-synth`, { text }); }
 
   /**
@@ -124,18 +130,42 @@ const Api = (() => {
     return h;
   }
 
-  function wdHealth()     { return _json(`${_cfg().wd}/health`, { headers: _wdHeaders() }); }
-  function wdTalkStatus() { return _json(`${_cfg().wd}/talk-status`, { headers: _wdHeaders() }); }
-  function wdTalkLog()    { return _json(`${_cfg().wd}/talk-log`, { headers: _wdHeaders() }); }
+  function _wdUrl(path) {
+    const wd = _cfg().wd;
+    if (!wd) return null;
+    return `${wd}${path}`;
+  }
+
+  function wdHealth() {
+    const u = _wdUrl("/health");
+    if (!u) return Promise.reject(new Error("Watchdog non disponibile su HTTPS"));
+    return _json(u, { headers: _wdHeaders() });
+  }
+  function wdTalkStatus() {
+    const u = _wdUrl("/talk-status");
+    if (!u) return Promise.reject(new Error("Watchdog non disponibile su HTTPS"));
+    return _json(u, { headers: _wdHeaders() });
+  }
+  function wdTalkLog() {
+    const u = _wdUrl("/talk-log");
+    if (!u) return Promise.reject(new Error("Watchdog non disponibile su HTTPS"));
+    return _json(u, { headers: _wdHeaders() });
+  }
 
   function wdTalkRestart() {
-    return _json(`${_cfg().wd}/talk-restart`, { method: "POST", headers: _wdHeaders(), timeout: 60000 });
+    const u = _wdUrl("/talk-restart");
+    if (!u) return Promise.reject(new Error("Watchdog non disponibile su HTTPS"));
+    return _json(u, { method: "POST", headers: _wdHeaders(), timeout: 60000 });
   }
   function wdTalkStop() {
-    return _json(`${_cfg().wd}/talk-stop`, { method: "POST", headers: _wdHeaders() });
+    const u = _wdUrl("/talk-stop");
+    if (!u) return Promise.reject(new Error("Watchdog non disponibile su HTTPS"));
+    return _json(u, { method: "POST", headers: _wdHeaders() });
   }
   function wdTalkStart() {
-    return _json(`${_cfg().wd}/talk-start`, { method: "POST", headers: _wdHeaders(), timeout: 60000 });
+    const u = _wdUrl("/talk-start");
+    if (!u) return Promise.reject(new Error("Watchdog non disponibile su HTTPS"));
+    return _json(u, { method: "POST", headers: _wdHeaders(), timeout: 60000 });
   }
 
   // ── Reachability ──────────────────────────
@@ -145,11 +175,13 @@ const Api = (() => {
     catch { return false; }
   }
   async function isWatchdogReachable() {
+    if (!_cfg().wd) return false;
     try { await _fetch(`${_cfg().wd}/health`, { timeout: 3000, headers: _wdHeaders() }); return true; }
     catch { return false; }
   }
 
   return {
+    _base,
     health, version, sttInfo,
     soundboardLite, soundboardFull, soundboardSlot, soundboardPlayLocal,
     soundboardSaveSlot, soundboardSynth,

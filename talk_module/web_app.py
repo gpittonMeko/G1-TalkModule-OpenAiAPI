@@ -999,6 +999,18 @@ self.addEventListener('activate', () => self.clients.claim());
             _invalidate_soundboard_cache()
             return {"ok": False, "error": str(e)}
 
+    def _soundboard_ffmpeg_exe() -> Optional[str]:
+        """ffmpeg: bundle imageio-ffmpeg in venv, poi PATH di sistema."""
+        try:
+            from talk_module.stt.audio_convert import _ffmpeg_candidates
+
+            for ff in _ffmpeg_candidates():
+                if ff:
+                    return ff
+        except Exception:
+            pass
+        return None
+
     def _soundboard_bytes_to_wav_playable(raw: bytes, fmt: str) -> bytes:
         """Converte qualsiasi formato supportato da ffmpeg in WAV PCM per sounddevice (dispositivo Jetson)."""
         if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
@@ -1016,10 +1028,13 @@ self.addEventListener('activate', () => self.clients.claim());
             f.write(raw)
             inp = Path(f.name)
         out = inp.with_suffix(".wav")
+        ff = _soundboard_ffmpeg_exe()
+        if not ff:
+            raise HTTPException(503, "ffmpeg non trovato (installa imageio-ffmpeg o apt install ffmpeg)")
         try:
             r = subprocess.run(
                 [
-                    "ffmpeg",
+                    ff,
                     "-y",
                     "-i",
                     str(inp),
@@ -1039,7 +1054,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 raise RuntimeError(err or "ffmpeg decode failed")
             return out.read_bytes()
         except FileNotFoundError:
-            raise HTTPException(503, "Installa ffmpeg sul Jetson: sudo apt install ffmpeg")
+            raise HTTPException(503, "ffmpeg non trovato (installa imageio-ffmpeg o apt install ffmpeg)")
         finally:
             inp.unlink(missing_ok=True)
             out.unlink(missing_ok=True)
@@ -1057,11 +1072,14 @@ self.addEventListener('activate', () => self.clients.claim());
             fin.write(wav_bytes)
             inp = Path(fin.name)
         out = inp.with_suffix(".sb_boost.wav")
+        ff = _soundboard_ffmpeg_exe()
+        if not ff:
+            return wav_bytes
         try:
             af = f"volume={g:.4f},alimiter=limit=0.97"
             r = subprocess.run(
                 [
-                    "ffmpeg",
+                    ff,
                     "-y",
                     "-i",
                     str(inp),
@@ -1082,7 +1100,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 return out.read_bytes()
             r2 = subprocess.run(
                 [
-                    "ffmpeg",
+                    ff,
                     "-y",
                     "-i",
                     str(inp),
@@ -1126,14 +1144,13 @@ self.addEventListener('activate', () => self.clients.claim());
             raise HTTPException(400, "Slot senza audio")
         cfg = load_device_config()
         spk = cfg.get("speaker") or {}
-        if spk.get("type") != "local":
-            raise HTTPException(
-                400,
-                "Apri https://<IP-Jetson>:8081/ e scegli Altoparlante «locale» (cassa sul robot), poi Salva.",
-            )
-        dev_id = spk.get("device_id")
-        if dev_id is None:
-            raise HTTPException(400, "Device ID altoparlante mancante nel setup")
+        dev_id = None
+        if spk.get("type") == "local" and spk.get("device_id") is not None:
+            try:
+                dev_id = int(spk.get("device_id"))
+            except (TypeError, ValueError):
+                dev_id = None
+        # Se l'altoparlante è configurato come "browser/rete", usa comunque l'uscita di sistema (aplay/ffplay).
         try:
             raw = base64.b64decode(b64)
         except Exception:
@@ -1170,20 +1187,30 @@ self.addEventListener('activate', () => self.clients.claim());
                     print(f"[soundboard-play-local] robot: {e}", flush=True)
 
             _thr.Thread(target=_sb_robot, args=(arm, loco, led_fx), daemon=True).start()
-        from talk_module.audio import AudioPlayer
-
         try:
             wav_bytes = _soundboard_bytes_to_wav_playable(raw, fmt)
+            wav_g1 = wav_bytes
             wav_bytes = _soundboard_wav_boost(wav_bytes)
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(500, f"Decodifica audio: {e!s}")
-        p = AudioPlayer(device_id=int(dev_id))
+        from talk_module.audio.player import AudioPlayer
+        from talk_module.audio.g1_speaker import play_wav_on_g1
+
+        backend = "g1_internal"
         with _soundboard_local_play_lock:
-            if not p.play_bytes(wav_bytes, format_hint="wav"):
-                raise HTTPException(500, "Riproduzione fallita. Verifica PortAudio e il dispositivo in setup.")
-        return {"ok": True}
+            ok = play_wav_on_g1(wav_g1)
+            if not ok:
+                p = AudioPlayer(device_id=dev_id)
+                ok = p.play_bytes(wav_bytes, format_hint="wav")
+                backend = "local"
+            if not ok:
+                raise HTTPException(
+                    500,
+                    "Riproduzione fallita (cassa interna G1 e uscite Jetson).",
+                )
+        return {"ok": True, "backend": backend}
 
     @app.post("/api/soundboard-synth")
     def api_soundboard_synth(data: dict = Body(...)):
@@ -1529,8 +1556,43 @@ self.addEventListener('activate', () => self.clients.claim());
             return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": int((time.perf_counter() - t0) * 1000)}
 
     @app.post("/api/text-chat")
-    def api_text_chat(text: str = Body(..., embed=True)):
-        """Pipeline: testo -> LLM -> TTS. Domande scritte senza microfono."""
+    def api_text_chat(body: dict = Body(...)):
+        """Testo → routing azioni robot (config/robot_actions.json) oppure LLM+TTS."""
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(400, "Testo vuoto")
+        t0 = time.perf_counter()
+        robot_match = None
+        try:
+            from talk_module.robot_actions import check_robot_action
+
+            robot_match = check_robot_action(text)
+        except Exception as e:
+            print(f"[text-chat] robot-check error: {e}", flush=True)
+        if robot_match:
+            print(
+                f"[text-chat] ROUTE text={text!r} arm={robot_match.arm_action!r} loco={robot_match.loco_command!r}",
+                flush=True,
+            )
+            resp = _run_robot_match_actions(robot_match)
+            audio_b64 = ""
+            try:
+                if not settings.validate():
+                    _, _, tts, _, _ = get_services()
+                    audio_out = tts.synthesize(resp, format="mp3")
+                    if audio_out:
+                        audio_b64 = base64.b64encode(audio_out).decode()
+            except Exception as te:
+                print(f"[text-chat] TTS opzionale saltato: {te}", flush=True)
+            return {
+                "text": text,
+                "response": resp or "",
+                "audio_base64": audio_b64,
+                "robot_matched": True,
+                "robot_action": robot_match.arm_action or "",
+                "robot_loco": robot_match.loco_command or "",
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+            }
         errs = settings.validate()
         if errs:
             raise HTTPException(400, "; ".join(errs))
@@ -1884,6 +1946,20 @@ self.addEventListener('activate', () => self.clients.claim());
                 except Exception:
                     pass
         return result
+
+    _mobile_app_www = Path(__file__).resolve().parent.parent / "mobile-app" / "www"
+    if _mobile_app_www.is_dir():
+        from fastapi.staticfiles import StaticFiles
+
+        @app.get("/remote")
+        def remote_dashboard_redirect():
+            return RedirectResponse(url="/dashboard/", status_code=302)
+
+        app.mount(
+            "/dashboard",
+            StaticFiles(directory=str(_mobile_app_www), html=True),
+            name="g1_dashboard",
+        )
 
 
 # Launcher - Connetti a robot o AI Accelerator (per mobile/APK)
@@ -6608,6 +6684,7 @@ def run(host: str = "0.0.0.0", port: int = 8081, skip_audio_check: bool = False,
     print("  Ascolto Hey G1: /listen")
     print("  Parla (push): /local")
     print("  Client rete: /client")
+    print("  Dashboard (soundboard + servizi): /dashboard/")
     print("  Robot Control (joystick+gesti): /robot-control")
     print("  VR Control (Quest 3): /vr-control")
     if ssl_keyfile:

@@ -142,15 +142,34 @@ const Soundboard = (() => {
     }
     _playing = idx; render();
     _audioEl.onended = () => { _playing = -1; render(); };
-    _audioEl.onerror = () => { _playing = -1; render(); App.toast("Errore riproduzione"); };
-    _audioEl.play().catch((e) => { _playing = -1; render(); App.toast("Play: " + e.message); });
+    _audioEl.onerror = () => {
+      _playing = -1; render();
+      _fallbackRobotSpeaker(idx, slot, "Errore riproduzione telefono");
+    };
+    _audioEl.play().catch((e) => {
+      _playing = -1; render();
+      _fallbackRobotSpeaker(idx, slot, "Play telefono: " + e.message);
+    });
+  }
+
+  async function _fallbackRobotSpeaker(idx, slot, reason) {
+    if (!Services.isConnected()) {
+      App.toast(reason);
+      return;
+    }
+    App.toast(reason + " → cassa robot...");
+    await _playOnServer(idx, slot);
   }
 
   async function _playOnServer(idx, slot) {
     _playing = idx; render();
-    try { await Api.soundboardPlayLocal({ slot: idx }); }
-    catch (e) { App.toast("Errore server: " + e.message); }
-    setTimeout(() => { _playing = -1; render(); }, 3000);
+    try {
+      const r = await Api.soundboardPlayLocal({ slot: idx });
+      if (r && r.backend === "g1_internal") {
+        App.toast("Riproduzione cassa interna G1");
+      }
+    } catch (e) { App.toast("Errore cassa robot: " + e.message); }
+    finally { _playing = -1; render(); }
   }
 
   function _stopCurrent() {
@@ -177,9 +196,16 @@ const Soundboard = (() => {
     if (Services.isConnected()) {
       try {
         const r = await Api.soundboardSynth(text);
-        const b = r.audio_base64_clean || r.audio_base64;
-        if (b) return { base64: b, format: r.format_clean || r.format || "wav" };
+        if (r && r.ok !== false) {
+          const b = r.audio_base64_clean || r.audio_base64;
+          if (b) return { base64: b, format: r.format_clean || r.format || "wav" };
+        }
       } catch {}
+    }
+    if (!OpenAiTts.hasKey()) {
+      throw new Error(
+        "Robot senza internet: sincronizza slot con audio oppure metti API Key OpenAI in Impostazioni"
+      );
     }
     return OpenAiTts.synthesize(text);
   }

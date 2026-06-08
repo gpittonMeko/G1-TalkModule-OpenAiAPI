@@ -15,7 +15,16 @@ const RobotPanel = (() => {
     const input = document.getElementById("chatInput");
     const text = input.value.trim();
     if (!text) { App.toast("Scrivi qualcosa"); return; }
+    await _sendChatText(text);
+  }
 
+  async function quickChat(text) {
+    const input = document.getElementById("chatInput");
+    if (input) input.value = text;
+    await _sendChatText(text);
+  }
+
+  async function _sendChatText(text) {
     if (!Services.isConnected()) {
       App.toast("Jetson non raggiungibile per la chat");
       return;
@@ -29,7 +38,15 @@ const RobotPanel = (() => {
 
     try {
       const r = await Api.textChat(text);
-      respText.textContent = r.response || r.message || "(vuoto)";
+      let extra = "";
+      if (r.robot_matched) {
+        const parts = [];
+        if (r.robot_action) parts.push("gesto: " + r.robot_action);
+        if (r.robot_loco) parts.push("loco: " + r.robot_loco);
+        extra = parts.length ? "\n[" + parts.join(", ") + " inviato al G1]" : "\n[Comando robot inviato]";
+        App.toast("Comando robot: " + (parts.join(" + ") || "ok"));
+      }
+      respText.textContent = (r.response || r.message || "(vuoto)") + extra;
       _chatAudioB64 = r.audio_base64 || "";
       _chatAudioFmt = "mp3";
       respDiv.style.display = "block";
@@ -37,6 +54,8 @@ const RobotPanel = (() => {
 
       if (_chatAudioB64) {
         playChatAudio();
+      } else if (r.robot_matched) {
+        App.toast("Azione inviata (TTS offline non disponibile)");
       }
     } catch (e) {
       respText.textContent = "Errore: " + e.message;
@@ -99,9 +118,10 @@ const RobotPanel = (() => {
     if (!Services.isConnected()) { App.toast("Jetson non raggiungibile"); return; }
     try {
       const r = await Api.robotLoco(command);
-      App.toast(r.message || command);
+      const msg = r.message || r.msg || command;
+      App.toast(r.ok === false ? ("Loco fallito: " + msg) : ("Loco: " + msg));
     } catch (e) {
-      App.toast("Errore: " + e.message);
+      App.toast("Errore loco: " + e.message);
     }
   }
 
@@ -127,5 +147,5 @@ const RobotPanel = (() => {
     }
   }
 
-  return { sendChat, playChatAudio, loadActions, loco, led, ledState };
+  return { sendChat, quickChat, playChatAudio, loadActions, loco, led, ledState };
 })();

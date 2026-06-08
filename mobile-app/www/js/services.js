@@ -48,14 +48,19 @@ const Services = (() => {
       _el("svcVersion").textContent = "--";
     }
 
-    // Watchdog health
-    try {
-      await Api.wdHealth();
-      _wdConnected = true;
-      _setStatus("wdStatus", "Attivo", "ok");
-    } catch {
+    // Watchdog (solo HTTP; su dashboard HTTPS non fare richieste mixed-content)
+    if (!Settings.get().https) {
+      try {
+        await Api.wdHealth();
+        _wdConnected = true;
+        _setStatus("wdStatus", "Attivo", "ok");
+      } catch {
+        _wdConnected = false;
+        _setStatus("wdStatus", "Non raggiungibile", "err");
+      }
+    } else {
       _wdConnected = false;
-      _setStatus("wdStatus", "Non raggiungibile", "err");
+      _setStatus("wdStatus", "Solo HTTP", "warn");
     }
 
     _updateButtons();

@@ -20,6 +20,13 @@ const Settings = (() => {
   function init() {
     const saved = Storage.loadSettings();
     if (saved) _cfg = { ...DEFAULTS, ...saved };
+    // Se aperta dal browser sullo stesso host (es. /dashboard/), usa IP/porta correnti.
+    if (window.location.pathname.startsWith("/dashboard") && window.location.hostname) {
+      _cfg.ip = window.location.hostname;
+      _cfg.https = window.location.protocol === "https:";
+      const p = parseInt(window.location.port, 10);
+      _cfg.port = p || (_cfg.https ? 443 : 80);
+    }
     _toUI();
     updateCacheStats();
   }

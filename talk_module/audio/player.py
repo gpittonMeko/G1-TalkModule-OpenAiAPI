@@ -54,7 +54,19 @@ class AudioPlayer:
             return True
         if self._try_sounddevice(path):
             return True
+        if format_hint.lower() == "wav" and self._try_g1_internal_speaker(path):
+            return True
         return False
+
+    def _try_g1_internal_speaker(self, path: Path) -> bool:
+        """Fallback: cassa interna del robot G1 (AudioClient PlayStream via DDS)."""
+        try:
+            from talk_module.audio.g1_speaker import play_wav_on_g1
+
+            data = path.read_bytes()
+            return play_wav_on_g1(data)
+        except Exception:
+            return False
 
     def _try_ffplay(self, path: Path) -> bool:
         """Usa ffplay - nodisp per niente finestra."""
