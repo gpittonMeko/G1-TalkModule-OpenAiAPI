@@ -46,6 +46,7 @@ def _loco_log(msg: str) -> None:
     print(f"[G1 loco {datetime.now().isoformat(timespec='seconds')}] {msg}", flush=True)
 
 ROBOT_ACTIONS_PATH = Path(__file__).resolve().parent.parent / "config" / "robot_actions.json"
+ROBOT_ACTIONS_DE_PATH = Path(__file__).resolve().parent.parent / "config" / "robot_actions_de.json"
 SCRIPT_ACTIONS_PATH = Path(__file__).resolve().parent.parent / "scripts" / "robot_action.sh"
 
 G1_ARM_ACTIONS: dict[int, dict] = {
@@ -69,6 +70,57 @@ G1_ARM_ACTIONS: dict[int, dict] = {
 _NAME_TO_ID = {v["name"]: k for k, v in G1_ARM_ACTIONS.items()}
 _NAME_TO_ID["wave_hand"] = 25  # alias → face_wave
 _SHAKE_HAND_ID = _NAME_TO_ID.get("shake_hand", 27)
+
+# Braccio sinistro non operativo: blocca o rimappa gesti a due mani / SX.
+_LEFT_ARM_ACTION_IDS = frozenset({11, 15, 17, 19, 20, 24})
+_ID_TO_SAFE_FALLBACK: dict[int, int] = {
+    11: 12,   # two_hand_kiss → kiss
+    15: 23,   # hands_up → right_hand_up
+    17: 23,   # clap → right_hand_up
+    19: 23,   # hug → right_hand_up
+    20: 21,   # heart → right_heart
+    24: 22,   # x_ray → reject
+}
+_NAME_TO_SAFE_FALLBACK: dict[str, str] = {
+    "two_hand_kiss": "kiss",
+    "hands_up": "right_hand_up",
+    "clap": "right_hand_up",
+    "hug": "right_hand_up",
+    "heart": "right_heart",
+    "x_ray": "reject",
+}
+
+
+def left_arm_disabled() -> bool:
+    """True se DISABLE_LEFT_ARM in .env (default: true — braccio SX guasto)."""
+    if os.getenv("DISABLE_LEFT_ARM", "").strip():
+        return os.getenv("DISABLE_LEFT_ARM", "true").lower() in ("1", "true", "yes")
+    try:
+        from talk_module.config import settings
+        return bool(settings.disable_left_arm)
+    except Exception:
+        return True
+
+
+def resolve_safe_arm_action(action_id) -> tuple[Optional[object], Optional[str]]:
+    """
+    Se braccio SX disabilitato: rimappa gesti a due mani verso equivalenti solo DX.
+    Ritorna (action_id_risolto, messaggio_avviso) o (None, errore) se bloccato.
+    """
+    if not left_arm_disabled():
+        return action_id, None
+    act_int = _resolve_action_int(action_id)
+    if act_int is not None and act_int in _LEFT_ARM_ACTION_IDS:
+        fb = _ID_TO_SAFE_FALLBACK.get(act_int)
+        if fb is not None:
+            fb_name = G1_ARM_ACTIONS.get(fb, {}).get("name", str(fb))
+            return fb_name, f"Braccio SX non operativo: uso {fb_name} (solo destra)"
+        return None, "Braccio sinistro non operativo: azione bloccata"
+    s = str(action_id).strip().lower()
+    if s in _NAME_TO_SAFE_FALLBACK:
+        fb = _NAME_TO_SAFE_FALLBACK[s]
+        return fb, f"Braccio SX non operativo: uso {fb}"
+    return action_id, None
 
 _sdk_client = None
 _loco_client = None
@@ -160,12 +212,14 @@ def _ensure_loco_client_locked():
     return _loco_client, name
 
 
-def _load_robot_actions() -> dict:
-    """Carica config/robot_actions.json."""
-    if not ROBOT_ACTIONS_PATH.exists():
+def _load_robot_actions(locale: str | None = None) -> dict:
+    """Carica robot_actions per locale (it default, de per tedesco)."""
+    loc = (locale or "it").strip().lower()[:2]
+    path = ROBOT_ACTIONS_DE_PATH if loc == "de" else ROBOT_ACTIONS_PATH
+    if not path.exists():
         return {}
     try:
-        data = json.loads(ROBOT_ACTIONS_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         return {k: v for k, v in (data or {}).items() if not k.startswith("_") and isinstance(v, dict)}
     except Exception:
         return {}
@@ -173,7 +227,16 @@ def _load_robot_actions() -> dict:
 
 def get_arm_actions_list() -> list[dict]:
     """Lista azioni braccio G1 con id, name, label, icon."""
-    return [{"id": k, **v} for k, v in sorted(G1_ARM_ACTIONS.items()) if k != 99]
+    out: list[dict] = []
+    for k, v in sorted(G1_ARM_ACTIONS.items()):
+        if k == 99:
+            continue
+        item = {"id": k, **v}
+        if left_arm_disabled() and k in _LEFT_ARM_ACTION_IDS:
+            item["disabled"] = True
+            item["disabled_reason"] = "Braccio sinistro non operativo"
+        out.append(item)
+    return out
 
 
 def _fuzzy_contains(text: str, pattern: str, threshold: float = 0.82) -> bool:
@@ -194,7 +257,7 @@ def _fuzzy_contains(text: str, pattern: str, threshold: float = 0.82) -> bool:
     return False
 
 
-def check_robot_action(user_input: str) -> Optional[RobotMatch]:
+def check_robot_action(user_input: str, locale: str | None = None) -> Optional[RobotMatch]:
     """
     Se user_input contiene (o fuzzy-contiene) un pattern di robot_actions, ritorna RobotMatch.
     Altrimenti None.
@@ -202,7 +265,7 @@ def check_robot_action(user_input: str) -> Optional[RobotMatch]:
     if not user_input or not user_input.strip():
         return None
     txt = user_input.strip().lower()
-    actions = _load_robot_actions()
+    actions = _load_robot_actions(locale)
     for pattern, cfg in sorted(actions.items(), key=lambda x: -len(x[0])):
         if not pattern:
             continue
@@ -274,6 +337,12 @@ def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tupl
     action_id: nome (shake_hand, high_wave, ...) o int (27, 26, ...).
     Prova: 1) script scripts/robot_action.sh, 2) unitree_sdk2py G1ArmActionClient.
     """
+    safe_id, arm_warn = resolve_safe_arm_action(action_id)
+    if safe_id is None:
+        return False, arm_warn or "Braccio sinistro non operativo"
+    if arm_warn:
+        print(f"[G1 arm] {arm_warn}", flush=True)
+    action_id = safe_id
     ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
     shake = _is_shake_hand_action(action_id)
 

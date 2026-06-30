@@ -8,6 +8,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from talk_module.stt_prompts import ITALIAN_WHISPER_PROMPT
+
 # Carica .env dalla root del progetto
 _root = Path(__file__).resolve().parent.parent
 load_dotenv(_root / ".env")
@@ -56,11 +58,21 @@ class Settings:
     tts_model: str = _str(os.getenv("TTS_MODEL", "gpt-4o-mini-tts"))  # gpt-4o-mini-tts più affidabile per italiano
     robot_effect_preset: str = _str(os.getenv("ROBOT_EFFECT_PRESET", "robot_full"))  # telephone|ring_mod|bitcrush|robot_full
     tts_language: str = _str(os.getenv("TTS_LANGUAGE", "it"))
+    stt_language: str = _str(os.getenv("STT_LANGUAGE", "it")) or "it"
     whisper_prompt: str = _str(
         os.getenv("WHISPER_PROMPT"),
-        "Trascrivi in italiano. NON tradurre in inglese. L'utente parla italiano. "
-        "Esempi: hey g1, mi dai il cinque, buonasera, fai un passo avanti, grazie. "
-        "Trascrivi fedelmente le parole pronunciate in italiano.",
+        ITALIAN_WHISPER_PROMPT,
+    )
+    whisper_prompt_de: str = _str(
+        os.getenv("WHISPER_PROMPT_DE"),
+        "Transkribiere NUR auf Deutsch. NICHT auf Italienisch übersetzen oder transkribieren. "
+        "Wake word (unverändert): Hey G1 / Ehi G1 — Buchstabe G und Zahl 1. "
+        "Beispiele: hallo, guten Tag, hey g1, Durst, Brixen, Wo ist die Rezeption, danke, winken. "
+        "Transkribiere die gesprochenen Wörter wörtlich auf Deutsch.",
+    )
+    hey_g1_ack_text_de: str = _str(
+        os.getenv("HEY_G1_ACK_TEXT_DE"),
+        "Ja, ich höre zu. Wie kann ich Ihnen helfen?",
     )
     # STT fuzzy: threshold e min_word_length in config/stt_config.json (opzionale override via .env)
     stt_fuzzy_threshold: float = float(os.getenv("STT_FUZZY_THRESHOLD", "0.85"))
@@ -86,6 +98,9 @@ class Settings:
     openai_connect_timeout: float = float(os.getenv("OPENAI_CONNECT_TIMEOUT", "20"))
     openai_read_timeout: float = float(os.getenv("OPENAI_READ_TIMEOUT", "60"))
     openai_max_retries: int = _openai_max_retries_from_env()  # 0 = nessun retry
+
+    # Robot G1: braccio sinistro guasto — nessun comando verso motori SX (15-21)
+    disable_left_arm: bool = os.getenv("DISABLE_LEFT_ARM", "true").lower() in ("1", "true", "yes")
 
     # Paths
     temp_dir: Path = _root / "temp"

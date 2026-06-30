@@ -1,0 +1,50 @@
+{
+  "gib mir die hand": {
+    "action": "shake_hand",
+    "response": "Mit Vergnügen! Freut mich, Sie kennenzulernen."
+  },
+  "händeschütteln": {
+    "action": "shake_hand",
+    "response": "Gerne! Ein fester Händedruck von G1."
+  },
+  "schüttel mir die hand": {
+    "action": "shake_hand",
+    "response": "Sehr gerne! Schön, Sie zu treffen."
+  },
+  "winken": {
+    "action": "face_wave",
+    "response": "Hallo! Schön, Sie zu sehen!"
+  },
+  "sag hallo": {
+    "action": "face_wave",
+    "response": "Hallo! Willkommen bei Durst in Brixen!"
+  },
+  "grüß": {
+    "action": "face_wave",
+    "response": "Hallo! Ein herzlicher Gruß von G1!"
+  },
+  "rechte hand hoch": {
+    "action": "right_hand_up",
+    "response": "Hier ist meine rechte Hand — bereit!"
+  },
+  "heb die rechte hand": {
+    "action": "right_hand_up",
+    "response": "Die rechte Hand geht hoch!"
+  },
+  "high five": {
+    "action": "high_five",
+    "response": "Give me five! Gut gemacht!"
+  },
+  "gib mir fünf": {
+    "action": "high_five",
+    "response": "High five! Super!"
+  },
+  "kuss": {
+    "action": "kiss",
+    "response": "Mwah! Ein digitaler Kuss für Sie!"
+  },
+  "schick mir einen kuss": {
+    "action": "kiss",
+    "response": "Hier kommt ein Kuss — fliegt zu Ihnen!"
+  }
+}

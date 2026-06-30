@@ -10,6 +10,19 @@ from typing import Optional
 from talk_module.config import settings
 from talk_module.openai_http import make_openai_client
 
+_TTS_INSTRUCTIONS: dict[str, str] = {
+    "it": "Parla SOLO in italiano con voce chiara e alta. Non usare spagnolo o altre lingue. Pronuncia correttamente ogni parola.",
+    "de": (
+        "Sprich auf Deutsch mit klarer, freundlicher Stimme. "
+        "Betone Namen wie Durst und Brixen korrekt."
+    ),
+}
+
+
+def tts_instructions_for_locale(locale: str | None = None) -> str:
+    loc = (locale or settings.tts_language or "it").strip().lower()[:2]
+    return _TTS_INSTRUCTIONS.get(loc, _TTS_INSTRUCTIONS["it"])
+
 
 def _find_ffmpeg() -> Optional[str]:
     try:
@@ -66,7 +79,7 @@ class TTSClient:
         self.client = make_openai_client(api_key or settings.api_key)
         self.voice = voice or settings.tts_voice
 
-    def synthesize(self, text: str, format: str = "mp3") -> bytes:
+    def synthesize(self, text: str, format: str = "mp3", locale: str | None = None) -> bytes:
         """
         Converte testo in audio.
         Ritorna bytes MP3 (o formato richiesto).
@@ -83,7 +96,7 @@ class TTSClient:
                 "speed": 1.0,
             }
             if "gpt-4o-mini-tts" in settings.tts_model:
-                kwargs["instructions"] = "Parla in italiano con voce chiara e alta. Pronuncia correttamente ogni parola."
+                kwargs["instructions"] = tts_instructions_for_locale(locale)
             try:
                 resp = self.client.audio.speech.create(**kwargs)
             except TypeError:

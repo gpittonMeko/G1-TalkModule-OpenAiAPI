@@ -36,7 +36,17 @@ _FACTUAL_PATTERNS = (
     r"^chi\s+[eè]\s*",
     r"^cos['']?\s*[eè]\s*",
     r"^quando\s+",
-    r"^dove\s+",
+)
+# «Dove siamo / che posto è» → knowledge o LLM evento, NON DuckDuckGo (risposte casuali).
+_EVENT_LOCATION_RE = re.compile(
+    r"(?:"
+    r"dove\s+siamo"
+    r"|dove\s+ci\s+troviamo"
+    r"|dove\s+c'?è"
+    r"|che\s+posto\s+è"
+    r"|in\s+che\s+(?:sala|posto|luogo)"
+    r")",
+    re.IGNORECASE,
 )
 
 _TIME_RE = re.compile("|".join(f"({p})" for p in _TIME_PATTERNS), re.IGNORECASE)
@@ -160,6 +170,9 @@ def quick_lookup(text: str) -> Optional[str]:
         return None
 
     txt = text.strip().lower()
+
+    if _EVENT_LOCATION_RE.search(txt):
+        return None
 
     # Ora
     if _TIME_RE.search(txt):

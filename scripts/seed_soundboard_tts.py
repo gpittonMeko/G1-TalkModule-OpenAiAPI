@@ -8,9 +8,8 @@ TTS: voce naturale per clean, voce robot (echo) per traccia robot + effetto ring
 
 Uso dalla root del repo:
   python scripts/seed_soundboard_tts.py
-  python scripts/seed_soundboard_tts.py --preset ring_mod   # solo ring modulator
-  python scripts/seed_soundboard_tts.py --preset bitcrush  # solo bitcrusher
-  python scripts/seed_soundboard_tts.py --preset robot_full # ring+bitcrush (default)
+  python scripts/seed_soundboard_tts.py --script config/soundboard_script_de.json --out config/soundboard_de.json --locale de --slots 8
+  python scripts/seed_soundboard_tts.py --preset ring_mod
 """
 
 from __future__ import annotations
@@ -39,29 +38,46 @@ SLOT_COUNT = 20
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Genera soundboard TTS + effetto robot")
-    ap.add_argument("--preset", choices=["telephone", "ring_mod", "bitcrush", "robot_full"], default=None, help="Effetto robot (default: env ROBOT_EFFECT_PRESET o robot_full)")
+    ap.add_argument("--script", type=str, default=None, help="JSON script sorgente (default: soundboard_script.json)")
+    ap.add_argument("--out", type=str, default=None, help="Output soundboard JSON")
+    ap.add_argument("--locale", type=str, default=None, help="Locale TTS (es. de)")
+    ap.add_argument("--slots", type=int, default=None, help="Numero slot (default 20)")
+    ap.add_argument("--preset", choices=["telephone", "ring_mod", "bitcrush", "robot_full"], default=None, help="Effetto robot")
     args = ap.parse_args()
+    script_path = Path(args.script) if args.script else SCRIPT_PATH
+    if not script_path.is_absolute():
+        script_path = _root / script_path
+    out_path = Path(args.out) if args.out else OUT_PATH
+    if not out_path.is_absolute():
+        out_path = _root / out_path
+    slot_count = args.slots or SLOT_COUNT
+    locale = (args.locale or settings.tts_language or "it").strip().lower()[:2]
     preset = args.preset or settings.robot_effect_preset or "robot_full"
 
     errs = settings.validate()
     if errs:
         print("Errore configurazione:", "; ".join(errs))
         return 1
-    if not SCRIPT_PATH.exists():
-        print("Manca", SCRIPT_PATH)
+    if not script_path.exists():
+        print("Manca", script_path)
         return 1
-    data = json.loads(SCRIPT_PATH.read_text(encoding="utf-8"))
+    data = json.loads(script_path.read_text(encoding="utf-8"))
     entries = data.get("entries") or []
     tts_natural = TTSClient(voice=settings.tts_voice)
     tts_robot = TTSClient(voice=settings.tts_voice_robot)
+    print(f"Script: {script_path} | Out: {out_path} | Locale: {locale} | Slots: {slot_count}")
     print(f"Preset effetto: {preset} | Voce naturale: {settings.tts_voice} | Voce robot: {settings.tts_voice_robot}")
     slots: list[dict] = []
-    for i in range(SLOT_COUNT):
+    for i in range(slot_count):
         if i < len(entries):
             e = entries[i]
             icon = str(e.get("icon", "🎤"))[:4]
             label = str(e.get("label_corto", f"Comando {i+1}")).strip()[:280]
             text = str(e.get("testo_tts", label)).strip()
+            robot_arm = str(e.get("robot_arm") or "").strip()
+            text_it = str(e.get("label_it") or "").strip()
+            descrizione_it = str(e.get("descrizione_it") or "").strip()
+            tts_preview = text[:200]
             if not text:
                 slots.append(
                     {
@@ -71,12 +87,18 @@ def main() -> int:
                         "format": "webm",
                         "audio_base64_clean": "",
                         "format_clean": "mp3",
+                        "robot_arm": robot_arm,
+                        "robot_loco": "",
+                        "led_effect": "",
+                        "text_it": text_it,
+                        "descrizione_it": descrizione_it,
+                        "tts_preview": tts_preview,
                     }
                 )
                 continue
-            print(f"[{i+1}/{SLOT_COUNT}] TTS: {label[:50]}...")
-            raw_wav_natural = tts_natural.synthesize(text, format="wav")
-            raw_wav_robot = tts_robot.synthesize(text, format="wav")
+            print(f"[{i+1}/{slot_count}] TTS: {label[:50]}...")
+            raw_wav_natural = tts_natural.synthesize(text, format="wav", locale=locale)
+            raw_wav_robot = tts_robot.synthesize(text, format="wav", locale=locale)
             raw_wav = raw_wav_natural
             if not raw_wav:
                 print("  ! TTS vuoto, slot senza audio")
@@ -88,6 +110,12 @@ def main() -> int:
                         "format": "webm",
                         "audio_base64_clean": "",
                         "format_clean": "wav",
+                        "robot_arm": robot_arm,
+                        "robot_loco": "",
+                        "led_effect": "",
+                        "text_it": text_it,
+                        "descrizione_it": descrizione_it,
+                        "tts_preview": tts_preview,
                     }
                 )
                 continue
@@ -102,6 +130,12 @@ def main() -> int:
                     "format": fmt_r,
                     "audio_base64_clean": b64_clean,
                     "format_clean": "wav",
+                    "robot_arm": robot_arm,
+                    "robot_loco": "",
+                    "led_effect": "",
+                    "text_it": text_it,
+                    "descrizione_it": descrizione_it,
+                    "tts_preview": tts_preview,
                 }
             )
         else:
@@ -113,12 +147,15 @@ def main() -> int:
                     "format": "webm",
                     "audio_base64_clean": "",
                     "format_clean": "mp3",
+                    "robot_arm": "",
+                    "robot_loco": "",
+                    "led_effect": "",
                 }
             )
-    OUT_PATH.write_text(json.dumps({"slots": slots}, indent=2, ensure_ascii=False), encoding="utf-8")
+    out_path.write_text(json.dumps({"slots": slots}, indent=2, ensure_ascii=False), encoding="utf-8")
     n_robot = sum(1 for s in slots if s.get("audio_base64"))
     n_clean = sum(1 for s in slots if s.get("audio_base64_clean"))
-    print("Scritto", OUT_PATH, "—", n_robot, "slot con traccia robot,", n_clean, "con traccia naturale.")
+    print("Scritto", out_path, "—", n_robot, "slot con traccia robot,", n_clean, "con traccia naturale.")
     return 0
 
 

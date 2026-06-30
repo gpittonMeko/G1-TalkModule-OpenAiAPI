@@ -31,7 +31,7 @@ except ImportError:
     HAS_FASTAPI = False
 
 from talk_module.config import settings
-from talk_module.wake import WAKE_STT_PROMPT, find_wake_and_rest
+from talk_module.wake import WAKE_STT_PROMPT, find_wake_and_rest, normalize_wake_stt_text, wake_display_text
 from talk_module.audio_robot_effect import apply_robot_effect_base64
 from talk_module.network_discovery import (
     register_web_client,
@@ -42,20 +42,70 @@ from talk_module.network_discovery import (
 # Config file per scelte utente
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "audio_devices.json"
 KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "config" / "knowledge.json"
+KNOWLEDGE_DE_PATH = Path(__file__).resolve().parent.parent / "config" / "knowledge_de.json"
 SOUNDBOARD_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard.json"
 SOUNDBOARD_LITE_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard_lite.json"
+SOUNDBOARD_DE_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard_de.json"
+SOUNDBOARD_DE_LITE_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard_de_lite.json"
+SOUNDBOARD_SCRIPT_DE_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard_script_de.json"
 RUN_SHEET_PATH = Path(__file__).resolve().parent.parent / "config" / "run_sheet.json"
 SOUNDBOARD_SLOT_COUNT = 20
+SOUNDBOARD_DE_SLOT_COUNT = 8
 SOUNDBOARD_TEXT_MAX_LEN = 280
 # soundboard.json può essere ~20MB: una sola lettura parse in RAM finché il file non cambia (mtime).
 _soundboard_cache: tuple[int, list[dict]] | None = None
+_soundboard_de_cache: tuple[int, list[dict]] | None = None
 # Una sola riproduzione soundboard sulla cassa Jetson alla volta (evita sovrapposizioni).
 _soundboard_local_play_lock = threading.Lock()
 
 
 def _invalidate_soundboard_cache() -> None:
-    global _soundboard_cache
+    global _soundboard_cache, _soundboard_de_cache
     _soundboard_cache = None
+    _soundboard_de_cache = None
+
+
+def _normalize_locale(locale: str | None) -> str:
+    loc = (locale or settings.tts_language or "it").strip().lower()[:2]
+    return loc if loc in ("it", "de") else "it"
+
+
+def _stt_language_for_locale(locale: str | None) -> str:
+    return _normalize_locale(locale)
+
+
+def _stt_prompt_for_locale(locale: str | None) -> str:
+    """Prompt Whisper/STT: tedesco per tab DE, italiano altrimenti. Wake word Hey G1 in entrambi."""
+    if _normalize_locale(locale) == "de":
+        return (settings.whisper_prompt_de or "").strip()
+    return (settings.whisper_prompt or "").strip()
+
+
+def _hey_g1_ack_for_locale(locale: str | None) -> str:
+    if _normalize_locale(locale) == "de":
+        return (settings.hey_g1_ack_text_de or "").strip() or "Ja, ich höre zu. Wie kann ich Ihnen helfen?"
+    return (settings.hey_g1_ack_text or "").strip() or "Sì, ti ascolto. Come posso aiutarti?"
+
+
+def _merge_de_soundboard_labels(slots: list[dict]) -> list[dict]:
+    """Aggiunge etichette italiane da soundboard_script_de.json (per operatori IT)."""
+    if not SOUNDBOARD_SCRIPT_DE_PATH.exists():
+        return slots
+    try:
+        entries = (json.loads(SOUNDBOARD_SCRIPT_DE_PATH.read_text(encoding="utf-8")) or {}).get("entries") or []
+    except Exception:
+        return slots
+    for i, s in enumerate(slots):
+        if i >= len(entries):
+            continue
+        e = entries[i]
+        if not s.get("text_it"):
+            s["text_it"] = str(e.get("label_it") or "").strip()
+        if not s.get("descrizione_it"):
+            s["descrizione_it"] = str(e.get("descrizione_it") or "").strip()
+        if not s.get("tts_preview"):
+            s["tts_preview"] = str(e.get("testo_tts") or s.get("text") or "").strip()[:200]
+    return slots
 
 
 def _read_soundboard_lite_fast() -> list[dict] | None:
@@ -95,48 +145,55 @@ CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 PROMPT_HEY_G1_ACK_ONLY = "__G1_HEY_ACK_ONLY__"
 
 # Knowledge base: pattern -> risposta. Controllo prima dell'LLM per risposte veloci.
-_knowledge_cache: dict[str, str] | None = None
+_knowledge_caches: dict[str, dict[str, str]] = {}
 
 
-def load_knowledge() -> dict[str, str]:
-    """Carica knowledge da config/knowledge.json. Pattern (minuscolo) -> risposta."""
-    global _knowledge_cache
-    if _knowledge_cache is not None:
-        return _knowledge_cache
-    if not KNOWLEDGE_PATH.exists():
-        _knowledge_cache = {}
-        return _knowledge_cache
+def _knowledge_path_for_locale(locale: str | None) -> Path:
+    if _normalize_locale(locale) == "de":
+        return KNOWLEDGE_DE_PATH
+    return KNOWLEDGE_PATH
+
+
+def load_knowledge(locale: str | None = "it") -> dict[str, str]:
+    """Carica knowledge da config/knowledge.json (o knowledge_de.json). Pattern (minuscolo) -> risposta."""
+    loc = _normalize_locale(locale)
+    if loc in _knowledge_caches:
+        return _knowledge_caches[loc]
+    path = _knowledge_path_for_locale(loc)
+    if not path.exists():
+        _knowledge_caches[loc] = {}
+        return _knowledge_caches[loc]
     try:
-        data = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8"))
-        _knowledge_cache = {str(k).strip().lower(): str(v).strip() for k, v in (data or {}).items() if k and v}
-        return _knowledge_cache
+        data = json.loads(path.read_text(encoding="utf-8"))
+        _knowledge_caches[loc] = {str(k).strip().lower(): str(v).strip() for k, v in (data or {}).items() if k and v}
+        return _knowledge_caches[loc]
     except Exception:
-        _knowledge_cache = {}
-        return _knowledge_cache
+        _knowledge_caches[loc] = {}
+        return _knowledge_caches[loc]
 
 
 def reload_knowledge() -> None:
     """Svuota cache per ricaricare da file (dopo modifica a config/knowledge.json)."""
-    global _knowledge_cache
-    _knowledge_cache = None
+    global _knowledge_caches
+    _knowledge_caches = {}
 
 
-def check_knowledge(user_input: str) -> str | None:
+def check_knowledge(user_input: str, locale: str | None = "it") -> str | None:
     """Se user_input contiene un pattern della knowledge, ritorna la risposta. Altrimenti None."""
     if not user_input or not user_input.strip():
         return None
     txt = user_input.strip().lower()
     # Ordina per lunghezza decrescente: match più specifici prima (es. "che ore sono" prima di "ore")
-    for pattern, response in sorted(load_knowledge().items(), key=lambda x: -len(x[0])):
+    for pattern, response in sorted(load_knowledge(locale).items(), key=lambda x: -len(x[0])):
         if pattern and pattern in txt:
             return response
     return None
 
 
-def _apply_stt_fuzzy_correction(text: str) -> str:
+def _apply_stt_fuzzy_correction(text: str, locale: str | None = "it") -> str:
     """Corregge trascrizione STT con fuzzy matching su vocabolario (knowledge + stt_config)."""
     from talk_module.stt.fuzzy_correct import apply_fuzzy_correction
-    return apply_fuzzy_correction(text or "", load_knowledge())
+    return apply_fuzzy_correction(text or "", load_knowledge(locale))
 
 
 def load_device_config() -> dict:
@@ -378,7 +435,16 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "host": "AI Accelerator"}
+        return {
+            "status": "ok",
+            "host": "AI Accelerator",
+            "llm_model": settings.llm_model,
+            "llm_text_model": settings.llm_text_model,
+            "stt_model": settings.stt_model,
+            "wake_stt_model": settings.wake_stt_model,
+            "tts_model": settings.tts_model,
+            "tts_voice": settings.tts_voice,
+        }
 
     @app.get("/api/wake-debug")
     def api_wake_debug_list():
@@ -809,6 +875,50 @@ self.addEventListener('activate', () => self.clients.claim());
                 for i in range(n)
             ]
 
+    def _load_soundboard_de() -> list[dict]:
+        """Carica soundboard tedesco da config/soundboard_de.json."""
+        global _soundboard_de_cache
+        n = SOUNDBOARD_DE_SLOT_COUNT
+        empty_slot = lambda i: {
+            "icon": "🎤",
+            "text": f"DE {i+1}",
+            "audio_base64": "",
+            "format": "webm",
+            "audio_base64_clean": "",
+            "format_clean": "mp3",
+            "robot_arm": "",
+            "robot_loco": "",
+            "led_effect": "",
+        }
+        if not SOUNDBOARD_DE_PATH.exists():
+            _soundboard_de_cache = None
+            return [empty_slot(i) for i in range(n)]
+        try:
+            mtime_ns = SOUNDBOARD_DE_PATH.stat().st_mtime_ns
+            if _soundboard_de_cache is not None and _soundboard_de_cache[0] == mtime_ns:
+                return _soundboard_de_cache[1]
+            data = json.loads(SOUNDBOARD_DE_PATH.read_text(encoding="utf-8"))
+            slots = data.get("slots") or []
+            while len(slots) < n:
+                slots.append(empty_slot(len(slots)))
+            for i in range(len(slots)):
+                s = slots[i]
+                s.setdefault("icon", "🎤")
+                s.setdefault("text", f"DE {i+1}")
+                s.setdefault("audio_base64", "")
+                s.setdefault("format", "webm")
+                s.setdefault("audio_base64_clean", "")
+                s.setdefault("format_clean", "mp3")
+                s.setdefault("robot_arm", "")
+                s.setdefault("robot_loco", "")
+                s.setdefault("led_effect", "")
+            out = slots[:n]
+            _soundboard_de_cache = (mtime_ns, out)
+            return _merge_de_soundboard_labels(out)
+        except Exception:
+            _soundboard_de_cache = None
+            return [empty_slot(i) for i in range(n)]
+
     def _soundboard_slots_lite(slots: list[dict]) -> list[dict]:
         """Solo metadati per la griglia UI: evita ~20MB JSON su mobile (crash/OOM su /api/soundboard)."""
         lite: list[dict] = []
@@ -826,6 +936,9 @@ self.addEventListener('activate', () => self.clients.claim());
                     "robot_loco": str(s.get("robot_loco") or ""),
                     "led_effect": str(s.get("led_effect") or ""),
                     "teaching_slot": str(s.get("teaching_slot") or ""),
+                    "text_it": str(s.get("text_it") or ""),
+                    "descrizione_it": str(s.get("descrizione_it") or ""),
+                    "tts_preview": str(s.get("tts_preview") or ""),
                 }
             )
         return lite
@@ -875,6 +988,41 @@ self.addEventListener('activate', () => self.clients.claim());
         if slot_idx < 0 or slot_idx >= SOUNDBOARD_SLOT_COUNT:
             raise HTTPException(400, "Slot non valido")
         slots = _load_soundboard()
+        if slot_idx >= len(slots):
+            raise HTTPException(400, "Slot non valido")
+        s = slots[slot_idx]
+        ac = str(s.get("audio_base64_clean") or "")
+        ar = str(s.get("audio_base64") or "")
+        if len(ac) <= 50 and len(ar) > 50:
+            ac = ar
+            fc = str(s.get("format_clean") or s.get("format") or "mp3")
+        else:
+            fc = str(s.get("format_clean") or "mp3")
+        return {
+            "icon": s.get("icon"),
+            "text": s.get("text"),
+            "audio_base64": "",
+            "format": fc if ac else str(s.get("format") or "webm"),
+            "audio_base64_clean": ac,
+            "format_clean": fc if ac else "mp3",
+            "robot_arm": str(s.get("robot_arm") or ""),
+            "robot_loco": str(s.get("robot_loco") or ""),
+            "led_effect": str(s.get("led_effect") or ""),
+            "teaching_slot": str(s.get("teaching_slot") or ""),
+        }
+
+    @app.get("/api/soundboard-de")
+    def api_get_soundboard_de(lite: bool = Query(False)):
+        slots = _load_soundboard_de()
+        if lite:
+            slots = _soundboard_slots_lite(slots)
+        return {"slots": slots, "slot_count": SOUNDBOARD_DE_SLOT_COUNT, "text_max_len": SOUNDBOARD_TEXT_MAX_LEN, "locale": "de"}
+
+    @app.get("/api/soundboard-de-slot/{slot_idx}")
+    def api_get_soundboard_de_slot(slot_idx: int):
+        if slot_idx < 0 or slot_idx >= SOUNDBOARD_DE_SLOT_COUNT:
+            raise HTTPException(400, "Slot non valido")
+        slots = _load_soundboard_de()
         if slot_idx >= len(slots):
             raise HTTPException(400, "Slot non valido")
         s = slots[slot_idx]
@@ -1237,15 +1385,122 @@ self.addEventListener('activate', () => self.clients.claim());
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    @app.post("/api/soundboard-de-play-local")
+    def api_soundboard_de_play_local(data: dict = Body(...)):
+        """Riproduce slot soundboard tedesco sulla cassa Jetson."""
+        slot_idx = int(data.get("slot", -1))
+        slots = _load_soundboard_de()
+        if slot_idx < 0 or slot_idx >= len(slots):
+            raise HTTPException(400, "Slot non valido")
+        s = slots[slot_idx] or {}
+        ac = str(s.get("audio_base64_clean") or "")
+        ar = str(s.get("audio_base64") or "")
+        if len(ac) > 50:
+            b64, fmt = ac, str(s.get("format_clean") or "mp3")
+        elif len(ar) > 50:
+            b64, fmt = ar, str(s.get("format_clean") or s.get("format") or "mp3")
+        else:
+            raise HTTPException(400, "Slot senza audio")
+        cfg = load_device_config()
+        spk = cfg.get("speaker") or {}
+        dev_id = None
+        if spk.get("type") == "local" and spk.get("device_id") is not None:
+            try:
+                dev_id = int(spk.get("device_id"))
+            except (TypeError, ValueError):
+                dev_id = None
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            raise HTTPException(400, "Base64 non valido")
+        if len(raw) < 80:
+            raise HTTPException(400, "Audio troppo corto")
+        arm = str(s.get("robot_arm") or "").strip()
+        loco = str(s.get("robot_loco") or "").strip()
+        led_fx = str(s.get("led_effect") or "").strip()
+        if not arm and not loco:
+            arm = "face_wave"
+        if arm or loco or led_fx:
+            import threading as _thr
+
+            def _sb_robot(a, l, led):
+                try:
+                    from talk_module.robot_actions import (
+                        execute_g1_loco_command,
+                        execute_robot_action,
+                        loco_command_requires_confirm,
+                    )
+                    if led:
+                        try:
+                            _fire_led_effect(led)
+                        except Exception as le:
+                            print(f"[soundboard-de-play-local] led: {le}", flush=True)
+                    if a:
+                        ok, msg = execute_robot_action(a)
+                        print(f"[soundboard-de-play-local] arm={a!r} ok={ok} msg={msg}", flush=True)
+                    if l and not loco_command_requires_confirm(l):
+                        execute_g1_loco_command(l)
+                except Exception as e:
+                    print(f"[soundboard-de-play-local] robot: {e}", flush=True)
+
+            _thr.Thread(target=_sb_robot, args=(arm, loco, led_fx), daemon=True).start()
+        try:
+            wav_bytes = _soundboard_bytes_to_wav_playable(raw, fmt)
+            wav_g1 = wav_bytes
+            wav_bytes = _soundboard_wav_boost(wav_bytes)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Decodifica audio: {e!s}")
+        from talk_module.audio.player import AudioPlayer
+        from talk_module.audio.g1_speaker import play_wav_on_g1
+
+        backend = "g1_internal"
+        with _soundboard_local_play_lock:
+            ok = play_wav_on_g1(wav_g1)
+            if not ok:
+                p = AudioPlayer(device_id=dev_id)
+                ok = p.play_bytes(wav_bytes, format_hint="wav")
+                backend = "local"
+            if not ok:
+                raise HTTPException(500, "Riproduzione fallita (cassa interna G1 e uscite Jetson).")
+        return {"ok": True, "backend": backend}
+
+    @app.post("/api/soundboard-de-synth")
+    def api_soundboard_de_synth(data: dict = Body(...)):
+        """TTS tedesco per soundboard Durst."""
+        text = str(data.get("text", "")).strip()[:SOUNDBOARD_TEXT_MAX_LEN]
+        if not text:
+            return {"ok": False, "error": "Testo vuoto"}
+        errs = settings.validate()
+        if errs:
+            return {"ok": False, "error": "; ".join(errs)}
+        try:
+            _, _, tts, _, _ = get_services()
+            raw = tts.synthesize(text, format="wav", locale="de")
+            if not raw:
+                return {"ok": False, "error": "TTS non ha prodotto audio"}
+            b64_clean = base64.b64encode(raw).decode()
+            return {
+                "ok": True,
+                "audio_base64": "",
+                "format": "wav",
+                "audio_base64_clean": b64_clean,
+                "format_clean": "wav",
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     @app.get("/api/robot-actions")
     def api_get_robot_actions():
         """Lista azioni robot (config/robot_actions.json + arm actions G1)."""
         try:
-            from talk_module.robot_actions import _load_robot_actions, ROBOT_ACTIONS_PATH, get_arm_actions_list
+            from talk_module.robot_actions import _load_robot_actions, ROBOT_ACTIONS_PATH, get_arm_actions_list, left_arm_disabled
             return {
                 "path": str(ROBOT_ACTIONS_PATH),
                 "entries": _load_robot_actions(),
                 "arm_actions": get_arm_actions_list(),
+                "disable_left_arm": left_arm_disabled(),
             }
         except Exception as e:
             return {"path": "", "entries": {}, "arm_actions": [], "error": str(e)}
@@ -1374,19 +1629,25 @@ self.addEventListener('activate', () => self.clients.claim());
             if not raw_text or not raw_text.strip():
                 _save_wake_debug_audio(audio_bytes, "", "silence")
                 return {"text": raw_text or "", "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
-            rest, wkind = find_wake_and_rest(raw_text)
+            norm_text = normalize_wake_stt_text(raw_text)
+            rest, wkind = find_wake_and_rest(norm_text)
+            display_text = wake_display_text(norm_text, wkind)
             _save_wake_debug_audio(audio_bytes, raw_text.strip(), wkind)
-            print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r} ({_ms()}ms)", flush=True)
+            print(
+                f"[Wake] raw={raw_text!r} norm={norm_text!r} kind={wkind} rest={rest!r} ({_ms()}ms)",
+                flush=True,
+            )
             if wkind == "miss":
                 return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
             if wkind == "ok" and rest and rest.strip():
                 prompt = _apply_stt_fuzzy_correction(rest.strip())
                 print(f"[Wake] comando inline: {prompt!r}", flush=True)
-                result = _process_after_wake(prompt, raw_text, t0)
+                result = _process_after_wake(prompt, display_text, t0)
                 result["wake_cmd_inline"] = True
+                result["text"] = display_text
                 _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
                 return result
-            return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_ack": True, "duration_ms": _ms()}
+            return {"text": display_text, "response": "", "audio_base64": "", "message": "", "wake_ack": True, "duration_ms": _ms()}
         except Exception as e:
             print(f"[Wake] STT error: {e}", flush=True)
             return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": _ms()}
@@ -1395,13 +1656,20 @@ self.addEventListener('activate', () => self.clients.claim());
         from talk_module.processing import process_after_wake
         return process_after_wake(prompt, raw_text, t0, get_services, check_knowledge, _run_robot_match_actions)
 
-    def _process_audio(audio_bytes: bytes, skip_wake_word: bool = False, format_hint: str = "webm") -> dict:
+    def _process_audio(audio_bytes: bytes, skip_wake_word: bool = False, format_hint: str = "webm", locale: str = "it") -> dict:
         """Pipeline: audio -> STT -> LLM -> TTS. skip_wake_word=True per pulsante Parla."""
+        loc = _normalize_locale(locale)
+        stt_lang = _stt_language_for_locale(loc)
         t0 = time.perf_counter()
         try:
             _save_sample_audio(audio_bytes)  # Salva ultimo campione per riuso (Test con campione)
             stt, llm, tts, _, _ = get_services()
-            raw_text = stt.transcribe(audio_bytes, format_hint=format_hint, language="it")
+            raw_text = stt.transcribe(
+                audio_bytes,
+                format_hint=format_hint,
+                language=stt_lang,
+                prompt=_stt_prompt_for_locale(loc),
+            )
             if not raw_text or not raw_text.strip():
                 saved = _save_debug_audio(audio_bytes)
                 if saved:
@@ -1418,8 +1686,10 @@ self.addEventListener('activate', () => self.clients.claim());
                 prompt, msg = _extract_prompt(raw_text or "", skip_wake_word=True, audio_size=len(audio_bytes))
                 return {"text": raw_text or "", "response": "", "audio_base64": "", "message": msg or "", "duration_ms": int((time.perf_counter() - t0) * 1000)}
             if not skip_wake_word:
-                rest, wkind = find_wake_and_rest(raw_text)
-                print(f"[Wake] raw={raw_text!r} kind={wkind} rest={rest!r}", flush=True)
+                norm_text = normalize_wake_stt_text(raw_text)
+                rest, wkind = find_wake_and_rest(norm_text)
+                display_text = wake_display_text(norm_text, wkind)
+                print(f"[Wake] raw={raw_text!r} norm={norm_text!r} kind={wkind} rest={rest!r}", flush=True)
                 if wkind == "miss":
                     return {
                         "text": raw_text,
@@ -1431,53 +1701,73 @@ self.addEventListener('activate', () => self.clients.claim());
                     }
                 if wkind == "ack":
                     return {
-                        "text": raw_text,
+                        "text": display_text,
                         "response": "",
                         "audio_base64": "",
                         "message": "",
                         "wake_ack": True,
                         "duration_ms": int((time.perf_counter() - t0) * 1000),
                     }
-                prompt = _apply_stt_fuzzy_correction(rest or "")
-                text = raw_text
+                prompt = _apply_stt_fuzzy_correction(rest or "", loc)
+                text = display_text
             else:
-                text = _apply_stt_fuzzy_correction(raw_text or "")
-                prompt, msg = _extract_prompt(text or "", skip_wake_word=True, audio_size=len(audio_bytes))
+                text = _apply_stt_fuzzy_correction(raw_text or "", loc)
+                prompt = text
+                msg = ""
+                if loc == "de":
+                    norm_text = normalize_wake_stt_text(text or "")
+                    rest, wkind = find_wake_and_rest(norm_text)
+                    if wkind == "ok" and rest and rest.strip():
+                        prompt = _apply_stt_fuzzy_correction(rest.strip(), loc)
+                        text = wake_display_text(norm_text, wkind)
+                    elif wkind == "ack":
+                        prompt = PROMPT_HEY_G1_ACK_ONLY
+                if prompt != PROMPT_HEY_G1_ACK_ONLY:
+                    prompt, msg = _extract_prompt(prompt or text or "", skip_wake_word=True, audio_size=len(audio_bytes))
                 if msg:
                     return {"text": text or "", "response": "", "audio_base64": "", "message": msg, "duration_ms": int((time.perf_counter() - t0) * 1000)}
             if prompt == PROMPT_HEY_G1_ACK_ONLY:
-                resp = (settings.hey_g1_ack_text or "").strip() or "Sì, ti ascolto. Come posso aiutarti?"
+                resp = _hey_g1_ack_for_locale(loc)
             else:
-                from talk_module.robot_actions import check_robot_action
+                resp = None
                 robot_match = None
-                try:
-                    robot_match = check_robot_action(prompt)
-                except Exception as _ra_err:
-                    print(f"[robot-check] error: {_ra_err}", flush=True)
-                if robot_match:
-                    print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r} loco={robot_match.loco_command!r}", flush=True)
-                    resp = _run_robot_match_actions(robot_match)
-                else:
-                    print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
-                    resp = check_knowledge(prompt)
-                    if not resp:
-                        from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
-                        if is_quick_lookup_question(prompt):
-                            resp = quick_lookup(prompt)
-                            if resp == NOT_FOUND:
-                                resp = None
-                    if not resp:
-                        resp = llm.chat(prompt, use_history=False)
-                    # Post-LLM: if no robot action matched but LLM response suggests one, try to trigger it
-                    if resp and not robot_match:
-                        try:
-                            post_match = check_robot_action(resp)
-                            if post_match and post_match.arm_action:
-                                print(f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}", flush=True)
-                                _run_robot_match_actions(post_match)
-                        except Exception:
-                            pass
-            audio_out = tts.synthesize(resp, format="mp3") if resp else b""
+                if loc != "de":
+                    from talk_module.stt.validate import reject_message_for_bad_stt
+
+                    bad_stt = reject_message_for_bad_stt(prompt)
+                    if bad_stt:
+                        print(f"[stt-validate] reject prompt={prompt!r} -> {bad_stt!r}", flush=True)
+                        resp = bad_stt
+                if resp is None:
+                    from talk_module.robot_actions import check_robot_action
+
+                    try:
+                        robot_match = check_robot_action(prompt, locale=loc)
+                    except Exception as _ra_err:
+                        print(f"[robot-check] error: {_ra_err}", flush=True)
+                    if robot_match:
+                        print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r} loco={robot_match.loco_command!r}", flush=True)
+                        resp = _run_robot_match_actions(robot_match)
+                    else:
+                        print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
+                        resp = check_knowledge(prompt, locale=loc)
+                        if not resp and loc != "de":
+                            from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
+                            if is_quick_lookup_question(prompt):
+                                resp = quick_lookup(prompt)
+                                if resp == NOT_FOUND:
+                                    resp = None
+                        if not resp:
+                            resp = llm.chat(prompt, use_history=False, locale=loc)
+                        if resp and not robot_match:
+                            try:
+                                post_match = check_robot_action(resp, locale=loc)
+                                if post_match and post_match.arm_action:
+                                    print(f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}", flush=True)
+                                    _run_robot_match_actions(post_match)
+                            except Exception:
+                                pass
+            audio_out = tts.synthesize(resp, format="mp3", locale=loc) if resp else b""
             if resp:
                 _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
             return {
@@ -1514,25 +1804,27 @@ self.addEventListener('activate', () => self.clients.claim());
                 )
             return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {err}", "duration_ms": int((time.perf_counter() - t0) * 1000)}
 
-    def _process_text(prompt: str) -> dict:
+    def _process_text(prompt: str, locale: str = "it") -> dict:
         """Pipeline: testo -> LLM -> TTS. Per domande scritte."""
+        loc = _normalize_locale(locale)
         t0 = time.perf_counter()
         try:
             if not prompt or not prompt.strip():
-                return {"text": "", "response": "", "audio_base64": "", "message": "Scrivi qualcosa.", "duration_ms": 0}
+                msg = "Schreiben Sie etwas." if loc == "de" else "Scrivi qualcosa."
+                return {"text": "", "response": "", "audio_base64": "", "message": msg, "duration_ms": 0}
             stt, llm, tts, _, _ = get_services()
             robot_match = None
             try:
                 from talk_module.robot_actions import check_robot_action
 
-                robot_match = check_robot_action(prompt.strip())
+                robot_match = check_robot_action(prompt.strip(), locale=loc)
             except Exception:
                 pass
             if robot_match:
                 resp = _run_robot_match_actions(robot_match)
             else:
-                resp = check_knowledge(prompt)
-                if not resp:
+                resp = check_knowledge(prompt, locale=loc)
+                if not resp and loc != "de":
                     from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
                     if is_quick_lookup_question(prompt.strip()):
                         resp = quick_lookup(prompt.strip())
@@ -1544,8 +1836,9 @@ self.addEventListener('activate', () => self.clients.claim());
                         use_history=False,
                         model=settings.llm_text_model,
                         max_tokens=384,
+                        locale=loc,
                     )
-            audio_out = tts.synthesize(resp, format="mp3") if resp else b""
+            audio_out = tts.synthesize(resp, format="mp3", locale=loc) if resp else b""
             return {
                 "text": prompt.strip(),
                 "response": resp or "",
@@ -1559,6 +1852,7 @@ self.addEventListener('activate', () => self.clients.claim());
     def api_text_chat(body: dict = Body(...)):
         """Testo → routing azioni robot (config/robot_actions.json) oppure LLM+TTS."""
         text = str(body.get("text") or "").strip()
+        locale = _normalize_locale(body.get("locale"))
         if not text:
             raise HTTPException(400, "Testo vuoto")
         t0 = time.perf_counter()
@@ -1566,7 +1860,7 @@ self.addEventListener('activate', () => self.clients.claim());
         try:
             from talk_module.robot_actions import check_robot_action
 
-            robot_match = check_robot_action(text)
+            robot_match = check_robot_action(text, locale=locale)
         except Exception as e:
             print(f"[text-chat] robot-check error: {e}", flush=True)
         if robot_match:
@@ -1579,7 +1873,7 @@ self.addEventListener('activate', () => self.clients.claim());
             try:
                 if not settings.validate():
                     _, _, tts, _, _ = get_services()
-                    audio_out = tts.synthesize(resp, format="mp3")
+                    audio_out = tts.synthesize(resp, format="mp3", locale=locale)
                     if audio_out:
                         audio_b64 = base64.b64encode(audio_out).decode()
             except Exception as te:
@@ -1596,16 +1890,24 @@ self.addEventListener('activate', () => self.clients.claim());
         errs = settings.validate()
         if errs:
             raise HTTPException(400, "; ".join(errs))
-        return _process_text(text)
+        return _process_text(text, locale=locale)
 
     @app.post("/api/voice-chat")
-    async def api_voice_chat(audio_b64: str = None):
+    async def api_voice_chat(body: dict = Body(...)):
         """Pipeline: audio base64 -> STT -> LLM -> TTS. Ritorna response + audio base64."""
         errs = settings.validate()
         if errs:
             raise HTTPException(400, "; ".join(errs))
+        audio_b64 = str(body.get("audio_base64") or body.get("audio_b64") or "").strip()
+        locale = _normalize_locale(body.get("locale"))
+        fmt = str(body.get("format") or "webm")
+        skip_wake = body.get("skip_wake")
+        if skip_wake is None:
+            skip_wake = True  # PTT tab Tedesco: niente wake obbligatoria; Hey G1 gestita se presente nel testo
+        else:
+            skip_wake = bool(skip_wake)
         if not audio_b64:
-            raise HTTPException(400, "audio_b64 mancante")
+            raise HTTPException(400, "audio_base64 mancante")
         try:
             audio_bytes = base64.b64decode(audio_b64)
         except Exception:
@@ -1613,7 +1915,9 @@ self.addEventListener('activate', () => self.clients.claim());
         if len(audio_bytes) < 500:
             raise HTTPException(400, "Audio troppo corto")
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, partial(_process_audio, audio_bytes, True, "webm"))
+        return await loop.run_in_executor(
+            _executor, partial(_process_audio, audio_bytes, skip_wake, fmt, locale)
+        )
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
@@ -2669,6 +2973,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <a href="#" data-section="knowledge"><span class="icon">&#128214;</span> Knowledge</a>
       <a href="#" data-section="devices"><span class="icon">&#128268;</span> Dispositivi</a>
       <a href="#" data-section="robot"><span class="icon">&#127918;</span> Robot (G1)</a>
+      <a href="#" data-section="deutsch"><span class="icon">&#127465;&#127466;</span> Tedesco (Durst)</a>
       <a href="#" data-section="info"><span class="icon">&#8505;</span> Info</a>
     </nav>
   </aside>
@@ -2680,6 +2985,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <button type="button" class="client-tab" data-section="knowledge" onclick="return window.g1ActivateClientSection('knowledge')"><span class="ct-ic" aria-hidden="true">&#128214;</span><span>Know</span></button>
       <button type="button" class="client-tab" data-section="devices" onclick="return window.g1ActivateClientSection('devices')"><span class="ct-ic" aria-hidden="true">&#128268;</span><span>I/O</span></button>
       <button type="button" class="client-tab" data-section="robot" onclick="return window.g1ActivateClientSection('robot')"><span class="ct-ic" aria-hidden="true">&#127918;</span><span>Robot</span></button>
+      <button type="button" class="client-tab" data-section="deutsch" onclick="return window.g1ActivateClientSection('deutsch')"><span class="ct-ic" aria-hidden="true">&#127465;&#127466;</span><span>Tedesco</span></button>
       <button type="button" class="client-tab" data-section="info" onclick="return window.g1ActivateClientSection('info')"><span class="ct-ic" aria-hidden="true">&#8505;</span><span>Info</span></button>
     </nav>
     <div id="persistentMicLevel" style="padding:5px 12px;display:flex;align-items:center;gap:8px;background:rgba(20,184,166,0.05);border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:2px;">
@@ -2714,9 +3020,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           if (rf) { rf.src = location.origin + '/robot-control'; }
         }
         setTimeout(function(){
-          if ((sec === 'soundboard' || sec === 'parla') && navigator.mediaDevices) {
+          if ((sec === 'soundboard' || sec === 'parla' || sec === 'deutsch') && navigator.mediaDevices) {
             var o = document.getElementById('sbOutput');
             if (o && o.options && o.options.length <= 1 && typeof requestAndLoadDevices === 'function') requestAndLoadDevices();
+            if (sec === 'deutsch') {
+              var deO = document.getElementById('deSbOutput');
+              if (deO && deO.options && deO.options.length <= 1 && typeof requestAndLoadDevices === 'function') requestAndLoadDevices();
+              if (typeof updateDeBrowserRowVisibility === 'function') updateDeBrowserRowVisibility();
+            }
           }
           if (sec === 'runsheet' && typeof loadRunSheet === 'function') loadRunSheet();
         }, 0);
@@ -2727,7 +3038,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       function g1ApplyClientHash(){
         var h = (location.hash||'').replace(/^#/, '').trim();
         if (!h) return;
-        var allowed = {soundboard:1,runsheet:1,parla:1,knowledge:1,devices:1,robot:1,info:1};
+        var allowed = {soundboard:1,runsheet:1,parla:1,knowledge:1,devices:1,robot:1,deutsch:1,info:1};
         if (allowed[h] && typeof window.g1ActivateClientSection === 'function') {
           window.g1ActivateClientSection(h);
         }
@@ -2982,7 +3293,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="section-knowledge" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Knowledge</h2>
-  <p class="hint" style="margin-bottom:10px;"><strong>Uso:</strong> frasi «chiave → risposta» per McKinsey host, curiosità, FAQ. Se l’utente (o tu in <strong>Parla</strong>) dice qualcosa che <strong>contiene</strong> il pattern, il robot risponde subito senza chiamare il modello GPT (più veloce e coerente col testo).</p>
+  <p class="hint" style="margin-bottom:10px;"><strong>Uso:</strong> frasi «chiave → risposta» per Durst Brixen, McKinsey/evento, FAQ. Se l’utente (o tu in <strong>Parla</strong>) dice qualcosa che <strong>contiene</strong> il pattern, il robot risponde subito senza chiamare il modello GPT (più veloce e coerente col testo).</p>
   <details id="knowledgeWrap" class="step" style="margin-bottom:12px;border:1px solid rgba(255,255,255,0.06);">
     <summary style="cursor:pointer;color:#a1a1aa;">Pattern -&gt; risposta (modifica)</summary>
     <p class="hint" style="margin-top:8px;">Aggiungi righe e <strong>Salva su server</strong>. La corrispondenza è per sottostringa nel testo riconosciuto.</p>
@@ -3026,6 +3337,44 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </details>
   </div>
     </section>
+    <section id="section-deutsch" class="section">
+  <h2 style="font-size:1.2rem;margin:0 0 6px;color:#fbbf24;">Tedesco — Durst Brixen</h2>
+  <p class="hint" style="margin-bottom:10px;line-height:1.5;"><strong>Per l&apos;operatore (italiano):</strong> questa tab è dedicata ai visitatori di lingua tedesca. <em>L&apos;audio TTS e le risposte vocali sono sempre in tedesco.</em> Le etichette qui sotto spiegano in italiano cosa fa ogni pulsante.</p>
+  <p class="hint" style="margin-bottom:14px;font-size:11px;color:#71717a;line-height:1.45;"><strong>Für Besucher (Deutsch):</strong> Audio und Antworten nur auf Deutsch — Durst Brixen.</p>
+
+  <h3 style="font-size:1.05rem;margin:0 0 4px;color:#e4e4e7;">Accoglienza — messaggi TTS</h3>
+  <p class="hint" style="margin:0 0 10px;font-size:12px;">Tocca un pulsante: il robot legge il testo in <strong>tedesco</strong> sulla <strong>cassa Bluetooth del telefono</strong> (non sul robot). Sotto ogni pulsante vedi la spiegazione in italiano.</p>
+  <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <label style="font-size:12px;color:#9ca3af;">Riproduci su:</label>
+    <select id="deSbPlayDest" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;">
+      <option value="browser" selected>Browser — cassa Bluetooth telefono</option>
+      <option value="server">Cassa robot (Jetson, solo se udibile)</option>
+    </select>
+    <label id="deBrowserSinkLabel" style="font-size:12px;color:#9ca3af;">Altoparlante BT:</label>
+    <select id="deSbOutput" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;min-width:160px;">
+      <option value="default">Predefinito sistema (spesso BT)</option>
+    </select>
+    <button type="button" id="deSbOutputRefresh" style="padding:6px 12px;font-size:12px;background:rgba(255,255,255,0.08);color:#9ca3af;border:1px solid rgba(255,255,255,0.1);border-radius:8px;cursor:pointer;">Aggiorna</button>
+  </div>
+  <p class="hint" style="margin:-6px 0 12px;font-size:11px;">Accoppia la cassa Bluetooth al telefono in Impostazioni Android, poi scegila qui se non è già predefinita.</p>
+  <div id="deSoundboardGrid" class="soundboard-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:10px;margin-bottom:24px;"></div>
+
+  <h3 style="font-size:1.05rem;margin:0 0 4px;color:#e4e4e7;">Parla con i visitatori</h3>
+  <p class="hint" style="margin:0 0 10px;font-size:12px;">Il visitatore parla in <strong>tedesco</strong> (non italiano). Wake word invariata: <strong>Hey G1</strong> / Ehi G1.</p>
+  <div style="margin-bottom:12px;padding:12px;border-radius:10px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);">
+    <button type="button" id="deBtnRec" style="width:100%;padding:16px;background:#fbbf24;color:#0c0e14;border:none;border-radius:12px;cursor:pointer;font-weight:700;font-size:15px;">Tieni premuto e parla <span style="font-weight:500;font-size:12px;opacity:0.85;">(Gedrückt halten)</span></button>
+    <p id="deRecStatus" class="hint" style="margin:8px 0 0;font-size:12px;min-height:16px;"></p>
+  </div>
+  <div style="margin-bottom:16px;">
+    <label for="deTextInput" style="font-size:12px;color:#9ca3af;display:block;margin-bottom:6px;">Scrivi una domanda (il visitatore può leggere in tedesco)</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <input type="text" id="deTextInput" placeholder="Es: Wo ist die Rezeption?" style="flex:1;min-width:180px;padding:10px 14px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:14px;" />
+      <button type="button" id="deBtnText" style="padding:12px 22px;background:#fbbf24;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Invia</button>
+    </div>
+    <p id="deTextStatus" class="hint" style="margin-top:6px;min-height:16px;"></p>
+  </div>
+  <div class="result" id="deResult"></div>
+    </section>
     <section id="section-info" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Info</h2>
   <div class="step">
@@ -3035,6 +3384,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <li><code>G1-TalkModule-OpenAiAPI.zip</code> — solo installazione Linux sul G1 (<code>install.sh</code>)</li>
     </ul>
     <p style="margin:0 0 8px;">G1 Talk Module — assistente vocale per Unitree G1.</p>
+    <div id="modelsInfo" class="hint" style="margin:0 0 14px;padding:10px 12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;font-size:12px;line-height:1.55;">Modelli: caricamento…</div>
     <p class="hint" style="margin:0 0 16px;">Menu: <strong>Soundboard</strong>, <strong>Tempi</strong>, <strong>Parla</strong>, <strong>Knowledge</strong>, <strong>Dispositivi</strong>, <strong>Robot</strong> (joystick + gesti G1 verso <code>192.168.123.161</code> da <code>.env</code>). Guida in cima alla pagina.</p>
     <p style="margin:0 0 8px;font-size:14px;"><b>Da telefono (stessa rete WiFi del server):</b></p>
     <p class="hint" style="margin:0 0 8px;">Nessun bridge. Apri (HTTPS per microfono):</p>
@@ -3387,6 +3737,21 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       return null;
     }
+    /** Tab Tedesco: priorità a deSbOutput (cassa BT del telefono). */
+    function resolveDeBrowserPlaybackSinkId() {
+      var deOut = document.getElementById('deSbOutput');
+      if (deOut && deOut.value && deOut.value !== 'default') return deOut.value;
+      return resolveBrowserPlaybackSinkIdLikeSoundboard();
+    }
+    function updateDeBrowserRowVisibility() {
+      var destEl = document.getElementById('deSbPlayDest');
+      var dest = (destEl && destEl.value) || 'browser';
+      var show = dest === 'browser';
+      ['deBrowserSinkLabel', 'deSbOutput', 'deSbOutputRefresh'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = show ? '' : 'none';
+      });
+    }
     function applySinkThenPlay(audio, sinkId) {
       var p = Promise.resolve();
       if (sinkId && audio.setSinkId) {
@@ -3415,12 +3780,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     function setSoundboardBrowserGain(v){
       try { localStorage.setItem('g1_soundboard_gain', String(v)); } catch(_){}
     }
-    function playSoundboardBrowser(b64, fmt){
+    function playSoundboardBrowser(b64, fmt, overrideSink){
       sbStopSoundboardPlayback();
       if (!b64 || String(b64).length < 50) return;
       var mime = sbMimeForFmt(fmt);
       var gain = getSoundboardBrowserGain();
-      var sinkId = resolveBrowserPlaybackSinkIdLikeSoundboard();
+      var sinkId = (overrideSink !== undefined && overrideSink !== null) ? overrideSink : resolveBrowserPlaybackSinkIdLikeSoundboard();
       var bin = atob(String(b64));
       var buf = new Uint8Array(bin.length);
       for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
@@ -4368,6 +4733,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           var sb0 = document.getElementById('sbPlayDest');
           if (sb0) { sb0.value = 'browser'; }
         }
+        var deSb0 = document.getElementById('deSbPlayDest');
+        if (deSb0) {
+          try {
+            var savedDeDest = localStorage.getItem('g1_de_play_dest');
+            deSb0.value = (savedDeDest === 'server') ? 'server' : 'browser';
+          } catch(_){ deSb0.value = 'browser'; }
+        }
+        if (typeof updateDeBrowserRowVisibility === 'function') updateDeBrowserRowVisibility();
         var wrap = document.getElementById('ttsOutputWrap');
         if (wrap) wrap.style.display = 'block';
         updateSbBrowserRowVisibility();
@@ -4477,6 +4850,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             return '<option value="'+s.deviceId+'">'+escapeHtmlDevices(s.label || ('Output '+(i+1)))+'</option>';
           }).join('');
           sbOut.onchange = function(){ syncSpeakerFromSbOutput(); updateActiveMicIndicator(); };
+        }
+        const deOut = document.getElementById('deSbOutput');
+        if (deOut) {
+          deOut.innerHTML = '<option value="default">Predefinito sistema (spesso BT)</option>' + spks.map(function(s,i){
+            return '<option value="'+s.deviceId+'">'+escapeHtmlDevices(s.label || ('Output '+(i+1)))+'</option>';
+          }).join('');
+          try {
+            var savedDe = localStorage.getItem('g1_de_sink');
+            if (savedDe && deOut.querySelector('option[value="'+savedDe+'"]')) deOut.value = savedDe;
+          } catch(_){}
+          deOut.onchange = function(){
+            try { localStorage.setItem('g1_de_sink', deOut.value || 'default'); } catch(_){}
+          };
         }
         const nJet = sm.length + ss.length;
         statusEl.textContent = nJet ? ('Jetson: '+sm.length+' mic, '+ss.length+' uscite · Browser: '+mics.length+'/'+spks.length) : ('Browser: '+mics.length+' mic · Server: nessun locale (controlla PortAudio sulla Jetson)');
@@ -4749,6 +5135,171 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         sbSetLoadErr('Elenco slot dal server non disponibile ('+(err && err.message ? err.message : 'rete')+'). I pulsanti sotto restano usabili; torna su Sound o ricarica per riprovare.');
       });
     }
+
+    /* --- Tab Deutsch (Durst Brixen) — separata, solo locale de --- */
+    var deSoundboardSlots = [];
+    function deEsc(s){ return String(s||'').replace(/\u003c/g,'&lt;').replace(/&/g,'&amp;').replace(/"/g,'&quot;'); }
+    function deRenderSoundboard(){
+      var grid = document.getElementById('deSoundboardGrid');
+      if (!grid) return;
+      grid.innerHTML = deSoundboardSlots.map(function(s, i){
+        var hasAudio = !!(s.has_clean || (s.audio_base64_clean && s.audio_base64_clean.length > 50));
+        var border = hasAudio ? '2px solid #fbbf24' : '1px solid rgba(255,255,255,0.08)';
+        var bg = hasAudio ? 'rgba(251,191,36,0.08)' : 'rgba(255,255,255,0.05)';
+        var labelIt = deEsc(s.text_it || s.text || ('Slot '+(i+1)));
+        var labelDe = deEsc(s.text || '');
+        var descIt = deEsc(s.descrizione_it || '');
+        var previewDe = deEsc(s.tts_preview || '');
+        var badge = hasAudio ? '<span style="position:absolute;top:4px;right:4px;font-size:9px;font-weight:700;color:#fbbf24;" title="Audio tedesco pronto">DE &#9654;</span>' : '<span style="position:absolute;top:4px;right:4px;font-size:9px;color:#71717a;">no audio</span>';
+        return '<div id="deSb'+i+'" role="button" tabindex="0" title="'+descIt+'" style="position:relative;display:flex;flex-direction:column;align-items:center;padding:10px 8px;background:'+bg+';border-radius:10px;cursor:pointer;border:'+border+';min-height:120px;touch-action:manipulation;">'+badge+
+          '<span style="font-size:22px;margin-bottom:4px;pointer-events:none;">'+(s.icon||'👋')+'</span>'+
+          '<span style="font-size:11px;color:#f4f4f5;font-weight:600;text-align:center;line-height:1.25;pointer-events:none;">'+labelIt+'</span>'+
+          (labelDe && labelDe !== labelIt ? '<span style="font-size:9px;color:#a1a1aa;text-align:center;margin-top:2px;pointer-events:none;">'+labelDe+'</span>' : '')+
+          (descIt ? '<span style="font-size:9px;color:#71717a;text-align:center;margin-top:4px;line-height:1.3;pointer-events:none;">'+descIt+'</span>' : '')+
+          (previewDe ? '<span style="font-size:8px;color:#52525b;text-align:center;margin-top:4px;line-height:1.25;font-style:italic;pointer-events:none;" title="Testo letto in tedesco">«'+previewDe.substring(0,72)+(previewDe.length>72?'…':'')+'»</span>' : '')+
+        '</div>';
+      }).join('');
+      deSoundboardSlots.forEach(function(s, i){
+        var el = document.getElementById('deSb'+i);
+        if (!el) return;
+        var play = function(){ dePlaySlot(s, i); };
+        if (window.PointerEvent) el.addEventListener('pointerup', play);
+        else el.onclick = play;
+        el.addEventListener('keydown', function(ev){ if (ev.key==='Enter'||ev.key===' ') { ev.preventDefault(); play(); } });
+      });
+    }
+    function dePlaySlot(s, slotIndex){
+      var destEl = document.getElementById('deSbPlayDest');
+      var dest = (destEl && destEl.value) || 'browser';
+      if (dest === 'server' && typeof slotIndex === 'number') {
+        fetch('/api/soundboard-de-play-local', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:slotIndex}) })
+          .then(async function(r){
+            var d = await r.json().catch(function(){ return {}; });
+            if (!r.ok) alert('Cassa robot: ' + ((d.detail && String(d.detail)) || d.message || r.status));
+          }).catch(function(e){ alert('Robot: '+(e.message||String(e))); });
+        return;
+      }
+      function playFromData(sd){
+        if (!sd.audio_base64_clean || sd.audio_base64_clean.length <= 50) return;
+        sbFireSlotRobotIfConfigured(sd);
+        playSoundboardBrowser(sd.audio_base64_clean, sd.format_clean || 'mp3', resolveDeBrowserPlaybackSinkId());
+      }
+      if (s.audio_base64_clean && s.audio_base64_clean.length > 50) { playFromData(s); return; }
+      fetch('/api/soundboard-de-slot/'+slotIndex).then(function(r){ return r.json(); }).then(playFromData).catch(function(e){ alert('Browser: '+(e.message||String(e))); });
+    }
+    function deLoadSoundboard(){
+      return fetch('/api/soundboard-de?lite=1').then(function(r){ return r.json(); }).then(function(d){
+        deSoundboardSlots = (d && d.slots) ? d.slots : [];
+        deRenderSoundboard();
+      }).catch(function(){ deSoundboardSlots = []; deRenderSoundboard(); });
+    }
+    var deRecActive = false, deRecChunks = [], deRecMr = null, deRecStream = null;
+    function deStopRec(){
+      deRecActive = false;
+      var btn = document.getElementById('deBtnRec');
+      if (btn) btn.classList.remove('recording');
+      if (deRecMr && deRecMr.state !== 'inactive') { try { deRecMr.stop(); } catch(_){} }
+      else if (deRecStream) { deRecStream.getTracks().forEach(function(t){ t.stop(); }); deRecStream = null; }
+    }
+    function deSendVoice(blob){
+      var st = document.getElementById('deRecStatus');
+      if (st) { st.textContent = 'Elaborazione…'; st.style.color = '#a1a1aa'; }
+      var reader = new FileReader();
+      reader.onloadend = function(){
+        var b64 = (reader.result || '').toString().split(',')[1] || '';
+        fetch('/api/voice-chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({audio_base64:b64, format:'webm', locale:'de'}) })
+          .then(function(r){ return r.json(); })
+          .then(function(d){
+            if (st) { st.textContent = d.duration_ms ? (d.duration_ms+' ms') : 'OK'; st.style.color = '#22c55e'; }
+            var res = document.getElementById('deResult');
+            if (res) res.innerHTML = '<div><b>Visitatore (DE):</b> '+(d.text||'')+'</div><div><b>Risposta robot (tedesco):</b> '+(d.response||'')+'</div>';
+            if (d.audio_base64) {
+              var a = new Audio('data:audio/mpeg;base64,'+d.audio_base64);
+              applySinkThenPlay(a, resolveDeBrowserPlaybackSinkId()).catch(function(){});
+            }
+          })
+          .catch(function(e){ if (st) { st.textContent = 'Errore: '+(e.message||String(e)); st.style.color = '#dc2626'; } });
+      };
+      reader.readAsDataURL(blob);
+    }
+    async function deStartRec(){
+      if (deRecActive) return;
+      if (!navigator.mediaDevices) { alert('Microfono non disponibile (serve HTTPS).'); return; }
+      deRecActive = true;
+      deRecChunks = [];
+      var btn = document.getElementById('deBtnRec');
+      var st = document.getElementById('deRecStatus');
+      try {
+        deRecStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        var mime = preferredRecorderMime ? preferredRecorderMime() : 'audio/webm';
+        deRecMr = new MediaRecorder(deRecStream, { mimeType: mime });
+        deRecMr.ondataavailable = function(e){ if (e.data && e.data.size) deRecChunks.push(e.data); };
+        deRecMr.onstop = function(){
+          if (deRecStream) { deRecStream.getTracks().forEach(function(t){ t.stop(); }); deRecStream = null; }
+          if (deRecChunks.length) deSendVoice(new Blob(deRecChunks, { type: mime }));
+          else if (st) { st.textContent = 'Troppo breve — tieni premuto 1–2 secondi.'; st.style.color = '#f59e0b'; }
+        };
+        deRecMr.start(300);
+        if (btn) btn.classList.add('recording');
+        if (st) { st.textContent = 'Registrazione…'; st.style.color = '#22c55e'; }
+      } catch (e) {
+        deRecActive = false;
+        if (st) { st.textContent = 'Accesso microfono negato.'; st.style.color = '#dc2626'; }
+      }
+    }
+    (function initDeutschTab(){
+      var deDestEl = document.getElementById('deSbPlayDest');
+      if (deDestEl) {
+        try {
+          var sd = localStorage.getItem('g1_de_play_dest');
+          if (sd) deDestEl.value = sd;
+        } catch(_){}
+        deDestEl.addEventListener('change', function(){
+          try { localStorage.setItem('g1_de_play_dest', deDestEl.value || 'browser'); } catch(_){}
+          updateDeBrowserRowVisibility();
+        });
+      }
+      var deRef = document.getElementById('deSbOutputRefresh');
+      if (deRef) deRef.onclick = function(){ if (typeof requestAndLoadDevices === 'function') requestAndLoadDevices(); };
+      updateDeBrowserRowVisibility();
+      var deBtn = document.getElementById('deBtnRec');
+      if (deBtn) {
+        if (window.PointerEvent) {
+          deBtn.addEventListener('pointerdown', function(e){ e.preventDefault(); deStartRec(); try{ deBtn.setPointerCapture(e.pointerId); }catch(_){} });
+          deBtn.addEventListener('pointerup', function(e){ e.preventDefault(); deStopRec(); try{ deBtn.releasePointerCapture(e.pointerId); }catch(_){} });
+          deBtn.addEventListener('pointercancel', function(e){ e.preventDefault(); deStopRec(); });
+        } else {
+          deBtn.onmousedown = deBtn.ontouchstart = function(e){ e.preventDefault(); deStartRec(); };
+          deBtn.onmouseup = deBtn.ontouchend = function(e){ e.preventDefault(); deStopRec(); };
+        }
+      }
+      var deTxtBtn = document.getElementById('deBtnText');
+      if (deTxtBtn) deTxtBtn.onclick = function(){
+        var input = document.getElementById('deTextInput');
+        var status = document.getElementById('deTextStatus');
+        var txt = (input && input.value || '').trim();
+        if (!txt) { if (status) { status.textContent = 'Scrivi qualcosa.'; status.style.color = '#f59e0b'; } return; }
+        deTxtBtn.disabled = true;
+        if (status) { status.textContent = 'Elaborazione (risposta in tedesco)…'; status.style.color = '#a1a1aa'; }
+        fetch('/api/text-chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:txt, locale:'de'}) })
+          .then(function(r){ return r.json(); })
+          .then(function(d){
+            if (status) { status.textContent = d.duration_ms ? (d.duration_ms+' ms') : 'OK'; status.style.color = '#22c55e'; }
+            var res = document.getElementById('deResult');
+            if (res) res.innerHTML = '<div><b>Testo inviato:</b> '+(d.text||txt)+'</div><div><b>Risposta robot (tedesco):</b> '+(d.response||'')+'</div>';
+            if (d.audio_base64) {
+              var a = new Audio('data:audio/mpeg;base64,'+d.audio_base64);
+              applySinkThenPlay(a, resolveDeBrowserPlaybackSinkId()).catch(function(){});
+            }
+          })
+          .catch(function(e){ if (status) { status.textContent = 'Errore: '+(e.message||String(e)); status.style.color = '#dc2626'; } })
+          .finally(function(){ deTxtBtn.disabled = false; });
+      };
+      var deInp = document.getElementById('deTextInput');
+      if (deInp) deInp.onkeydown = function(e){ if (e.key === 'Enter') { var b = document.getElementById('deBtnText'); if (b) b.click(); } };
+      deLoadSoundboard();
+    })();
+
     soundboardSlots = Array.from({length: 20}, function(_, i){
       return { icon: sbIconAt(i), text: 'Comando '+(i+1), has_robot: false, has_clean: false };
     });
@@ -4769,6 +5320,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 120);
         } else {
           if (typeof stopParlaMicPreview === 'function') stopParlaMicPreview();
+        }
+        if (sec === 'deutsch') {
+          setTimeout(function(){ if (typeof deLoadSoundboard === 'function') deLoadSoundboard(); }, 0);
         }
         return false;
       };
@@ -4957,6 +5511,20 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         .catch(e=>{ if(st) st.textContent = e.message; if(st) st.style.color = '#f87171'; });
     };
     loadRunSheet();
+
+    (function loadModelsInfo(){
+      var el = document.getElementById('modelsInfo');
+      if (!el) return;
+      fetch('/api/health').then(function(r){ return r.json(); }).then(function(d){
+        if (!d || d.status !== 'ok') { el.textContent = 'Modelli: server non disponibile.'; return; }
+        el.innerHTML = '<strong>Modelli attivi</strong><br>'
+          + 'LLM risposta: <code>' + (d.llm_model || '—') + '</code>'
+          + (d.llm_text_model && d.llm_text_model !== d.llm_model ? ' · testo: <code>' + d.llm_text_model + '</code>' : '')
+          + '<br>STT: <code>' + (d.stt_model || '—') + '</code>'
+          + ' · Wake STT: <code>' + (d.wake_stt_model || '—') + '</code>'
+          + '<br>TTS: <code>' + (d.tts_model || '—') + '</code> · voce <code>' + (d.tts_voice || '—') + '</code>';
+      }).catch(function(){ el.textContent = 'Modelli: impossibile leggere /api/health.'; });
+    })();
 
     document.getElementById('btnTest').onclick = async () => {
       const btn = document.getElementById('btnTest');
@@ -5731,6 +6299,9 @@ background-size:24px 24px,24px 24px,100% 100%;}
   <div class="actions-area">
     <div class="section-label">Gesti braccia</div>
     <div class="gesture-grid" id="gestureGrid"></div>
+    <div id="leftArmWarn" style="display:none;margin-top:10px;padding:10px 12px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);border-radius:8px;font-size:12px;color:#fca5a5;">
+      <strong>Braccio sinistro non operativo.</strong> Gesti a due mani nascosti; solo braccio destro e locomozione.
+    </div>
     <div class="section-label">Locomozione (sport mode)</div>
     <div class="quick-btns">
       <button type="button" class="quick-btn loco" onclick="sendLoco('ready')">Ready</button>
@@ -5788,8 +6359,10 @@ background-size:24px 24px,24px 24px,100% 100%;}
     <div class="joints-vis" id="jointsVis" style="margin-top:8px;">
       <div class="joint-group-label">Vita</div>
       <div id="jgWaist"></div>
+      <div id="leftArmSection">
       <div class="joint-group-label">Braccio SX</div>
       <div id="jgLeft"></div>
+      </div>
       <div class="joint-group-label">Braccio DX</div>
       <div id="jgRight"></div>
     </div>
@@ -5842,27 +6415,43 @@ background-size:24px 24px,24px 24px,100% 100%;}
     {id:27, icon:'\\u{1F91D}', label:'Stretta di mano'},
     {id:26, icon:'\\u{1F596}', label:'Saluto alto'},
     {id:25, icon:'\\u{1F44B}', label:'Ciao (viso)'},
-    {id:15, icon:'\\u{1F64C}', label:'Mani in alto'},
+    {id:15, icon:'\\u{1F64C}', label:'Mani in alto', blockedLeft:true},
     {id:23, icon:'\\u261D\\uFE0F',  label:'Mano dx su'},
     {id:18, icon:'\\u270B',   label:'High Five'},
-    {id:19, icon:'\\u{1F917}', label:'Abbraccio'},
-    {id:17, icon:'\\u{1F44F}', label:'Applauso'},
-    {id:20, icon:'\\u2764\\uFE0F',  label:'Cuore'},
+    {id:19, icon:'\\u{1F917}', label:'Abbraccio', blockedLeft:true},
+    {id:17, icon:'\\u{1F44F}', label:'Applauso', blockedLeft:true},
+    {id:20, icon:'\\u2764\\uFE0F',  label:'Cuore', blockedLeft:true},
     {id:21, icon:'\\u{1F49C}', label:'Cuore dx'},
     {id:22, icon:'\\u{1F645}', label:'No / Rifiuto'},
-    {id:24, icon:'\\u274C',   label:'Braccia X'},
-    {id:11, icon:'\\u{1F48B}', label:'Bacio (2 mani)'},
+    {id:24, icon:'\\u274C',   label:'Braccia X', blockedLeft:true},
+    {id:11, icon:'\\u{1F48B}', label:'Bacio (2 mani)', blockedLeft:true},
     {id:12, icon:'\\u{1F618}', label:'Bacio'},
   ];
+  var disableLeftArm = true;
 
   var grid = document.getElementById('gestureGrid');
-  ARM_ACTIONS.forEach(function(a){
-    var btn = document.createElement('button');
-    btn.className = 'gesture-btn';
-    btn.innerHTML = '<span class="g-icon">'+a.icon+'</span><span class="g-label">'+a.label+'</span>';
-    btn.addEventListener('click', function(){ sendAction(a.id); });
-    grid.appendChild(btn);
-  });
+  function renderGestureGrid(){
+    grid.innerHTML = '';
+    ARM_ACTIONS.forEach(function(a){
+      if (disableLeftArm && a.blockedLeft) return;
+      var btn = document.createElement('button');
+      btn.className = 'gesture-btn';
+      btn.innerHTML = '<span class="g-icon">'+a.icon+'</span><span class="g-label">'+a.label+'</span>';
+      btn.addEventListener('click', function(){ sendAction(a.id); });
+      grid.appendChild(btn);
+    });
+  }
+  renderGestureGrid();
+  fetch('/api/robot-actions').then(function(r){ return r.json(); }).then(function(d){
+    disableLeftArm = !!d.disable_left_arm;
+    if (disableLeftArm) {
+      var ls = document.getElementById('leftArmSection');
+      if (ls) ls.style.display = 'none';
+      var warn = document.getElementById('leftArmWarn');
+      if (warn) warn.style.display = 'block';
+    }
+    renderGestureGrid();
+  }).catch(function(){});
 
   var logEl = document.getElementById('logArea');
   function log(msg, cls){
@@ -6445,10 +7034,20 @@ body{padding:0 0 max(24px,env(safe-area-inset-bottom));}
 
     var hl = document.getElementById('handLeft');
     var hr = document.getElementById('handRight');
-    hl.className = 'hand-card ' + (d.tracking_left ? 'tracking' : 'lost');
+    if (d.disable_left_arm) {
+      hl.className = 'hand-card lost';
+      hl.style.opacity = '0.45';
+      document.getElementById('handLeftPos').textContent = 'SX non operativo';
+    } else {
+      hl.style.opacity = '1';
+      hl.className = 'hand-card ' + (d.tracking_left ? 'tracking' : 'lost');
+      if (d.left_wrist) {
+        document.getElementById('handLeftPos').textContent = d.left_wrist.map(function(v){return v.toFixed(3);}).join(', ');
+      }
+    }
     hr.className = 'hand-card ' + (d.tracking_right ? 'tracking' : 'lost');
 
-    if (d.left_wrist) {
+    if (!d.disable_left_arm && d.left_wrist) {
       document.getElementById('handLeftPos').textContent = d.left_wrist.map(function(v){return v.toFixed(3);}).join(', ');
     }
     if (d.right_wrist) {

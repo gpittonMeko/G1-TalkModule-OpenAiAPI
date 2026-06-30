@@ -278,9 +278,17 @@ class VRTeleopManager:
             # Waist stays at neutral (indices 0-2 in ALL_CONTROLLED are waist)
             for i in range(3):
                 base[i] = self._neutral_joints[i]
-            # Left arm: indices 3-9 in ALL_CONTROLLED
+            try:
+                from talk_module.robot_actions import left_arm_disabled
+                freeze_left = left_arm_disabled()
+            except Exception:
+                freeze_left = True
+            # Left arm: indices 3-9 — congelato se SX guasto
             for i in range(7):
-                base[3 + i] = left_q[i]
+                if freeze_left:
+                    base[3 + i] = self._neutral_joints[3 + i]
+                else:
+                    base[3 + i] = left_q[i]
             # Right arm: indices 10-16 in ALL_CONTROLLED
             for i in range(7):
                 base[10 + i] = right_q[i]
@@ -369,11 +377,17 @@ class VRTeleopManager:
     # ── Status ──
 
     def get_status(self) -> dict:
+        try:
+            from talk_module.robot_actions import left_arm_disabled
+            _left_off = left_arm_disabled()
+        except Exception:
+            _left_off = True
         result = {
             "state": self._state,
             "tracking": self.tracking_ok,
             "tracking_left": self._tracking_left,
             "tracking_right": self._tracking_right,
+            "disable_left_arm": _left_off,
             "port": HTS_PORT,
             "udp_packets": self._udp_packet_count,
             "udp_source": self._udp_source_ip,

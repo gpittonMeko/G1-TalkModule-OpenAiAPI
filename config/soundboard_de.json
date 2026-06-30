@@ -1,0 +1,92 @@
+{
+  "slots": [
+    {
+      "icon": "👋",
+      "text": "WILLKOMMEN — allgemein",
+      "audio_base64": "",
+      "format": "webm",
+      "audio_base64_clean": "",
+      "format_clean": "wav",
+      "robot_arm": "face_wave",
+      "robot_loco": "",
+      "led_effect": ""
+    },
+    {
+      "icon": "🏢",
+      "text": "WILLKOMMEN — Besuch",
+      "audio_base64": "",
+      "format": "webm",
+      "audio_base64_clean": "",
+      "format_clean": "wav",
+      "robot_arm": "face_wave",
+      "robot_loco": "",
+      "led_effect": ""
+    },
+    {
+      "icon": "🛎️",
+      "text": "EMPFANG — Rezeption",
+      "audio_base64": "",
+      "format": "webm",
+      "audio_base64_clean": "",
+      "format_clean": "wav",
+      "robot_arm": "right_hand_up",
+      "robot_loco": "",
+      "led_effect": ""
+    },
+    {
+      "icon": "☕",
+      "text": "WARTEZONE — Empfang",
+      "audio_base64": "",
+      "format": "webm",
+      "audio_base64_clean": "",
+      "format_clean": "wav",
+      "robot_arm": "right_hand_up",
+      "robot_loco": "",
+      "led_effect": ""
+    },
+    {
+      "icon": "🏭",
+      "text": "BESICHTIGUNG — Start",
+      "audio_base64": "",
+      "format": "webm",
+      "audio_base64_clean": "",
+      "format_clean": "wav",
+      "robot_arm": "face_wave",
+      "robot_loco": "",
+      "led_effect": ""
+    },
+    {
+      "icon": "✨",
+      "text": "VERABSCHIEDUNG",
+      "audio_base64": "",
+      "format": "webm",
+      "audio_base64_clean": "",
+      "format_clean": "wav",
+      "robot_arm": "face_wave",
+      "robot_loco": "",
+      "led_effect": ""
+    },
+    {
+      "icon": "🎤",
+      "text": "Comando 7",
+      "audio_base64": "",
+      "format": "webm",
+      "audio_base64_clean": "",
+      "format_clean": "mp3",
+      "robot_arm": "",
+      "robot_loco": "",
+      "led_effect": ""
+    },
+    {
+      "icon": "🎤",
+      "text": "Comando 8",
+      "audio_base64": "",
+      "format": "webm",
+      "audio_base64_clean": "",
+      "format_clean": "mp3",
+      "robot_arm": "",
+      "robot_loco": "",
+      "led_effect": ""
+    }
+  ]
+}

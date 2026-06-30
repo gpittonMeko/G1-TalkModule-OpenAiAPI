@@ -1,0 +1,58 @@
+{
+  "entries": [
+    {
+      "icon": "👋",
+      "label_corto": "WILLKOMMEN — allgemein",
+      "label_it": "Benvenuto generale",
+      "descrizione_it": "Saluto di benvenuto a Durst Brixen (per visitatori tedeschi).",
+      "testo_tts": "Herzlich willkommen bei Durst in Brixen! Wir freuen uns, Sie heute bei uns begrüßen zu dürfen.",
+      "fase": "WELCOME",
+      "robot_arm": "face_wave"
+    },
+    {
+      "icon": "🏢",
+      "label_corto": "WILLKOMMEN — Besuch",
+      "label_it": "Benvenuto visita",
+      "descrizione_it": "G1 si presenta come host digitale e chiede come aiutare.",
+      "testo_tts": "Vielen Dank für Ihren Besuch bei Durst. Ich bin G1, Ihr digitaler Gastgeber — wie kann ich Ihnen helfen?",
+      "fase": "WELCOME",
+      "robot_arm": "face_wave"
+    },
+    {
+      "icon": "🛎️",
+      "label_corto": "EMPFANG — Rezeption",
+      "label_it": "Reception / accoglienza",
+      "descrizione_it": "Indicazioni per la reception nel quartier generale Durst.",
+      "testo_tts": "Willkommen im Durst-Hauptquartier in Brixen. Bitte melden Sie sich an der Rezeption.",
+      "fase": "EMPFANG",
+      "robot_arm": "right_hand_up"
+    },
+    {
+      "icon": "☕",
+      "label_corto": "WARTEZONE — Empfang",
+      "label_it": "Area attesa",
+      "descrizione_it": "Invita ad accomodarsi in sala d'attesa; arriva un referente Durst.",
+      "testo_tts": "Machen Sie es sich in unserem Empfangsbereich gemütlich. Ein Durst-Teammitglied kümmert sich gleich um Sie.",
+      "fase": "EMPFANG",
+      "robot_arm": "right_hand_up"
+    },
+    {
+      "icon": "🏭",
+      "label_corto": "BESICHTIGUNG — Start",
+      "label_it": "Inizio visita guidata",
+      "descrizione_it": "Benvenuto alla visita in stabilimento; seguire la guida con badge.",
+      "testo_tts": "Willkommen zur Besichtigung bei Durst. Bitte folgen Sie Ihrem Guide und halten Sie Ihre Besucherausweise bereit.",
+      "fase": "BESICHTIGUNG",
+      "robot_arm": "face_wave"
+    },
+    {
+      "icon": "✨",
+      "label_corto": "VERABSCHIEDUNG",
+      "label_it": "Saluti di commiato",
+      "descrizione_it": "Ringraziamento e auguri di buon viaggio a fine visita.",
+      "testo_tts": "Vielen Dank für Ihren Besuch bei Durst in Brixen. Wir wünschen Ihnen einen schönen Tag und eine gute Weiterreise!",
+      "fase": "ABSCHIED",
+      "robot_arm": "face_wave"
+    }
+  ]
+}

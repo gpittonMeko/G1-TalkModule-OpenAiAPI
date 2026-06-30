@@ -223,14 +223,36 @@ class G1ArmSDK:
                     if idx in WAIST_INDICES:
                         kp_list.append(60.0)
                         kd_list.append(1.5)
+                    elif idx in LEFT_ARM_INDICES:
+                        try:
+                            from talk_module.config import settings
+                            if settings.disable_left_arm:
+                                kp_list.append(0.0)
+                                kd_list.append(1.0)
+                                continue
+                        except Exception:
+                            pass
+                        kp_list.append(0.0)
+                        kd_list.append(1.0)
                     else:
                         kp_list.append(0.0)
                         kd_list.append(1.0)
                 self._target_kp = kp_list
                 self._target_kd = kd_list
             else:
-                self._target_kp = [60.0] * len(ALL_CONTROLLED)
-                self._target_kd = [1.5] * len(ALL_CONTROLLED)
+                kp_list = [60.0] * len(ALL_CONTROLLED)
+                kd_list = [1.5] * len(ALL_CONTROLLED)
+                try:
+                    from talk_module.config import settings
+                    if settings.disable_left_arm:
+                        for i, idx in enumerate(ALL_CONTROLLED):
+                            if idx in LEFT_ARM_INDICES:
+                                kp_list[i] = 0.0
+                                kd_list[i] = 1.0
+                except Exception:
+                    pass
+                self._target_kp = kp_list
+                self._target_kd = kd_list
 
         self._msg.mode_machine = self._read_mode_machine()
         self._running = True
@@ -262,7 +284,17 @@ class G1ArmSDK:
         The publish loop will velocity-clamp towards these."""
         with self._ctrl_lock:
             if len(q_values) == len(ALL_CONTROLLED):
-                self._target_q = list(q_values)
+                merged = list(q_values)
+                try:
+                    from talk_module.config import settings
+                    if settings.disable_left_arm:
+                        current = self.get_joint_positions()
+                        if current:
+                            for i in range(7):
+                                merged[3 + i] = current[3 + i]
+                except Exception:
+                    pass
+                self._target_q = merged
 
     def set_gains(self, kp: list[float], kd: list[float]):
         """Update PD gains for ALL_CONTROLLED joints."""

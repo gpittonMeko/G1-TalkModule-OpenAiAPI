@@ -71,39 +71,46 @@ def process_after_wake(
         if prompt == PROMPT_HEY_G1_ACK_ONLY:
             resp = (settings.hey_g1_ack_text or "").strip() or "Sì?"
         else:
-            from talk_module.robot_actions import check_robot_action
+            from talk_module.stt.validate import reject_message_for_bad_stt
 
-            robot_match = None
-            try:
-                robot_match = check_robot_action(prompt)
-            except Exception as _ra_err:
-                print(f"[robot-check] error: {_ra_err}", flush=True)
-            if robot_match:
-                print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r}", flush=True)
-                resp = run_robot_match_fn(robot_match)
+            bad_stt = reject_message_for_bad_stt(prompt)
+            if bad_stt:
+                print(f"[stt-validate] reject prompt={prompt!r} -> {bad_stt!r}", flush=True)
+                resp = bad_stt
             else:
-                print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
-                resp = check_knowledge_fn(prompt)
-                if not resp:
-                    from talk_module.quick_lookup import NOT_FOUND, is_quick_lookup_question, quick_lookup
+                from talk_module.robot_actions import check_robot_action
 
-                    if is_quick_lookup_question(prompt):
-                        resp = quick_lookup(prompt)
-                        if resp == NOT_FOUND:
-                            resp = None
-                if not resp:
-                    resp = llm.chat(prompt, use_history=False)
-                if resp and not robot_match:
-                    try:
-                        post_match = check_robot_action(resp)
-                        if post_match and post_match.arm_action:
-                            print(
-                                f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}",
-                                flush=True,
-                            )
-                            run_robot_match_fn(post_match)
-                    except Exception:
-                        pass
+                robot_match = None
+                try:
+                    robot_match = check_robot_action(prompt)
+                except Exception as _ra_err:
+                    print(f"[robot-check] error: {_ra_err}", flush=True)
+                if robot_match:
+                    print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r}", flush=True)
+                    resp = run_robot_match_fn(robot_match)
+                else:
+                    print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
+                    resp = check_knowledge_fn(prompt)
+                    if not resp:
+                        from talk_module.quick_lookup import NOT_FOUND, is_quick_lookup_question, quick_lookup
+
+                        if is_quick_lookup_question(prompt):
+                            resp = quick_lookup(prompt)
+                            if resp == NOT_FOUND:
+                                resp = None
+                    if not resp:
+                        resp = llm.chat(prompt, use_history=False, locale="it")
+                    if resp and not robot_match:
+                        try:
+                            post_match = check_robot_action(resp)
+                            if post_match and post_match.arm_action:
+                                print(
+                                    f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}",
+                                    flush=True,
+                                )
+                                run_robot_match_fn(post_match)
+                        except Exception:
+                            pass
         audio_out = tts.synthesize(resp, format="mp3") if resp else b""
         if audio_out:
             _led_animate("breathe", color=LED_SPEAKING, speed=1.0)

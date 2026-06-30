@@ -37,8 +37,8 @@ class WhisperClient:
                 "file": file,
                 "response_format": "text",
             }
-            if language or settings.tts_language:
-                kwargs["language"] = language or settings.tts_language
+            if language or settings.stt_language:
+                kwargs["language"] = language or settings.stt_language
             effective_prompt = prompt if prompt is not None else (settings.whisper_prompt or "").strip()
             if effective_prompt:
                 kwargs["prompt"] = effective_prompt

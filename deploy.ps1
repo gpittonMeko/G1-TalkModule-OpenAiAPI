@@ -71,6 +71,8 @@ scp @sshCommon "$root\talk_module\tts\openai_tts.py" "${sshHost}:${remote}/talk_
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1b] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 scp @sshCommon `
     "$root\talk_module\stt\fuzzy_correct.py" `
+    "$root\talk_module\stt_prompts.py" `
+    "$root\talk_module\stt\validate.py" `
     "$root\talk_module\stt\audio_convert.py" `
     "$root\talk_module\stt\whisper_client.py" `
     "$root\talk_module\stt\groq_client.py" `
@@ -82,11 +84,14 @@ Write-Host " OK" -ForegroundColor Green
 Write-Host "  [2] config..." -NoNewline
 scp @sshCommon `
     "$root\config\knowledge.json" `
+    "$root\config\knowledge_de.json" `
     "$root\config\robot_actions.json" `
+    "$root\config\robot_actions_de.json" `
     "$root\config\stt_config.json" `
     "$root\config\italian_vocabulary.txt" `
     "$root\config\run_sheet.json" `
     "$root\config\soundboard_script.json" `
+    "$root\config\soundboard_script_de.json" `
     "$root\config\elenco_testi_soundboard.txt" `
     "${sshHost}:${remote}/config/"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [2] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
