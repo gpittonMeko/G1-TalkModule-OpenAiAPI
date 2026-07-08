@@ -1,0 +1,33 @@
+{
+  "comment": "Fasi cumulative braccio DX (indici ALL_CONTROLLED). use_vision=true applica offset camera su reach/touch.",
+  "phases": [
+    {
+      "name": "lift_forearm",
+      "deltas": {"15": 0.28, "13": -0.2, "10": -0.06},
+      "duration": 1.0
+    },
+    {
+      "name": "elbow_back",
+      "deltas": {"13": -0.5, "10": -0.1, "11": 0.04},
+      "duration": 1.1
+    },
+    {
+      "name": "forearm_up",
+      "deltas": {"15": 0.45, "13": -0.15, "10": -0.04},
+      "duration": 1.1
+    },
+    {
+      "name": "reach_forward",
+      "deltas": {"13": 0.62, "10": 0.26},
+      "duration": 1.35,
+      "use_vision": true
+    },
+    {
+      "name": "touch",
+      "deltas": {"13": 0.14, "10": 0.1},
+      "duration": 0.85,
+      "hold_s": 0.3,
+      "use_vision": true
+    }
+  ]
+}

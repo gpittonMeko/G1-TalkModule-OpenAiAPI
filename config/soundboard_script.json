@@ -55,6 +55,41 @@
       "testo_tts": "Grazie per essere stati con noi. Vi auguriamo una splendida serata. Arrivederci.",
       "fase": "DEFLUSSO",
       "fonte": "runbook_chiusura"
+    },
+    {
+      "icon": "🏭",
+      "label_corto": "GRANZOTTO — benvenuto",
+      "testo_tts": "Buongiorno e benvenuti alla presentazione Granzotto! Sono G1, il vostro host robotico: è un piacere avervi qui in Meko.",
+      "fase": "PRESENTAZIONE",
+      "fonte": "granzotto"
+    },
+    {
+      "icon": "⚙️",
+      "label_corto": "GRANZOTTO — chi siamo",
+      "testo_tts": "Granzotto ha una pluriennale esperienza nella progettazione, realizzazione e post-vendita di impianti industriali di grandi dimensioni, su misura per le vostre esigenze produttive.",
+      "fase": "PRESENTAZIONE",
+      "fonte": "granzotto"
+    },
+    {
+      "icon": "🍷",
+      "label_corto": "GRANZOTTO — Food & Beverage",
+      "testo_tts": "Nei settori Food e Beverage seguiamo vino, bibite, superalcolici, salse, olio, aceto e sciroppi, con impianti dedicati e collaudati.",
+      "fase": "PRESENTAZIONE",
+      "fonte": "granzotto"
+    },
+    {
+      "icon": "🧪",
+      "label_corto": "GRANZOTTO — Chimico",
+      "testo_tts": "Nel settore chimico realizziamo impianti per oli lubrificanti, vernici, solventi, detergenti e cosmetici, con la stessa cura progettuale e assistenza post-vendita.",
+      "fase": "PRESENTAZIONE",
+      "fonte": "granzotto"
+    },
+    {
+      "icon": "🤝",
+      "label_corto": "GRANZOTTO — chiusura",
+      "testo_tts": "Grazie per l'attenzione. Granzotto resta al vostro fianco dalla progettazione al post-vendita. Buona continuazione!",
+      "fase": "PRESENTAZIONE",
+      "fonte": "granzotto"
     }
   ]
 }

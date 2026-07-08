@@ -65,6 +65,15 @@ def cmd_test(args: argparse.Namespace) -> int:
         audio = TTSClient().synthesize(text)
         AudioPlayer().play_bytes(audio, format_hint="mp3")
         print("Riproduzione completata.")
+    elif args.mode == "llm":
+        from talk_module.llm import create_llm_client
+        text = args.text or "Ciao, presentati in una frase."
+        client = create_llm_client()
+        provider = settings.llm_provider
+        print(f"LLM provider: {provider}")
+        resp = client.chat(text, use_history=False)
+        print(f"Domanda: {text}")
+        print(f"Risposta: {resp or '(vuota — controlla chiavi API e rete)'}")
     return 0
 
 
@@ -86,8 +95,8 @@ def main() -> int:
     p_run.add_argument("--sample-rate", type=int, default=None, help="Sample rate")
 
     # test
-    p_test = sub.add_parser("test", help="Test STT o TTS")
-    p_test.add_argument("mode", choices=["stt", "tts"], help="stt o tts")
+    p_test = sub.add_parser("test", help="Test STT, TTS o LLM")
+    p_test.add_argument("mode", choices=["stt", "tts", "llm"], help="stt, tts o llm")
     p_test.add_argument("--text", type=str, default=None, help="Per TTS: testo da sintetizzare")
     p_test.add_argument("--device", type=int, default=None, help="ID microfono (per STT)")
 

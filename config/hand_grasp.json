@@ -1,0 +1,20 @@
+{
+  "comment": "Tarare dex3_close / dex1_close sul robot. left eredita right se vuoto.",
+  "hand_type": "auto",
+  "right": {
+    "dex1_open": 0.0,
+    "dex1_close": 4.5,
+    "dex1_kp": 5.0,
+    "dex1_kd": 0.05,
+    "dex3_open": [0, 0, 0, 0, 0, 0, 0],
+    "dex3_close": [0.75, 0.55, 0.35, 0.85, 0.45, 0.85, 0.45],
+    "dex3_kp": 1.5,
+    "dex3_kd": 0.2
+  },
+  "left": {
+    "dex1_open": 0.0,
+    "dex1_close": 4.5,
+    "dex3_open": [0, 0, 0, 0, 0, 0, 0],
+    "dex3_close": [0.75, 0.55, 0.35, 0.85, 0.45, 0.85, 0.45]
+  }
+}

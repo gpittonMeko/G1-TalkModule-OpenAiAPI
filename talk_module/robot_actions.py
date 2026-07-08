@@ -229,13 +229,26 @@ def _resolve_action_int(action_id) -> Optional[int]:
     return _NAME_TO_ID.get(s)
 
 
+# Gesti che richiedono entrambe le braccia (tempo più lungo prima del release automatico).
+_BOTH_ARMS_ACTION_IDS = frozenset({11, 15, 17, 19, 20, 24})
+
 _ARM_RELEASE_DELAYS = {
+    11: 9.0,   # bacio 2 mani
+    15: 9.0,   # mani in alto
+    17: 7.0,   # applauso
+    19: 9.0,   # abbraccio
+    20: 9.0,   # cuore
+    24: 7.0,   # braccia X
     _NAME_TO_ID.get("shake_hand", 27): 5.5,
 }
 _ARM_DEFAULT_RELEASE_DELAY = 4.0
+_release_gen = 0
+_release_gen_lock = threading.Lock()
+
 
 def _schedule_arm_release(action_id: int, robot_ip: str) -> None:
     """After any arm gesture, auto-release back to neutral after a delay."""
+    global _release_gen
     delay = _ARM_RELEASE_DELAYS.get(action_id, _ARM_DEFAULT_RELEASE_DELAY)
     try:
         env_delay = os.getenv("G1_ARM_RELEASE_DELAY_SEC", "").strip()
@@ -245,10 +258,17 @@ def _schedule_arm_release(action_id: int, robot_ip: str) -> None:
         pass
     delay = max(2.0, min(delay, 30.0))
 
+    with _release_gen_lock:
+        _release_gen += 1
+        token = _release_gen
+
     def _run():
         time.sleep(delay)
+        with _release_gen_lock:
+            if token != _release_gen:
+                return
         try:
-            execute_robot_action("release_arm", robot_ip=robot_ip)
+            execute_robot_action("release_arm", robot_ip=robot_ip, _skip_release_schedule=True)
         except Exception:
             pass
 
@@ -268,7 +288,249 @@ def _is_shake_hand_action(action_id) -> bool:
         return _resolve_action_int(action_id) == _SHAKE_HAND_ID
 
 
-def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tuple[bool, str]:
+_ARM_FSM_OK = frozenset({500, 501, 801})
+_ARM_FSM_BLOCKED = frozenset({802, 803})
+
+
+def _parse_fsm_rpc_value(r) -> Optional[int]:
+    """Estrae fsm id/mode da risposte SDK con formati diversi tra firmware."""
+    if r is None or isinstance(r, bool):
+        return None
+    if isinstance(r, int):
+        return r
+    if isinstance(r, (list, tuple)):
+        nums: list[int] = []
+        for x in r:
+            try:
+                nums.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        if not nums:
+            return None
+        for v in nums:
+            if v in _ARM_FSM_OK or v in _ARM_FSM_BLOCKED or v >= 100:
+                return v
+        if len(nums) >= 2 and nums[0] == 0:
+            return nums[1]
+        if len(nums) == 1:
+            return nums[0]
+        return nums[-1]
+    return None
+
+
+def _read_loco_fsm(lc) -> tuple[Optional[int], Optional[int]]:
+    """Legge FSM id/mode dal LocoClient (API 7001/7002)."""
+    fsm_id: Optional[int] = None
+    fsm_mode: Optional[int] = None
+    try:
+        if hasattr(lc, "GetFsmId"):
+            r = lc.GetFsmId()
+            fsm_id = _parse_fsm_rpc_value(r)
+            if fsm_id is None and r is not None:
+                print(f"[G1 FSM] GetFsmId raw={r!r}", flush=True)
+        if hasattr(lc, "GetFsmMode"):
+            r = lc.GetFsmMode()
+            fsm_mode = _parse_fsm_rpc_value(r)
+    except Exception as ex:
+        print(f"[G1 FSM] read failed: {ex}", flush=True)
+    return fsm_id, fsm_mode
+
+
+def _fsm_set_accepted(set_rc: int) -> bool:
+    try:
+        return int(set_rc) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _arm_fsm_ready(fsm_id: Optional[int], set_rc: int) -> tuple[bool, str]:
+    """True se possiamo provare i gesti braccia (lettura FSM opzionale)."""
+    skip = (os.getenv("G1_ARM_SKIP_FSM_CHECK", "") or "").strip().lower() in ("1", "true", "yes")
+    if skip:
+        return True, "FSM check disabilitato (G1_ARM_SKIP_FSM_CHECK)"
+    if fsm_id in _ARM_FSM_OK:
+        return True, f"FSM {fsm_id}"
+    if fsm_id in _ARM_FSM_BLOCKED:
+        return False, (
+            f"Robot in FSM {fsm_id} (modalità AI/app). "
+            f"Sul telecomando: esci da AI mode, poi L1+A (sport mode)."
+        )
+    if _fsm_set_accepted(set_rc) and fsm_id is None:
+        return True, (
+            f"SetFsmId rc={set_rc} (FSM non leggibile da SDK — normale su alcuni firmware). "
+            f"Prova il gesto braccio; se non si muove: L1+A sul telecomando."
+        )
+    if _fsm_set_accepted(set_rc) and fsm_id not in _ARM_FSM_OK:
+        return True, (
+            f"SetFsmId rc={set_rc}, FSM letto={fsm_id} (non confermato). "
+            f"Prova il gesto; se fallisce: L1+A sul telecomando."
+        )
+    return False, f"FSM {fsm_id}, SetFsmId rc={set_rc} — serve sport mode (L1+A sul telecomando)."
+
+
+def probe_g1_sport_status(robot_ip: Optional[str] = None) -> dict:
+    """
+    Diagnostica sport mode: FSM spesso None su G1 — usiamo anche ping locomozione DDS.
+    Ritorna dict con status, label, detail, how_to_verify (testo italiano).
+    """
+    ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+    out: dict = {
+        "robot_ip": ip,
+        "fsm_id": None,
+        "fsm_mode": None,
+        "dds_ok": False,
+        "loco_vel_rc": None,
+        "loco_service": None,
+        "sport_status": "unknown",
+        "sport_label": "Sconosciuto",
+        "arm_gestures_ok": False,
+        "detail": "",
+        "how_to_verify": (
+            "1) Telecomando: esci da AI mode se attiva\n"
+            "2) Tieni premuti L1 + A insieme (~2 s) finché il robot è in piedi «attivo»\n"
+            "3) Sul PC: premi Ready — se il robot reagisce, DDS OK\n"
+            "4) Prova Rilascia braccia poi un gesto\n"
+            "5) App Unitree sul telefono: se i gesti funzionano lì, il PC è solo FSM non leggibile"
+        ),
+    }
+    try:
+        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient  # noqa: F401
+    except ImportError:
+        out["sport_status"] = "no_sdk"
+        out["sport_label"] = "SDK assente"
+        out["detail"] = "unitree_sdk2py non installato sul Jetson"
+        return out
+
+    try:
+        with _sdk_lock:
+            _ensure_dds_init()
+            lc, svc = _ensure_loco_client_locked()
+            fsm_id, fsm_mode = _read_loco_fsm(lc)
+            vel_rc = lc.SetVelocity(0.0, 0.0, 0.0, 0.5)
+        out["fsm_id"] = fsm_id
+        out["fsm_mode"] = fsm_mode
+        out["loco_vel_rc"] = vel_rc
+        out["loco_service"] = svc
+        out["dds_ok"] = _fsm_set_accepted(vel_rc)
+
+        if fsm_id in _ARM_FSM_BLOCKED:
+            out["sport_status"] = "ai_blocked"
+            out["sport_label"] = f"AI mode (FSM {fsm_id})"
+            out["arm_gestures_ok"] = False
+            out["detail"] = (
+                f"Robot in modalità AI/app (FSM {fsm_id}). "
+                f"I gesti dal PC sono bloccati. Sul telecomando: esci da AI, poi L1+A."
+            )
+        elif fsm_id in _ARM_FSM_OK:
+            out["sport_status"] = "sport_ok"
+            out["sport_label"] = f"Sport OK (FSM {fsm_id})"
+            out["arm_gestures_ok"] = True
+            out["detail"] = "Sport mode confermata. I gesti braccia dovrebbero funzionare."
+        elif fsm_id == 200:
+            out["sport_status"] = "ready"
+            out["sport_label"] = "Ready (FSM 200)"
+            out["arm_gestures_ok"] = False
+            out["detail"] = (
+                "Robot in Ready (locomozione). Per le braccia serve FSM 500: L1+A sul telecomando "
+                "oppure prova un gesto (il Jetson tenta SetFsmId automaticamente)."
+            )
+        elif out["dds_ok"]:
+            out["sport_status"] = "dds_ok"
+            out["sport_label"] = "DDS OK — sport non verificabile"
+            out["arm_gestures_ok"] = True  # allow try — SetFsmId often works when FSM unreadable
+            out["detail"] = (
+                "Il Jetson parla col robot (loco rc=0) ma non legge lo FSM (normale su questo firmware). "
+                "Non puoi sapere dallo schermo se L1+A è attivo: verifica sul robot (piedi attivi, "
+                "stick telecomando muove il robot) oppure premi Ready e guarda se reagisce."
+            )
+        else:
+            out["sport_status"] = "offline"
+            out["sport_label"] = "Robot non raggiungibile"
+            out["arm_gestures_ok"] = False
+            out["detail"] = (
+                f"DDS/loco non risponde (SetVelocity rc={vel_rc}). "
+                f"Accendi robot, L1+A (sport mode), rete 192.168.123.x, IP {ip}."
+            )
+    except Exception as e:
+        out["sport_status"] = "error"
+        out["sport_label"] = "Errore diagnostica"
+        out["detail"] = str(e)
+    return out
+
+
+def _ensure_arm_action_fsm() -> tuple[bool, str]:
+    """
+    I gesti braccia (G1ArmActionClient) richiedono sportmodestate fsm_id in {500,501,801}.
+    Ready imposta FSM 200 (locomozione) — insufficiente: i gesti possono risultare «solo braccio dx».
+    """
+    auto = (os.getenv("G1_ARM_AUTO_FSM", "1") or "1").strip().lower() not in ("0", "false", "no")
+    try:
+        target = int((os.getenv("G1_ARM_FSM_TARGET", "500") or "500").strip())
+    except ValueError:
+        target = 500
+    try:
+        settle = float((os.getenv("G1_ARM_FSM_SETTLE_SEC", "1.2") or "1.2").strip())
+    except ValueError:
+        settle = 1.2
+    settle = max(0.3, min(settle, 5.0))
+
+    with _sdk_lock:
+        _ensure_dds_init()
+        lc, svc = _ensure_loco_client_locked()
+        fsm_id, fsm_mode = _read_loco_fsm(lc)
+
+    if fsm_id in _ARM_FSM_OK:
+        if fsm_id == 801 and fsm_mode is not None and fsm_mode not in (0, 3):
+            pass
+        else:
+            extra = f" mode={fsm_mode}" if fsm_mode is not None else ""
+            return True, f"FSM {fsm_id}{extra}"
+
+    if not auto:
+        return False, (
+            f"FSM {fsm_id} non valido per gesti (serve 500/501/801). "
+            f"Premi «Modalità gesti» o L1+A sul telecomando."
+        )
+
+    with _sdk_lock:
+        fsm_before = fsm_id
+        rc = lc.SetFsmId(target)
+        time.sleep(settle)
+        fsm_id, fsm_mode = _read_loco_fsm(lc)
+
+    ok, msg = _arm_fsm_ready(fsm_id, rc)
+    if ok:
+        extra = f" mode={fsm_mode}" if fsm_mode is not None else ""
+        if fsm_id in _ARM_FSM_OK:
+            return True, f"FSM {fsm_id}{extra} (SetFsmId({target}) rc={rc})"
+        return True, f"{msg}{extra}"
+
+    if fsm_id == fsm_before and fsm_before is not None and fsm_before in _ARM_FSM_BLOCKED:
+        return False, msg
+
+    if fsm_id == fsm_before and fsm_before is not None:
+        return False, (
+            f"SetFsmId({target}) rc={rc} ma FSM resta {fsm_before}. "
+            f"Il robot ignora i comandi SDK: usa il telecomando (L1+A) o l'app Unitree."
+        )
+
+    return False, msg
+
+
+def _action_result_message(action_id: int, ok: bool, detail: str) -> str:
+    meta = G1_ARM_ACTIONS.get(action_id, {})
+    label = meta.get("label") or meta.get("name") or str(action_id)
+    if ok:
+        return f"ok — {label} (id {action_id})"
+    return f"{label} (id {action_id}): {detail}"
+
+
+def execute_robot_action(
+    action_id: str,
+    robot_ip: Optional[str] = None,
+    *,
+    _skip_release_schedule: bool = False,
+) -> tuple[bool, str]:
     """
     Esegue azione sul robot G1. Ritorna (success, message).
     action_id: nome (shake_hand, high_wave, ...) o int (27, 26, ...).
@@ -288,8 +550,10 @@ def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tupl
             )
             if r.returncode == 0:
                 act_int_resolved = _resolve_action_int(action_id)
-                if act_int_resolved is not None and act_int_resolved != 99:
+                if act_int_resolved is not None and act_int_resolved != 99 and not _skip_release_schedule:
                     _schedule_arm_release(act_int_resolved, ip)
+                if act_int_resolved is not None:
+                    return True, _action_result_message(act_int_resolved, True, "ok")
                 return True, "ok"
             return False, (r.stderr or r.stdout or "script fallito").strip()
         except Exception as e:
@@ -312,13 +576,31 @@ def execute_robot_action(action_id: str, robot_ip: Optional[str] = None) -> tupl
         os.environ["UNITREE_DDS_INTERFACE"] = "usb0"
         _reset_dds_state()
         ok, msg = _do_arm_action(act_int, ip)
-    if ok and act_int != 99:
+    if ok and act_int != 99 and not _skip_release_schedule:
         _schedule_arm_release(act_int, ip)
+    if act_int is not None:
+        return ok, _action_result_message(act_int, ok, msg)
     return ok, msg
 
 
 def _do_arm_action(action_id: int, robot_ip: str) -> tuple[bool, str]:
     """Esegue G1 Arm Action via SDK (API 7106 = ExecuteAction)."""
+    if action_id != 99:
+        fsm_ok, fsm_msg = _ensure_arm_action_fsm()
+        print(f"[G1 arm] FSM check: {fsm_msg}", flush=True)
+        if not fsm_ok:
+            return False, fsm_msg
+    if action_id != 99 and action_id in _BOTH_ARMS_ACTION_IDS:
+        prep_ok, prep_msg = _do_arm_action_sdk(99, robot_ip)
+        if not prep_ok and "7402" not in str(prep_msg):
+            print(f"[G1 arm] pre-release 99: {prep_msg}", flush=True)
+        else:
+            time.sleep(0.35)
+    return _do_arm_action_sdk(action_id, robot_ip)
+
+
+def _do_arm_action_sdk(action_id: int, robot_ip: str) -> tuple[bool, str]:
+    """Chiamata SDK ExecuteAction senza pre-release."""
     global _sdk_client
     try:
         from talk_module.arm_sdk import is_arm_sdk_active
@@ -338,9 +620,16 @@ def _do_arm_action(action_id: int, robot_ip: str) -> tuple[bool, str]:
             ret = _sdk_client.ExecuteAction(action_id)
         if ret == 0:
             return True, "ok"
-        err_map = {7400: "rt/armsdk occupato da altro processo", 7401: "braccio occupato (invia release 99)",
-                   7402: "action_id non valido", 7404: "FSM state non compatibile (serve sport mode L1+A)"}
-        return False, err_map.get(ret, f"errore SDK rc={ret}")
+        err_map = {
+            7400: "rt/armsdk occupato (teaching/VR attivo — premi STOP)",
+            7401: "braccio in hold — riprova dopo Rilascia braccia (99)",
+            7402: "action_id non valido per questo firmware",
+            7404: "FSM non compatibile: sport mode (L1+A) e stato Ready/Walk",
+        }
+        hint = ""
+        if ret == 7404:
+            hint = " Se un solo braccio si muove, verifica anche il braccio SX nell'app Unitree."
+        return False, err_map.get(ret, f"errore SDK rc={ret}") + hint
     except ImportError:
         return _do_arm_action_http(action_id, robot_ip)
     except Exception as e:
@@ -724,6 +1013,19 @@ def execute_g1_loco_command(
             if cmd in ("ready", "pronto", "high_stand"):
                 ok, msg = _run_ready_sequence(lc, svc_name)
                 return ok, msg
+            if cmd in ("arm_ready", "gestures", "arm_mode", "fsm_gestures", "modalita_gesti"):
+                rc = lc.SetFsmId(500)
+                time.sleep(1.0)
+                fsm_id, fsm_mode = _read_loco_fsm(lc)
+                extra = f" mode={fsm_mode}" if fsm_mode is not None else ""
+                msg = f"Modalità gesti FSM500 rc={rc} now={fsm_id}{extra} svc={svc_name}"
+                _loco_log(msg)
+                if not _fsm_set_accepted(rc):
+                    return False, _loco_rpc_message(rc, "SetFsmId(500)") + f" | {msg}"
+                ok, hint = _arm_fsm_ready(fsm_id, rc)
+                if ok:
+                    return True, f"{msg} | {hint}"
+                return False, f"{hint} | {msg}"
             if cmd in ("squat_up", "alzati", "squat2stand", "squat2standup"):
                 # Solo transizione SDK «da squat» (706). NON Damp: il Damp (1) manda in collasso se non sei in squat.
                 ru = lc.SetFsmId(706)

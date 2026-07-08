@@ -80,7 +80,7 @@ class TTSClient:
                 "voice": self.voice,
                 "input": text.strip(),
                 "response_format": format,
-                "speed": 1.0,
+                "speed": settings.tts_speed,
             }
             if "gpt-4o-mini-tts" in settings.tts_model:
                 kwargs["instructions"] = "Parla in italiano con voce chiara e alta. Pronuncia correttamente ogni parola."
@@ -90,7 +90,7 @@ class TTSClient:
                 kwargs.pop("instructions", None)
                 resp = self.client.audio.speech.create(**kwargs)
             raw = resp.content
-            if raw and format == "mp3":
+            if raw and format == "mp3" and not settings.tts_skip_loudnorm:
                 raw = _loudnorm_mp3(raw)
             return raw
         except Exception as e:

@@ -29,6 +29,10 @@ router = APIRouter(prefix="/api/teaching", tags=["teaching"])
 _manager = TeachingManager()
 
 
+def get_teaching_manager() -> TeachingManager:
+    return _manager
+
+
 @router.post("/start_record")
 async def start_record():
     result = _manager.start_recording()

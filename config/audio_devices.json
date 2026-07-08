@@ -1,14 +1,13 @@
 {
   "microphone": {
-    "type": "local",
-    "device_id": 0,
-    "value": "local_0",
-    "name": "USB Microphone: Audio (hw:0,0) (USB)"
+    "type": "network",
+    "device_id": "default",
+    "value": "default",
+    "name": "Browser"
   },
   "speaker": {
     "type": "network",
     "value": "web_wait",
-    "name": "Browser (telefono)",
-    "device_id": ""
+    "name": "Browser"
   }
 }

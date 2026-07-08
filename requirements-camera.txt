@@ -1,0 +1,3 @@
+# Camera + YOLO ONNX sulla dashboard (/dashboard)
+# Sul Jetson — NON installare ultralytics (scarica PyTorch/CUDA ~500MB).
+opencv-python-headless>=4.8.0

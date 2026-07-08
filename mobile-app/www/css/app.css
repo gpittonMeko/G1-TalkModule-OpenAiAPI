@@ -424,6 +424,34 @@ html, body {
 }
 .sync-banner.err { background: rgba(248,113,113,.1); border-color: var(--red); color: var(--red); }
 
+.camera-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.camera-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: none;
+  background: #000;
+}
+.camera-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text3);
+  font-size: 12px;
+  text-align: center;
+  padding: 12px;
+}
+
 /* ── Toast ──────────────────────────────────── */
 .toast {
   position: fixed;

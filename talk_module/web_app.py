@@ -45,7 +45,17 @@ KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "config" / "knowledge.
 SOUNDBOARD_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard.json"
 SOUNDBOARD_LITE_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard_lite.json"
 RUN_SHEET_PATH = Path(__file__).resolve().parent.parent / "config" / "run_sheet.json"
-SOUNDBOARD_SLOT_COUNT = 20
+
+
+def _soundboard_slot_count() -> int:
+    try:
+        n = int((os.getenv("G1_SOUNDBOARD_SLOTS") or "20").strip())
+    except ValueError:
+        n = 20
+    return max(1, min(n, 64))
+
+
+SOUNDBOARD_SLOT_COUNT = _soundboard_slot_count()
 SOUNDBOARD_TEXT_MAX_LEN = 280
 # soundboard.json può essere ~20MB: una sola lettura parse in RAM finché il file non cambia (mtime).
 _soundboard_cache: tuple[int, list[dict]] | None = None
@@ -125,6 +135,14 @@ def check_knowledge(user_input: str) -> str | None:
     """Se user_input contiene un pattern della knowledge, ritorna la risposta. Altrimenti None."""
     if not user_input or not user_input.strip():
         return None
+    try:
+        from talk_module.visitor_context import check_visitor_greeting
+
+        visitor_greeting = check_visitor_greeting(user_input)
+        if visitor_greeting:
+            return visitor_greeting
+    except Exception:
+        pass
     txt = user_input.strip().lower()
     # Ordina per lunghezza decrescente: match più specifici prima (es. "che ore sono" prima di "ore")
     for pattern, response in sorted(load_knowledge().items(), key=lambda x: -len(x[0])):
@@ -208,6 +226,45 @@ def _save_sample_audio(audio_bytes: bytes) -> Path | None:
 _ws_clients: dict = {}
 
 
+def _collect_host_ips() -> list[str]:
+    """IP LAN del server (Jetson) per link client da telefono/PC sulla stessa rete."""
+    ips: list[str] = []
+    try:
+        import subprocess
+
+        raw = subprocess.check_output(["hostname", "-I"], text=True, timeout=2).strip()
+        ips = [x for x in raw.split() if x and not x.startswith("127.")]
+    except Exception:
+        pass
+    if not ips:
+        try:
+            import socket
+
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ips = [s.getsockname()[0]]
+            s.close()
+        except Exception:
+            pass
+    return ips
+
+
+_SERVER_LOG_PATH = Path("/tmp/talk.log")
+
+
+def _tail_server_log(max_lines: int = 80) -> list[str]:
+    from collections import deque
+
+    n = max(10, min(int(max_lines), 500))
+    try:
+        if not _SERVER_LOG_PATH.is_file():
+            return ["(log non presente — avvia: bash scripts/restart_server.sh)"]
+        with _SERVER_LOG_PATH.open("r", encoding="utf-8", errors="replace") as f:
+            return [line.rstrip("\n") for line in deque(f, maxlen=n)]
+    except Exception as e:
+        return [f"Errore lettura log: {e}"]
+
+
 if HAS_FASTAPI:
     from fastapi.responses import JSONResponse
     from talk_module.audio.device_utils import resolve_configured_microphone_index
@@ -230,6 +287,18 @@ if HAS_FASTAPI:
     except Exception as _vr_err:
         print(f"[web_app] vr_teleop_api router not loaded: {_vr_err}")
 
+    try:
+        from talk_module.camera_api import router as camera_router
+        app.include_router(camera_router)
+    except Exception as _cam_err:
+        print(f"[web_app] camera_api router not loaded: {_cam_err}")
+
+    try:
+        from talk_module.pick_api import router as pick_router
+        app.include_router(pick_router)
+    except Exception as _pick_err:
+        print(f"[web_app] pick_api router not loaded: {_pick_err}")
+
     @app.exception_handler(Exception)
     def _json_exception_handler(request, exc):
         """Ritorna sempre JSON, mai HTML."""
@@ -247,8 +316,9 @@ if HAS_FASTAPI:
             _config_dirty = False
             _player = None
             _recorder = None
-        if _stt is None:
-            from talk_module.llm import LLMClient
+        if _stt is None or _llm is None or _tts is None:
+            _stt = _llm = _tts = None
+            from talk_module.llm import create_llm_client
             from talk_module.tts import TTSClient
             prov = settings.stt_provider
             # Solo se STT_PROVIDER è esplicitamente groq/deepgram E la chiave c'è (non basta avere GROQ_API_KEY nel .env con whisper)
@@ -266,7 +336,7 @@ if HAS_FASTAPI:
                     )
                 from talk_module.stt import WhisperClient
                 _stt = WhisperClient()
-            _llm = LLMClient()
+            _llm = create_llm_client()
             _tts = TTSClient()
             _player = _recorder = None
             try:
@@ -345,7 +415,11 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.get("/client", response_class=HTMLResponse)
     def client_page():
-        return CLIENT_TEMPLATE
+        return Response(
+            content=CLIENT_TEMPLATE,
+            media_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+        )
 
     @app.get("/setup", response_class=HTMLResponse)
     def setup_page():
@@ -378,7 +452,81 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "host": "AI Accelerator"}
+        llm_prov = getattr(settings, "llm_provider", "openai")
+        llm_model = (
+            getattr(settings, "gemini_model", settings.llm_model)
+            if llm_prov == "gemini"
+            else settings.llm_model
+        )
+        vpid = None
+        vlabel = None
+        try:
+            from talk_module.visitor_context import active_visitor_profile_id, get_active_visitor_profile
+
+            vpid = active_visitor_profile_id() or None
+            vprof = get_active_visitor_profile()
+            vlabel = (vprof or {}).get("label") if vprof else None
+        except Exception:
+            pass
+        return {
+            "status": "ok",
+            "host": "AI Accelerator",
+            "visitor_profile": vpid,
+            "visitor_label": vlabel,
+            "llm_provider": llm_prov,
+            "llm_model": llm_model,
+            "llm_text_model": settings.llm_text_model,
+            "stt_model": settings.stt_model,
+            "wake_stt_model": settings.wake_stt_model,
+            "tts_model": settings.tts_model,
+            "tts_voice": settings.tts_voice,
+        }
+
+    @app.get("/api/network-info")
+    def api_network_info(request: Request):
+        """URL per aprire il client da PC/telefono sulla stessa rete (router o WiFi G1)."""
+        ips = _collect_host_ips()
+        public = (os.getenv("TALK_PUBLIC_HOST") or "").strip()
+        scheme = request.url.scheme or "https"
+        hosts: list[str] = []
+        for h in [public, request.url.hostname or "", *ips]:
+            h = (h or "").strip()
+            if h and h not in hosts and h not in ("0.0.0.0", "127.0.0.1"):
+                hosts.append(h)
+
+        def _url(path: str, host: str | None = None) -> str:
+            h = host or (request.url.hostname or "localhost")
+            return f"{scheme}://{h}:8081{path}"
+
+        current = str(request.base_url).rstrip("/")
+        client_here = f"{current}/client"
+        links = []
+        for h in hosts:
+            links.append(
+                {
+                    "host": h,
+                    "client": _url("/client", h),
+                    "occhi": _url("/client#occhi", h),
+                    "dashboard": _url("/dashboard/", h),
+                    "http_redirect": f"http://{h}:8080/client",
+                }
+            )
+        return {
+            "ok": True,
+            "ips": ips,
+            "talk_public_host": public or None,
+            "client_url": client_here,
+            "occhi_url": f"{client_here}#occhi",
+            "dashboard_url": f"{current}/dashboard/",
+            "links": links,
+            "hint": "Stessa rete del robot/router: apri client_url (HTTPS). Microfono: accetta certificato al primo accesso.",
+        }
+
+    @app.get("/api/server-log")
+    def api_server_log(lines: int = 80):
+        """Ultime righe di /tmp/talk.log — visibili dal client HTTPS (senza watchdog :8082)."""
+        rows = _tail_server_log(lines)
+        return {"ok": True, "path": str(_SERVER_LOG_PATH), "lines": rows}
 
     @app.get("/api/wake-debug")
     def api_wake_debug_list():
@@ -522,6 +670,12 @@ self.addEventListener('activate', () => self.clients.claim());
                 return {"ok": False, "error": "LLM non ha risposto", "transcribed": text}
             audio_out = tts.synthesize(resp, format="mp3")
             stt_used = "groq" if "GroqWhisperClient" in type(stt).__name__ else ("deepgram" if "Deepgram" in type(stt).__name__ else "whisper")
+            llm_prov = getattr(settings, "llm_provider", "openai")
+            llm_model = (
+                getattr(settings, "gemini_model", settings.llm_model)
+                if llm_prov == "gemini"
+                else settings.llm_model
+            )
             return {
                 "ok": True,
                 "test_phrase": test_phrase,
@@ -529,7 +683,8 @@ self.addEventListener('activate', () => self.clients.claim());
                 "llm_response": resp,
                 "audio_base64": base64.b64encode(audio_out).decode() if audio_out else "",
                 "stt_provider": stt_used,
-                "llm_model": settings.llm_model,
+                "llm_provider": llm_prov,
+                "llm_model": llm_model,
                 "duration_ms": int((time.perf_counter() - t0) * 1000),
             }
         except Exception as e:
@@ -1126,6 +1281,26 @@ self.addEventListener('activate', () => self.clients.claim());
             out.unlink(missing_ok=True)
         return wav_bytes
 
+    def _play_tts_on_server(audio_bytes: bytes, fmt: str = "mp3", device_id: int | None = None) -> bool:
+        """TTS sulla cassa interna G1 (come soundboard), fallback uscita ALSA Jetson."""
+        if not audio_bytes or len(audio_bytes) < 30:
+            return False
+        from talk_module.audio.g1_speaker import play_wav_on_g1
+        from talk_module.audio.player import AudioPlayer
+
+        try:
+            wav_g1 = _soundboard_bytes_to_wav_playable(audio_bytes, fmt)
+            if play_wav_on_g1(wav_g1):
+                return True
+        except Exception as e:
+            print(f"[tts-server] g1_internal: {e}", flush=True)
+        try:
+            p = AudioPlayer(device_id=device_id)
+            return p.play_bytes(audio_bytes, format_hint="mp3")
+        except Exception as e:
+            print(f"[tts-server] player: {e}", flush=True)
+        return False
+
     @app.post("/api/soundboard-play-local")
     def api_soundboard_play_local(data: dict = Body(...)):
         """Riproduce uno slot audio sulla cassa del Jetson (sounddevice + device_id dal setup)."""
@@ -1250,6 +1425,17 @@ self.addEventListener('activate', () => self.clients.claim());
         except Exception as e:
             return {"path": "", "entries": {}, "arm_actions": [], "error": str(e)}
 
+    @app.get("/api/robot-fsm")
+    def api_robot_fsm():
+        """Stato sport mode / FSM (diagnostica gesti braccia)."""
+        try:
+            from talk_module.robot_actions import probe_g1_sport_status
+            robot_ip = os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+            st = probe_g1_sport_status(robot_ip=robot_ip)
+            return {"ok": True, **st}
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
     @app.post("/api/robot-action")
     def api_execute_robot_action(data: dict = Body(...)):
         """Esegue azione braccio G1 (action_id int o nome)."""
@@ -1351,6 +1537,31 @@ self.addEventListener('activate', () => self.clients.claim());
     _wake_cooldown = [0.0]
     WAKE_COOLDOWN_S = 1.0
 
+    def _build_wake_ack_response(raw_text: str, t0: float) -> dict:
+        """Solo Hey G1: saluto visitatore (se profilo attivo) + TTS, poi command mode lato client."""
+        from talk_module.visitor_context import get_hey_g1_ack_response
+
+        resp = get_hey_g1_ack_response()
+        audio_b64 = ""
+        try:
+            _, _, tts, _, _ = get_services()
+            audio_out = tts.synthesize(resp, format="mp3") if resp else b""
+            if audio_out:
+                audio_b64 = base64.b64encode(audio_out).decode()
+                from talk_module.processing import start_speak_gesture
+                start_speak_gesture(resp or "")
+        except Exception as e:
+            print(f"[Wake] ack TTS error: {e}", flush=True)
+        _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
+        return {
+            "text": raw_text,
+            "response": resp,
+            "audio_base64": audio_b64,
+            "message": "",
+            "wake_ack": True,
+            "duration_ms": int((time.perf_counter() - t0) * 1000),
+        }
+
     def _stt_and_wake_check(audio_bytes: bytes, format_hint: str = "webm") -> dict:
         """STT + wake word detection.
         - wkind 'ack' (solo wake word) → wake_ack (client entra in command mode)
@@ -1386,7 +1597,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 result["wake_cmd_inline"] = True
                 _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
                 return result
-            return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_ack": True, "duration_ms": _ms()}
+            return _build_wake_ack_response(raw_text, t0)
         except Exception as e:
             print(f"[Wake] STT error: {e}", flush=True)
             return {"text": "", "response": "", "audio_base64": "", "message": f"Errore: {e}", "duration_ms": _ms()}
@@ -1430,14 +1641,7 @@ self.addEventListener('activate', () => self.clients.claim());
                         "duration_ms": int((time.perf_counter() - t0) * 1000),
                     }
                 if wkind == "ack":
-                    return {
-                        "text": raw_text,
-                        "response": "",
-                        "audio_base64": "",
-                        "message": "",
-                        "wake_ack": True,
-                        "duration_ms": int((time.perf_counter() - t0) * 1000),
-                    }
+                    return _build_wake_ack_response(raw_text, t0)
                 prompt = _apply_stt_fuzzy_correction(rest or "")
                 text = raw_text
             else:
@@ -1446,7 +1650,9 @@ self.addEventListener('activate', () => self.clients.claim());
                 if msg:
                     return {"text": text or "", "response": "", "audio_base64": "", "message": msg, "duration_ms": int((time.perf_counter() - t0) * 1000)}
             if prompt == PROMPT_HEY_G1_ACK_ONLY:
-                resp = (settings.hey_g1_ack_text or "").strip() or "Sì, ti ascolto. Come posso aiutarti?"
+                from talk_module.visitor_context import get_hey_g1_ack_response
+
+                resp = get_hey_g1_ack_response()
             else:
                 from talk_module.robot_actions import check_robot_action
                 robot_match = None
@@ -1467,7 +1673,7 @@ self.addEventListener('activate', () => self.clients.claim());
                             if resp == NOT_FOUND:
                                 resp = None
                     if not resp:
-                        resp = llm.chat(prompt, use_history=False)
+                        resp = llm.chat(prompt, use_history=False, max_tokens=settings.llm_voice_max_tokens)
                     # Post-LLM: if no robot action matched but LLM response suggests one, try to trigger it
                     if resp and not robot_match:
                         try:
@@ -1478,6 +1684,9 @@ self.addEventListener('activate', () => self.clients.claim());
                         except Exception:
                             pass
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
+            if audio_out and not robot_match:
+                from talk_module.processing import start_speak_gesture
+                start_speak_gesture(resp or "")
             if resp:
                 _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
             return {
@@ -1546,6 +1755,9 @@ self.addEventListener('activate', () => self.clients.claim());
                         max_tokens=384,
                     )
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
+            if audio_out and not robot_match:
+                from talk_module.processing import start_speak_gesture
+                start_speak_gesture(resp or "")
             return {
                 "text": prompt.strip(),
                 "response": resp or "",
@@ -1672,13 +1884,16 @@ self.addEventListener('activate', () => self.clients.claim());
                                 )
                             except Exception:
                                 pass
-                            if play_on == "server" and out_device_id is not None and result.get("audio_base64"):
+                            if play_on == "server" and result.get("audio_base64"):
                                 try:
-                                    from talk_module.audio import AudioPlayer
-                                    p = AudioPlayer(device_id=int(out_device_id))
-                                    p.play_bytes(base64.b64decode(result["audio_base64"]), format_hint="mp3")
-                                except Exception:
-                                    pass
+                                    dev_id = int(out_device_id) if out_device_id is not None else None
+                                    ab = base64.b64decode(result["audio_base64"])
+                                    await loop.run_in_executor(
+                                        _executor,
+                                        partial(_play_tts_on_server, ab, "mp3", dev_id),
+                                    )
+                                except Exception as e:
+                                    print(f"[ws/audio] server tts play: {e}", flush=True)
                             await ws.send_text(json.dumps({"type": "response", "data": result}))
                         except Exception as e:
                             await ws.send_text(json.dumps({"type": "error", "data": str(e)}))
@@ -1748,9 +1963,16 @@ self.addEventListener('activate', () => self.clients.claim());
                     break
                 result = await loop.run_in_executor(_executor, partial(_process_audio, item, False, "wav"))
                 await ws.send_text(json.dumps({"type": "response", "data": result}))
-                if result.get("audio_base64") and play_local and player:
+                if result.get("audio_base64"):
                     import base64 as b64
-                    player.play_bytes(b64.b64decode(result["audio_base64"]), format_hint="mp3")
+
+                    ab = b64.b64decode(result["audio_base64"])
+                    spk_dev = spk.get("device_id") if play_local else None
+                    dev_id = int(spk_dev) if spk_dev is not None and spk_dev != "" else None
+                    await loop.run_in_executor(
+                        _executor,
+                        partial(_play_tts_on_server, ab, "mp3", dev_id),
+                    )
         except WebSocketDisconnect:
             pass
         finally:
@@ -1829,10 +2051,15 @@ self.addEventListener('activate', () => self.clients.claim());
                     result = await loop.run_in_executor(_executor, partial(_process_audio, item, True, "wav"))
                     await ws.send_text(json.dumps({"type": "response", "data": result}))
                     if result.get("audio_base64") and spk.get("type") == "local":
-                        _, _, _, player, _ = get_services()
-                        if player:
-                            import base64 as b64
-                            player.play_bytes(b64.b64decode(result["audio_base64"]), format_hint="mp3")
+                        import base64 as b64
+
+                        ab = b64.b64decode(result["audio_base64"])
+                        spk_dev = spk.get("device_id")
+                        dev_id = int(spk_dev) if spk_dev is not None and spk_dev != "" else None
+                        await loop.run_in_executor(
+                            _executor,
+                            partial(_play_tts_on_server, ab, "mp3", dev_id),
+                        )
                     # type network: il browser (/local) riproduce audio_base64 (telefono -> cassa BT)
                     recording = False
         except WebSocketDisconnect:
@@ -2336,7 +2563,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       max-width: 420px;
       width: 100%;
       box-sizing: border-box;
-      z-index: 10000;
+      z-index: 10005;
       isolation: isolate;
       -webkit-backface-visibility: hidden;
       backface-visibility: hidden;
@@ -2366,7 +2593,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       display: none;
       position: fixed;
       top: 0;
-      left: 0;
+      left: 0 !important;
+      right: auto !important;
+      transform: none !important;
       width: min(280px, 85vw);
       max-width: 280px;
       height: 100vh;
@@ -2374,7 +2603,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       box-sizing: border-box;
       background: linear-gradient(180deg, #0f1117 0%, #141922 100%);
       border-right: 1px solid rgba(255,255,255,0.08);
-      z-index: 200;
+      z-index: 10001;
       padding: 20px 0;
       padding-top: max(20px, env(safe-area-inset-top));
       overflow-y: auto;
@@ -2394,11 +2623,34 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     .sidebar nav a:hover, .sidebar nav a.active { color: #14b8a6; background: rgba(20,184,166,0.08); border-left-color: #14b8a6; }
     .sidebar nav a .icon { font-size: 20px; }
+    .sidebar-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 16px 14px;
+      margin-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .sidebar-head span { font-size: 14px; font-weight: 600; color: #e4e4e7; }
+    .sidebar-close {
+      width: 40px;
+      height: 40px;
+      border: none;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.08);
+      color: #e4e4e7;
+      font-size: 22px;
+      line-height: 1;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .sidebar-close:hover { background: rgba(239,68,68,0.2); color: #fca5a5; }
     .overlay {
       position: fixed;
       inset: 0;
       background: rgba(0,0,0,0.5);
-      z-index: 150;
+      z-index: 10000;
       display: none;
       opacity: 0;
       transition: opacity 0.25s;
@@ -2419,6 +2671,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       display: block !important;
       visibility: visible !important;
       pointer-events: auto !important;
+      left: 0 !important;
+      right: auto !important;
+      transform: none !important;
     }
     /* pointer-events sul main rimosso: su alcuni WebView rompeva la griglia soundboard (slot invisibili / non cliccabili). */
     .main-content {
@@ -2445,6 +2700,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     #section-soundboard.section.active { display: block !important; }
     #section-robot.section.active { display: flex !important; flex-direction: column; min-height: calc(100vh - 100px); }
     #robotControlFrame { flex: 1; width: 100%; min-height: 360px; border: 0; border-radius: 12px; background: #0f1115; }
+    .client-camera-wrap { position: relative; background: #0f1115; border-radius: 12px; overflow: hidden; aspect-ratio: 4/3; max-height: min(52vh, 420px); border: 1px solid rgba(255,255,255,0.08); margin-bottom: 12px; }
+    .client-camera-wrap img { width: 100%; height: 100%; object-fit: contain; display: none; background: #000; }
+    .client-camera-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #71717a; font-size: 13px; text-align: center; padding: 16px; }
+    .client-cam-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 12px; margin-bottom: 10px; }
+    .client-cam-meta span.lbl { color: #71717a; }
+    .client-cam-meta span.val { color: #e4e4e7; font-family: monospace; text-align: right; }
+    .client-cam-meta span.val.ok { color: #4ade80; }
+    .client-cam-meta span.val.err { color: #f87171; }
+    .client-cam-dets { font-size: 11px; color: #a1a1aa; min-height: 2.4em; line-height: 1.4; padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 8px; border: 1px solid rgba(255,255,255,0.06); }
+    .client-cam-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .client-cam-btns button { padding: 10px 16px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: #e4e4e7; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .client-cam-btns button.primary { background: rgba(20,184,166,0.2); border-color: rgba(20,184,166,0.45); color: #5eead4; }
+    .client-log-box { margin-top: 8px; padding: 10px 12px; background: #0a0b10; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; line-height: 1.45; color: #a1a1aa; max-height: min(58vh, 480px); overflow: auto; white-space: pre-wrap; word-break: break-word; }
     h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 4px; }
     .step {
       background: rgba(255,255,255,0.03);
@@ -2606,9 +2874,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     .quick-guide details { margin-top: 6px; }
     .quick-guide summary { cursor: pointer; color: #2dd4bf; font-weight: 600; font-size: 13px; list-style: none; }
     .quick-guide summary::-webkit-details-marker { display: none; }
-    /* Telefono: tab nel flusso del main (no position:fixed → niente layer/hit-test rotti su WebKit). */
+    /* Tab sezioni rimosse: navigazione solo da menu ☰ laterale. */
     .client-section-tabs {
-      display: none;
+      display: none !important;
       flex-wrap: nowrap;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
@@ -2645,16 +2913,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     .client-tab .ct-ic { font-size: 18px; line-height: 1; }
     .client-tab.active { color: #2dd4bf; background: rgba(20,184,166,0.15); border: 1px solid rgba(20,184,166,0.35); }
     @media (max-width: 480px) {
-      /* Spazio sotto header fisso “G1 Talk” che altrimenti taglia la riga tab */
-      .client-section-tabs { display: flex; margin-top: 40px; }
-      .header .hamburger { display: none !important; }
-    }
-    @media (min-width: 481px) and (orientation: portrait) {
-      .client-section-tabs { display: none !important; }
-    }
-    @media (min-width: 481px) and (orientation: landscape) and (max-height: 500px) {
-      .client-section-tabs { display: flex; margin-top: 32px; }
-      .header .hamburger { display: none !important; }
+      .header .hamburger { display: flex !important; }
     }
   </style>
 </head>
@@ -2662,26 +2921,58 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
   <!-- overlay/sidebar poi <main>; header in fondo al body: ultimo sibling = hit-test corretto su WebKit mobile (hamburger). -->
   <div class="overlay" id="overlay"></div>
   <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <span>Menu</span>
+      <button type="button" class="sidebar-close" id="sidebarClose" aria-label="Chiudi menu" onclick="return window.g1CloseDrawer && window.g1CloseDrawer()">&#10005;</button>
+    </div>
     <nav>
-      <a href="#" data-section="soundboard" class="active"><span class="icon">&#128266;</span> Soundboard</a>
-      <a href="#" data-section="runsheet"><span class="icon">&#128197;</span> Tempi evento</a>
-      <a href="#" data-section="parla"><span class="icon">&#127908;</span> Parla</a>
-      <a href="#" data-section="knowledge"><span class="icon">&#128214;</span> Knowledge</a>
-      <a href="#" data-section="devices"><span class="icon">&#128268;</span> Dispositivi</a>
-      <a href="#" data-section="robot"><span class="icon">&#127918;</span> Robot (G1)</a>
-      <a href="#" data-section="info"><span class="icon">&#8505;</span> Info</a>
+      <a href="#soundboard" data-section="soundboard" class="active" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('soundboard')"><span class="icon">&#128266;</span> Soundboard</a>
+      <a href="#runsheet" data-section="runsheet" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('runsheet')"><span class="icon">&#128197;</span> Tempi evento</a>
+      <a href="#parla" data-section="parla" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('parla')"><span class="icon">&#127908;</span> Parla</a>
+      <a href="#occhi" data-section="occhi" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('occhi')"><span class="icon">&#128065;</span> Occhi robot</a>
+      <a href="#log" data-section="log" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('log')"><span class="icon">&#128196;</span> Log Jetson</a>
+      <a href="#knowledge" data-section="knowledge" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('knowledge')"><span class="icon">&#128214;</span> Knowledge</a>
+      <a href="#devices" data-section="devices" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('devices')"><span class="icon">&#128268;</span> Dispositivi</a>
+      <a href="#robot" data-section="robot" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('robot')"><span class="icon">&#127918;</span> Robot (G1)</a>
+      <a href="#info" data-section="info" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('info')"><span class="icon">&#8505;</span> Info</a>
     </nav>
   </aside>
+  <script>
+  (function(){
+    function g1OpenDrawer(){
+      var sb = document.getElementById('sidebar');
+      var ov = document.getElementById('overlay');
+      var hb = document.getElementById('hamburger');
+      if (sb) sb.classList.add('open');
+      if (ov) ov.classList.add('visible');
+      if (hb) hb.setAttribute('aria-expanded', 'true');
+    }
+    function g1CloseDrawer(){
+      var sb = document.getElementById('sidebar');
+      var ov = document.getElementById('overlay');
+      var hb = document.getElementById('hamburger');
+      if (sb) sb.classList.remove('open');
+      if (ov) ov.classList.remove('visible');
+      if (hb) hb.setAttribute('aria-expanded', 'false');
+    }
+    window.g1ToggleDrawer = function(e){
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      var sb = document.getElementById('sidebar');
+      if (sb && sb.classList.contains('open')) g1CloseDrawer(); else g1OpenDrawer();
+      return false;
+    };
+    window.g1CloseDrawer = g1CloseDrawer;
+    window.g1OpenDrawer = g1OpenDrawer;
+    var _sbClose = document.getElementById('sidebarClose');
+    if (_sbClose) _sbClose.addEventListener('click', function(e){ e.preventDefault(); g1CloseDrawer(); });
+  })();
+  </script>
   <main class="main-content">
-    <nav class="client-section-tabs" id="clientSectionTabs" aria-label="Sezioni">
-      <button type="button" class="client-tab active" data-section="soundboard" onclick="return window.g1ActivateClientSection('soundboard')"><span class="ct-ic" aria-hidden="true">&#128266;</span><span>Sound</span></button>
-      <button type="button" class="client-tab" data-section="runsheet" onclick="return window.g1ActivateClientSection('runsheet')"><span class="ct-ic" aria-hidden="true">&#128197;</span><span>Tempi</span></button>
-      <button type="button" class="client-tab" data-section="parla" onclick="return window.g1ActivateClientSection('parla')"><span class="ct-ic" aria-hidden="true">&#127908;</span><span>Parla</span></button>
-      <button type="button" class="client-tab" data-section="knowledge" onclick="return window.g1ActivateClientSection('knowledge')"><span class="ct-ic" aria-hidden="true">&#128214;</span><span>Know</span></button>
-      <button type="button" class="client-tab" data-section="devices" onclick="return window.g1ActivateClientSection('devices')"><span class="ct-ic" aria-hidden="true">&#128268;</span><span>I/O</span></button>
-      <button type="button" class="client-tab" data-section="robot" onclick="return window.g1ActivateClientSection('robot')"><span class="ct-ic" aria-hidden="true">&#127918;</span><span>Robot</span></button>
-      <button type="button" class="client-tab" data-section="info" onclick="return window.g1ActivateClientSection('info')"><span class="ct-ic" aria-hidden="true">&#8505;</span><span>Info</span></button>
-    </nav>
+    <div id="lanConnectBar" style="padding:8px 12px 10px;font-size:11px;line-height:1.45;background:rgba(20,184,166,0.07);border-bottom:1px solid rgba(20,184,166,0.2);">
+      <div style="color:#9ca3af;margin-bottom:4px;">App sul robot (salva su telefono/PC):</div>
+      <a id="lanClientLink" href="/client" style="color:#5eead4;font-weight:700;font-size:12px;word-break:break-all;text-decoration:none;"></a>
+      <div id="lanAltLinks" style="margin-top:6px;color:#71717a;font-size:10px;line-height:1.4;"></div>
+    </div>
     <div id="persistentMicLevel" style="padding:5px 12px;display:flex;align-items:center;gap:8px;background:rgba(20,184,166,0.05);border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:2px;">
       <span style="font-size:11px;color:#71717a;white-space:nowrap;">&#127908; Mic</span>
       <div style="flex:1;height:10px;background:#1e1e2e;border-radius:5px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
@@ -2704,10 +2995,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         nodes = document.querySelectorAll('main.main-content .section');
         for (i = 0; i < nodes.length; i++) nodes[i].classList.remove('active');
         el.classList.add('active');
-        nodes = document.querySelectorAll('#clientSectionTabs .client-tab');
-        for (i = 0; i < nodes.length; i++) nodes[i].classList.toggle('active', nodes[i].getAttribute('data-section') === sec);
         nodes = document.querySelectorAll('#sidebar nav a');
         for (i = 0; i < nodes.length; i++) nodes[i].classList.toggle('active', nodes[i].getAttribute('data-section') === sec);
+        try { if (location.hash !== '#'+sec) location.hash = sec; } catch (e) {}
         try { window.scrollTo(0, 0); } catch (e) {}
         if (sec === 'robot') {
           var rf = document.getElementById('robotControlFrame');
@@ -2727,7 +3017,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       function g1ApplyClientHash(){
         var h = (location.hash||'').replace(/^#/, '').trim();
         if (!h) return;
-        var allowed = {soundboard:1,runsheet:1,parla:1,knowledge:1,devices:1,robot:1,info:1};
+        var allowed = {soundboard:1,runsheet:1,parla:1,occhi:1,log:1,knowledge:1,devices:1,robot:1,info:1};
         if (allowed[h] && typeof window.g1ActivateClientSection === 'function') {
           window.g1ActivateClientSection(h);
         }
@@ -2738,6 +3028,49 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         g1ApplyClientHash();
       }
       window.addEventListener('hashchange', g1ApplyClientHash);
+    })();
+    (function(){
+      function _lanFill(data){
+        var cur = location.origin + '/client';
+        var a = document.getElementById('lanClientLink');
+        if (a) { a.href = cur; a.textContent = cur; }
+        var alt = document.getElementById('lanAltLinks');
+        if (alt) {
+          var parts = [];
+          if (data && data.links && data.links.length) {
+            data.links.forEach(function(l){
+              if (l.client && l.client.indexOf(location.hostname) < 0) {
+                parts.push('<a href="'+l.client+'" style="color:#94a3b8;text-decoration:none;">'+l.client+'</a>');
+              }
+            });
+          }
+          alt.innerHTML = parts.length
+            ? 'Altri IP sulla rete robot: ' + parts.join(' · ')
+            : 'Se non si apre da un altro dispositivo, verifica stessa WiFi/router e IP Jetson (<code style="color:#a1a1aa;">hostname -I</code>).';
+        }
+        var ic = document.getElementById('infoClientUrl');
+        if (ic) { ic.href = cur; ic.textContent = cur; }
+        var io = document.getElementById('infoOcchiUrl');
+        if (io) { io.href = cur + '#occhi'; io.textContent = cur + '#occhi'; }
+        var id = document.getElementById('infoDashUrl');
+        if (id) { id.href = location.origin + '/dashboard/'; }
+        var ih = document.getElementById('infoHttpUrls');
+        if (ih && data && data.links && data.links.length) {
+          ih.innerHTML = data.links.map(function(l){ return l.http_redirect; }).filter(Boolean).join(' · ');
+        }
+        var ji = document.getElementById('infoJetsonIps');
+        if (ji && data && data.ips) ji.textContent = data.ips.join(' ') || '—';
+      }
+      fetch(location.origin + '/api/network-info', { credentials: 'same-origin' })
+        .then(function(r){ return r.json(); })
+        .then(_lanFill)
+        .catch(function(){ _lanFill(null); });
+      window.g1RefreshLanLinks = function(){
+        fetch(location.origin + '/api/network-info', { credentials: 'same-origin' })
+          .then(function(r){ return r.json(); })
+          .then(_lanFill)
+          .catch(function(){ _lanFill(null); });
+      };
     })();
     </script>
     <section id="section-soundboard" class="section active">
@@ -2761,6 +3094,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <span id="sbGainLabel" style="font-size:12px;color:#a1a1aa;font-family:monospace;min-width:44px;">1.35×</span>
   </div>
   <p id="soundboardLoadErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;grid-column:1/-1;"></p>
+  <p id="soundboardLoadHint" class="hint" style="margin:0 0 8px;font-size:11px;color:#71717a;">Caricamento slot…</p>
+  <button type="button" id="sbReloadSlots" style="margin:0 0 10px;padding:8px 14px;font-size:12px;background:rgba(20,184,166,0.12);color:#5eead4;border:1px solid rgba(20,184,166,0.35);border-radius:8px;cursor:pointer;">Ricarica slot soundboard</button>
   <div id="soundboardScroll">
   <div id="soundboardGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;"></div>
   </div>
@@ -2876,6 +3211,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       </label>
     </div>
     <p id="wakeListenStatus" style="margin:0 0 6px;font-size:13px;color:#71717a;">Disattivato</p>
+    <p style="margin:0 0 8px;font-size:11px;color:#52525b;">Dopo ogni risposta di G1 l&apos;ascolto si spegne da solo: riattiva il toggle per un nuovo &laquo;Hey G1&raquo;.</p>
     <div id="wakeDebugLog" style="max-height:60px;overflow-y:auto;font-size:10px;font-family:monospace;color:#52525b;line-height:1.4;margin:0 0 8px;padding:4px 8px;background:rgba(0,0,0,0.2);border-radius:6px;display:none;"></div>
     <div id="recStatus" style="min-height:30px;">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
@@ -2888,13 +3224,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div id="activeMicIndicator" style="margin:8px 0 0;padding:6px 10px;border-radius:6px;font-size:12px;display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.03);">
       <span id="activeMicDot" style="width:8px;height:8px;border-radius:50%;background:#71717a;flex-shrink:0;"></span>
-      <span id="activeMicLabel" style="color:#9ca3af;">Microfono: caricamento...</span>
+      <span id="activeMicLabel" style="color:#9ca3af;">Microfono: attivazione…</span>
     </div>
     <details id="parlaMicPreviewPanel" style="margin:12px 0 0;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2);">
       <summary style="padding:10px 12px;cursor:pointer;font-size:12px;color:#93c5fd;font-weight:600;user-select:none;">Microfono e sensibilit&agrave;</summary>
       <div style="padding:0 12px 12px;">
-      <p class="hint" id="parlaSetupHintTop" style="margin:0 0 8px;font-size:10px;color:#64748b;line-height:1.4;"><strong>Setup tipico:</strong> microfono su questo telefono (es. DJI Mic Mini), cassa <strong>Bluetooth</strong> accoppiata al telefono — in Soundboard scegli <strong>Browser</strong> e la cassa in <strong>Riproduci su</strong>. Gesti robot: tab Robot, IP <code>192.168.123.161</code> (salvato nel browser).</p>
-      <div id="parlaPreviewDisabledMsg" style="display:none;font-size:11px;color:#f59e0b;margin-bottom:8px;">Seleziona un microfono <strong>Browser</strong> in Dispositivi e consenti l&apos;accesso per vedere il livello qui.</div>
+      <p class="hint" id="parlaSetupHintTop" style="margin:0 0 8px;font-size:10px;color:#64748b;line-height:1.4;"><strong>Setup tipico:</strong> microfono su questo telefono (es. DJI Mic Mini), cassa <strong>Bluetooth</strong> accoppiata al telefono — in Soundboard scegli <strong>Browser</strong> e la cassa in <strong>Riproduci su</strong>. Dopo &laquo;Hey G1&raquo; hai ~22&nbsp;s per la domanda; una pausa fino a ~3&nbsp;s non taglia l&apos;audio.</p>
+      <div id="parlaPreviewDisabledMsg" style="display:none;font-size:11px;color:#f59e0b;margin-bottom:8px;">Seleziona un microfono <strong>Browser</strong> nel menu sopra (es. Intel RealSense).</div>
       <div id="parlaPreviewMeterWrap" style="position:relative;">
         <div style="position:relative;height:20px;background:#1e1e2e;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
           <div id="parlaPreviewThresholdLine" style="position:absolute;top:0;bottom:0;width:3px;background:#f97316;z-index:3;opacity:0.9;left:4%;box-shadow:0 0 4px #f97316;"></div>
@@ -2947,18 +3283,25 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <div id="secureWarnDesktop" style="display:none;"><p style="margin:0;">Tunnel SSH poi localhost:8081/client</p></div>
     </details>
   </div>
-  <div id="allowWrap" class="step" style="display:block;margin-bottom:8px;">
-    <button type="button" class="btn-allow" id="btnAllow" style="font-size:12px;padding:8px 14px;">Consenti microfono</button>
-    <p id="deviceStatus" style="font-size:10px;margin:4px 0 0;color:#52525b;">Clicca per caricare dispositivi.</p>
-    <p class="hint" id="hintAccess" style="margin:4px 0 0;font-size:10px;">Per il microfono browser: consenti l'accesso.</p>
+  <div id="devicesWrap" class="step" style="margin-bottom:10px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;">
+    <p id="deviceStatus" style="font-size:11px;margin:0 0 10px;color:#52525b;">Microfono: attivazione…</p>
+    <label style="display:block;margin-bottom:6px;font-size:12px;color:#9ca3af;">Microfono</label>
+    <select id="mic"><option value="">Caricamento...</option></select>
+    <label style="display:block;margin-top:12px;margin-bottom:6px;font-size:12px;color:#9ca3af;">Altoparlante / cassa</label>
+    <select id="speaker"><option value="">Caricamento...</option></select>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;">
+      <button type="button" id="devicesRefresh" style="padding:8px 14px;background:rgba(255,255,255,0.08);color:#e8eaed;border:1px solid rgba(255,255,255,0.12);border-radius:8px;cursor:pointer;font-size:13px;">Aggiorna</button>
+      <button type="button" id="devicesSave" style="padding:8px 14px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva</button>
+      <span id="devicesSaveStatus" class="hint" style="margin:0;"></span>
+    </div>
   </div>
   <details style="margin-bottom:10px;">
     <summary style="cursor:pointer;font-size:12px;color:#71717a;">Uscita audio (TTS)</summary>
     <div id="ttsOutputWrap" class="step" style="margin-top:8px;margin-bottom:0;padding:10px 12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.2);">
       <label style="display:block;margin-bottom:4px;color:#a1a1aa;font-size:12px;">Risposta vocale</label>
       <select id="ttsPlayDest" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;width:100%;max-width:300px;">
+        <option value="browser" selected>Browser (telefono/PC)</option>
         <option value="server">Cassa robot (Jetson)</option>
-        <option value="browser">Browser (telefono/PC)</option>
       </select>
       <p id="ttsServerHint" class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;"></p>
     </div>
@@ -2983,8 +3326,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <section id="section-knowledge" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Knowledge</h2>
   <p class="hint" style="margin-bottom:10px;"><strong>Uso:</strong> frasi «chiave → risposta» per McKinsey host, curiosità, FAQ. Se l’utente (o tu in <strong>Parla</strong>) dice qualcosa che <strong>contiene</strong> il pattern, il robot risponde subito senza chiamare il modello GPT (più veloce e coerente col testo).</p>
-  <details id="knowledgeWrap" class="step" style="margin-bottom:12px;border:1px solid rgba(255,255,255,0.06);">
-    <summary style="cursor:pointer;color:#a1a1aa;">Pattern -&gt; risposta (modifica)</summary>
+  <details id="knowledgeWrap" class="step" open style="margin-bottom:12px;border:1px solid rgba(255,255,255,0.06);">
+    <summary style="cursor:pointer;color:#a1a1aa;">Pattern -&gt; risposta (<span id="knowledgeCount">caricamento…</span>)</summary>
     <p class="hint" style="margin-top:8px;">Aggiungi righe e <strong>Salva su server</strong>. La corrispondenza è per sottostringa nel testo riconosciuto.</p>
     <div id="knowledgeList" style="margin-top:8px;"></div>
     <div style="margin-top:8px;">
@@ -2997,16 +3340,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="section-devices" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 12px;">Dispositivi</h2>
-  <div id="devicesWrap" class="step">
-    <label style="display:block;margin-bottom:6px;">Microfono</label>
-    <select id="mic"><option value="">Caricamento...</option></select>
-    <label style="display:block;margin-top:12px;margin-bottom:6px;">Altoparlante / cassa</label>
-    <select id="speaker"><option value="">Caricamento...</option></select>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;">
-      <button type="button" id="devicesRefresh" style="padding:8px 14px;background:rgba(255,255,255,0.08);color:#e8eaed;border:1px solid rgba(255,255,255,0.12);border-radius:8px;cursor:pointer;font-size:13px;">Aggiorna</button>
-      <button type="button" id="devicesSave" style="padding:8px 14px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva</button>
-      <span id="devicesSaveStatus" class="hint" style="margin:0;"></span>
-    </div>
+  <p class="hint" style="margin:0 0 12px;font-size:12px;">Microfono e altoparlante si scelgono in <strong>Parla</strong>. Qui: volume TTS e diagnostica hardware Jetson.</p>
+  <div class="step">
     <div style="margin-top:14px;padding:12px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;">
       <label style="display:block;font-size:12px;color:#86efac;font-weight:600;margin-bottom:6px;">Volume risposta TTS</label>
       <div style="display:flex;align-items:center;gap:10px;">
@@ -3036,17 +3371,54 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </ul>
     <p style="margin:0 0 8px;">G1 Talk Module — assistente vocale per Unitree G1.</p>
     <p class="hint" style="margin:0 0 16px;">Menu: <strong>Soundboard</strong>, <strong>Tempi</strong>, <strong>Parla</strong>, <strong>Knowledge</strong>, <strong>Dispositivi</strong>, <strong>Robot</strong> (joystick + gesti G1 verso <code>192.168.123.161</code> da <code>.env</code>). Guida in cima alla pagina.</p>
-    <p style="margin:0 0 8px;font-size:14px;"><b>Da telefono (stessa rete WiFi del server):</b></p>
-    <p class="hint" style="margin:0 0 8px;">Nessun bridge. Apri (HTTPS per microfono):</p>
-    <a href="http://192.168.10.191:8080/client" style="display:inline-block;padding:12px 18px;background:#14b8a6;color:#0c0e14;border-radius:10px;text-decoration:none;font-weight:600;font-size:15px;margin-bottom:4px;">192.168.10.191:8080/client</a>
-    <p class="hint" style="margin:0 0 12px;font-size:11px;">Reindirizza a HTTPS. Al primo accesso: Avanzate → Procedi.</p>
-    <p style="margin:0 0 6px;font-size:13px;"><b>Da PC (rete diversa):</b></p>
+    <p style="margin:0 0 8px;font-size:14px;"><b>Da telefono o PC (stessa rete del router / WiFi robot):</b></p>
+    <p class="hint" style="margin:0 0 8px;">Apri questo link (HTTPS — necessario per il microfono):</p>
+    <a id="infoClientUrl" href="/client" style="display:inline-block;padding:12px 18px;background:#14b8a6;color:#0c0e14;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;margin-bottom:6px;word-break:break-all;"></a>
+    <p class="hint" style="margin:0 0 8px;font-size:11px;">Occhi robot: <a id="infoOcchiUrl" href="/client#occhi" style="color:#5eead4;">client#occhi</a> · Dashboard: <a id="infoDashUrl" href="/dashboard/" style="color:#5eead4;">/dashboard/</a></p>
+    <p class="hint" style="margin:0 0 8px;font-size:11px;">Alternativa HTTP (reindirizza a HTTPS): <span id="infoHttpUrls" style="color:#a1a1aa;">—</span></p>
+    <p class="hint" style="margin:0 0 12px;font-size:11px;">Al primo accesso: <strong>Avanzate → Procedi</strong> (certificato locale). IP Jetson: <code id="infoJetsonIps">—</code></p>
+    <button type="button" onclick="window.g1RefreshLanLinks && g1RefreshLanLinks()" style="padding:8px 14px;background:rgba(255,255,255,0.08);color:#e4e4e7;border:1px solid rgba(255,255,255,0.12);border-radius:8px;cursor:pointer;font-size:12px;margin-bottom:12px;">Aggiorna indirizzi rete</button>
+    <p style="margin:0 0 6px;font-size:13px;"><b>Da PC (rete diversa dal robot):</b></p>
     <p class="hint" style="margin:0;font-size:12px;">Tunnel SSH poi localhost:8081/client</p>
   </div>
     </section>
+    <section id="section-log" class="section">
+      <h2 style="font-size:1.2rem;margin:0 0 8px;">Log Jetson</h2>
+      <p class="hint" style="margin:0 0 10px;font-size:12px;">Ultime righe di <code>/tmp/talk.log</code> (server, camera, errori). Si aggiorna da solo mentre sei su questa scheda.</p>
+      <div class="client-cam-btns" style="margin-top:0;margin-bottom:8px;">
+        <button type="button" class="primary" onclick="window.g1ClientLogRefresh && g1ClientLogRefresh()">Aggiorna ora</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#9ca3af;">
+          <input type="checkbox" id="clientLogAuto" checked style="accent-color:#14b8a6;" /> Auto (3s)
+        </label>
+      </div>
+      <pre id="clientLogBox" class="client-log-box">Caricamento log…</pre>
+    </section>
+    <section id="section-occhi" class="section">
+      <h2 style="font-size:1.2rem;margin:0 0 8px;">Occhi robot (RealSense)</h2>
+      <p class="hint" style="margin:0 0 12px;font-size:12px;">Stream live dalla camera sulla testa del G1. YOLO rileva persone, tavoli, ecc.; con RealSense mostra anche la distanza (depth) su ogni box.</p>
+      <div class="client-camera-wrap">
+        <img id="clientCamStream" alt="Occhi robot G1" />
+        <div id="clientCamPlaceholder" class="client-camera-placeholder">Stream non attivo — premi Avvia</div>
+      </div>
+      <div class="client-cam-meta">
+        <span class="lbl">Camera</span><span class="val" id="clientCamStatus">--</span>
+        <span class="lbl">YOLO</span><span class="val" id="clientCamYolo">--</span>
+        <span class="lbl">FPS</span><span class="val" id="clientCamFps">--</span>
+        <span class="lbl">Backend</span><span class="val" id="clientCamBackend">--</span>
+      </div>
+      <div class="client-cam-dets" id="clientCamDets">Nessun oggetto rilevato</div>
+      <div class="client-cam-btns">
+        <button type="button" class="primary" id="clientCamBtnStart">Avvia stream</button>
+        <button type="button" id="clientCamBtnStop">Ferma</button>
+        <button type="button" id="clientCamBtnRefresh">Aggiorna</button>
+        <button type="button" id="clientPickOnBtn" onclick="window.g1ClientPickSet(true)" style="border-color:#14b8a6;color:#5eead4;">Auto-pick ON</button>
+        <button type="button" id="clientPickOffBtn" onclick="window.g1ClientPickSet(false)">Auto-pick OFF</button>
+      </div>
+      <div class="hint" id="clientPickStatus" style="margin-top:8px;font-size:11px;color:#71717a;">Auto-pick: —</div>
+    </section>
     <section id="section-robot" class="section">
       <h2 style="font-size:1.2rem;margin:0 0 8px;">Robot G1 — Sport mode</h2>
-      <p class="hint" style="margin:0 0 12px;font-size:12px;">Joystick e gesti braccia: comandi al robot (default IP <code>192.168.123.161</code>, modificabile sotto). Il robot deve essere in sport mode (telecomando).</p>
+      <p class="hint" style="margin:0 0 12px;font-size:12px;">Joystick e gesti braccia: comandi al robot (default IP <code>192.168.123.161</code>, modificabile sotto). Sport mode (L1+A sul telecomando), poi <strong>Ready</strong>. Se un gesto a due braccia muove solo il DX, controlla il log sotto (deve mostrare l'id corretto) e prova <strong>Rilascia braccia</strong> prima.</p>
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         <a href="/vr-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.4);color:#c4b5fd;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#x1F576; VR Control (Quest 3)</a>
         <a href="/robot-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);color:#a5b4fc;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#127918; Robot Control (fullscreen)</a>
@@ -3055,7 +3427,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </section>
   </main>
   <header class="header">
-    <button type="button" class="hamburger" id="hamburger" aria-label="Menu">&#9776;</button>
+    <button type="button" class="hamburger" id="hamburger" aria-label="Menu" aria-expanded="false" onclick="return window.g1ToggleDrawer && window.g1ToggleDrawer(event)">&#9776;</button>
     <h1>G1 Talk</h1>
   </header>
 
@@ -3089,36 +3461,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       return btoa(binary);
     }
     (function(){
-      var sidebar = document.getElementById('sidebar');
       var overlay = document.getElementById('overlay');
-      var hamburger = document.getElementById('hamburger');
-      function openMenu(){ if(sidebar) sidebar.classList.add('open'); if(overlay) overlay.classList.add('visible'); }
-      function closeMenu(){ if(sidebar) sidebar.classList.remove('open'); if(overlay) overlay.classList.remove('visible'); }
-      function toggleMenu(){ if(sidebar && sidebar.classList.contains('open')) closeMenu(); else openMenu(); }
-      if(hamburger){
-        var lastHb = 0;
-        hamburger.addEventListener('touchend', function(e){
-          e.preventDefault();
-          lastHb = Date.now();
-          toggleMenu();
-        }, {passive:false});
-        hamburger.addEventListener('click', function(e){
-          e.preventDefault();
-          if(Date.now() - lastHb < 450) return;
-          toggleMenu();
-        });
-      }
-      if(overlay) overlay.addEventListener('click', function(e){ e.preventDefault(); closeMenu(); });
+      if (overlay) overlay.addEventListener('click', function(e){ e.preventDefault(); if (window.g1CloseDrawer) window.g1CloseDrawer(); });
       var navLinks = document.querySelectorAll('.sidebar nav a');
       for (var ai = 0; ai < navLinks.length; ai++) {
         navLinks[ai].addEventListener('click', function(e){
           e.preventDefault();
           var sec = this.getAttribute('data-section');
-          if (sec && typeof window.g1ActivateClientSection === 'function') window.g1ActivateClientSection(sec);
+          if (sec && window.g1ActivateClientSection) window.g1ActivateClientSection(sec);
         });
       }
-      closeMenu();
-      document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') closeMenu(); });
+      if (window.g1CloseDrawer) window.g1CloseDrawer();
     })();
     (function(){
       const g = document.getElementById('guideUrl');
@@ -3126,6 +3479,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     })();
     const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
     const wsParlaUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/parla';
+    var btn = null;
+    let _loadDevicesSeq = 0;
+    let _micPermissionGranted = false;
     let wsParla = null;
     let recordingServerJetson = false;
     const MAX_REC_SEC = 20;
@@ -3144,7 +3500,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const micSel = document.getElementById('mic');
       const val = micSel ? micSel.value : '';
       const opt = micSel ? micSel.options[micSel.selectedIndex] : null;
-      const name = opt ? opt.textContent : '';
+      const name = (opt && opt.textContent) ? String(opt.textContent).trim() : '';
       const isLocal = val && String(val).indexOf('local_') === 0;
       const isBrowser = val && String(val).indexOf('webmic_') === 0;
       const wt = document.getElementById('wakeListenToggle');
@@ -3152,15 +3508,19 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (isLocal) {
         dot.style.background = listening ? '#22c55e' : '#14b8a6';
         dot.style.boxShadow = listening ? '0 0 6px #22c55e' : 'none';
-        lbl.innerHTML = '<strong style="color:#2dd4bf;">Jetson USB</strong> — ' + escapeHtmlDevices(name) + (listening ? ' <span style="color:#22c55e;">(ascolto attivo)</span>' : '');
+        lbl.innerHTML = 'Microfono: <strong style="color:#2dd4bf;">' + escapeHtmlDevices(name || 'Jetson USB') + '</strong>' + (listening ? ' <span style="color:#22c55e;">(ascolto attivo)</span>' : '');
       } else if (isBrowser) {
         dot.style.background = listening ? '#22c55e' : '#3b82f6';
         dot.style.boxShadow = listening ? '0 0 6px #22c55e' : 'none';
-        lbl.innerHTML = '<strong style="color:#60a5fa;">Browser</strong> — ' + escapeHtmlDevices(name) + (listening ? ' <span style="color:#22c55e;">(ascolto attivo)</span>' : '');
+        lbl.innerHTML = 'Microfono: <strong style="color:#60a5fa;">' + escapeHtmlDevices(name || 'Browser') + '</strong>' + (listening ? ' <span style="color:#22c55e;">(ascolto attivo)</span>' : '');
+      } else if (name && name !== 'Caricamento...' && name !== 'Nessun microfono browser') {
+        dot.style.background = '#71717a';
+        dot.style.boxShadow = 'none';
+        lbl.innerHTML = 'Microfono: <strong style="color:#e4e4e7;">' + escapeHtmlDevices(name) + '</strong>';
       } else {
         dot.style.background = '#71717a';
         dot.style.boxShadow = 'none';
-        lbl.innerHTML = '<span style="color:#71717a;">Nessun microfono selezionato</span>';
+        lbl.innerHTML = '<span style="color:#71717a;">Microfono: attivazione…</span>';
       }
     }
     function micForBrowserCapture(){
@@ -3363,15 +3723,16 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (m) { m.style.display = 'block'; m.textContent = 'Microfono non disponibile: consenti l\\'accesso (Dispositivi) e riprova.'; }
       });
     }
-    const WAKE_SLICE_MS = 4000;
-    const CMD_SLICE_MS  = 6000;
-    const CMD_TIMEOUT_MS = 12000;
+    const WAKE_SLICE_MS = 4500;
+    const CMD_SLICE_MS  = 12000;
+    const CMD_SILENCE_MS = 1500;
+    const CMD_TIMEOUT_MS = 45000;
     let _wakeSliceScheduled = false;
     let scheduleNextWakeSliceIfListening = function(){};
     /** Coda riproduzione TTS: evita che due risposte MP3 si sovrappongano. */
     let ttsPlaybackQueue = [];
     let ttsPlaybackBusy = false;
-    const TTS_BEFORE_PLAY_GAP_MS = 180;
+    const TTS_BEFORE_PLAY_GAP_MS = 60;
     /**
      * Uscita browser: solo se esplicita (Soundboard «Riproduci su» o altoparlante Browser non-Predefinito).
      * Se null → niente setSinkId: il sistema sceglie (su Android spesso la cassa BT se è l’uscita media predefinita).
@@ -3770,9 +4131,43 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         wakeDiscardCurrentSlice = true;
         try { if (wakeActiveMr.state !== 'inactive') wakeActiveMr.stop(); } catch(_){}
       }
-      var wst = document.getElementById('wakeListenStatus');
-      if (wst && document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked)
-        wst.textContent = 'In ascolto per \u00abHey G1\u00bb\u2026';
+    }
+    /** Dopo la risposta vocale: spegne «Hey G1 continuo» (solo se l'utente vuole stop esplicito). */
+    function disableWakeListenAfterResponse(){
+      var el = document.getElementById('wakeListenToggle');
+      var wtl = document.getElementById('wakeToggleLabel');
+      var st = document.getElementById('wakeListenStatus');
+      if (el && el.checked) {
+        el.checked = false;
+        if (wtl) wtl.textContent = 'OFF';
+      }
+      stopWakeRecorder();
+      resetWakeCommandMode();
+      if (st) st.textContent = 'Ascolto disattivato — riattiva «Hey G1 continuo» per parlare di nuovo';
+      wakeLog('Risposta finita: ascolto disattivato', '#71717a');
+      updateActiveMicIndicator();
+    }
+    function clearWakePipelineLock(){
+      wakeAudioInFlight = false;
+      wakeListenPending = false;
+      if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
+    }
+    /** Dopo TTS: resta in ascolto per domande successive (presentazione / dialogo). */
+    function resumeWakeListenAfterResponse(){
+      clearWakePipelineLock();
+      wakeQueuedBlob = null;
+      wakeDiscardCurrentSlice = false;
+      _wakeDropSlicesAfterTts = 0;
+      setRobotLed('listening');
+      var el = document.getElementById('wakeListenToggle');
+      var st = document.getElementById('wakeListenStatus');
+      if (!el || !el.checked) return;
+      wakeCommandMode = true;
+      startWakeCommandIdleTimer();
+      if (st) st.textContent = "Ti ascolto\u2026 puoi fare un'altra domanda.";
+      setTimeout(function(){ startListeningHum(); }, 250);
+      scheduleNextWakeSliceIfListening();
+      wakeLog('Pronto per altra domanda', '#14b8a6');
     }
     function startWakeCommandIdleTimer(){
       if (wakeCommandIdleTimer) clearTimeout(wakeCommandIdleTimer);
@@ -3831,25 +4226,28 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         } catch(__){ wakeAnalyser = null; }
       }
     }
-    var WAKE_POST_TTS_PAUSE_MS = 1000;
+    var WAKE_POST_TTS_PAUSE_MS = 350;
     var _wakeDropSlicesAfterTts = 0;
     function setRobotLed(state){
       try { fetch('/api/led', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({state:state})}); } catch(e){}
     }
     function onWakeResponseDone(){
-      if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
-      wakeAudioInFlight = false;
-      wakeQueuedBlob = null;
-      wakeDiscardCurrentSlice = false;
-      _wakeDropSlicesAfterTts = 0;
-      setRobotLed('idle');
       setTimeout(function(){
-        wakeDiscardCurrentSlice = false;
-        setRobotLed('listening');
-        scheduleNextWakeSliceIfListening();
+        resumeWakeListenAfterResponse();
       }, WAKE_POST_TTS_PAUSE_MS);
     }
     let wakeResponseTimeout = null;
+    function ttsDestFromUi() {
+      const ttsEl = document.getElementById('ttsPlayDest');
+      const wantServer = ttsEl && ttsEl.value === 'server';
+      if (wantServer) {
+        return {
+          playOn: 'server',
+          deviceId: (serverTtsDeviceId !== null && !isNaN(serverTtsDeviceId)) ? serverTtsDeviceId : null
+        };
+      }
+      return { playOn: 'browser', deviceId: null };
+    }
     function trySendWakeChunk(blob, skipWakeForBlob){
       if (!blob || blob.size < WS_AUDIO_MIN_BYTES) { scheduleNextWakeSliceIfListening(); return; }
       if (!document.getElementById('wakeListenToggle').checked) return;
@@ -3877,7 +4275,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         const b64 = arrayBufferToBase64(fr.result);
         try {
           if (sk) { stopListeningHum(); playStopChime(); startThinkingFeedback(); }
-          sendAudioOverWs(b64, wakeMimeType, { playOn: 'browser', skipWake: sk });
+          const td = ttsDestFromUi();
+          lastPlayOn = td.playOn;
+          sendAudioOverWs(b64, wakeMimeType, { playOn: td.playOn, skipWake: sk, deviceId: td.deviceId });
         } catch(_){
           wakeListenPending = false;
           wakeAudioInFlight = false;
@@ -3992,19 +4392,22 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             if (d.wake_ack) {
               if (listenServerWakeLatched) return;
               listenServerWakeLatched = true;
-              playWakeChime();
+              if (d.response && String(d.response).trim()) {
+                var resEl = document.getElementById('result');
+                if (resEl) resEl.innerHTML = '<div class="ok"><strong>Tu:</strong> ' + (d.text||'').replace(/</g,'&lt;') + '<br><strong>G1:</strong> ' + (d.response||'').replace(/</g,'&lt;') + '</div>';
+              } else {
+                playWakeChime();
+              }
               if (st) st.textContent = 'Dì Hey G1 + domanda';
-              if (d.audio_base64) { enqueueTtsPlayback(d.audio_base64, function(){ if (st) st.textContent = 'In ascolto per «Hey G1» (mic Jetson)…'; }); }
               return;
             }
             listenServerWakeLatched = false;
             if (d.response) {
               var resEl = document.getElementById('result');
               if (resEl) resEl.innerHTML = '<div class="ok"><strong>Tu:</strong> ' + (d.text||'').replace(/</g,'&lt;') + '<br><strong>G1:</strong> ' + (d.response||'').replace(/</g,'&lt;') + '</div>';
+              if (st) st.textContent = 'In ascolto per «Hey G1»…';
             }
-            if (d.audio_base64) {
-              enqueueTtsPlayback(d.audio_base64, function(){ if (st) st.textContent = 'In ascolto per «Hey G1» (mic Jetson)…'; });
-            }
+            /* Risposta TTS: solo sul robot (ws/listen), non sul browser. */
           }
         } catch(_){}
       };
@@ -4094,7 +4497,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             if (s > wakeSlicePeak) wakeSlicePeak = s;
             const th = getWakeVoiceThreshold();
             if (s >= th) { voiceDurationMs += 50; lastVoiceTs = Date.now(); }
-            if (isCmd && voiceDurationMs >= 500 && lastVoiceTs > 0 && (Date.now() - lastVoiceTs >= 1500)) {
+            if (isCmd && voiceDurationMs >= 500 && lastVoiceTs > 0 && (Date.now() - lastVoiceTs >= CMD_SILENCE_MS)) {
               stopMr();
             }
           }, 50);
@@ -4160,17 +4563,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       document.getElementById('secureWarnMobile').style.display = isMobile ? 'block' : 'none';
       document.getElementById('secureWarnDesktop').style.display = isMobile ? 'none' : 'block';
-      document.getElementById('hintAccess').style.display = 'none';
-      document.getElementById('allowWrap').style.display = 'none';
-      document.getElementById('devicesWrap').style.display = 'none';
-      document.getElementById('secureWarnMore').onclick = (e)=>{ e.preventDefault(); const d=document.getElementById('secureWarnDetails'); d.style.display = d.style.display==='none' ? 'block' : 'none'; };
+      var _ha = document.getElementById('hintAccess'); if (_ha) _ha.style.display = 'none';
+      var _aw = document.getElementById('allowWrap'); if (_aw) _aw.style.display = 'none';
+      var _dw = document.getElementById('devicesWrap'); if (_dw) _dw.style.display = 'none';
+      var _swm = document.getElementById('secureWarnMore');
+      if (_swm) _swm.onclick = (e)=>{ e.preventDefault(); const d=document.getElementById('secureWarnDetails'); d.style.display = d.style.display==='none' ? 'block' : 'none'; };
     }
     if (!navigator.mediaDevices) {
       document.getElementById('secureContextWarn').style.display = 'block';
-      document.getElementById('hintAccess').style.display = 'none';
-      document.getElementById('allowWrap').style.display = 'none';
-      document.getElementById('devicesWrap').style.display = 'none';
-      var _b = document.getElementById('btn'); if (_b) _b.disabled = true;
+      var _ha2 = document.getElementById('hintAccess'); if (_ha2) _ha2.style.display = 'none';
+      var _aw2 = document.getElementById('allowWrap'); if (_aw2) _aw2.style.display = 'none';
+      var _dw2 = document.getElementById('devicesWrap'); if (_dw2) _dw2.style.display = 'none';
       document.getElementById('recStatus').style.display = 'none';
       document.getElementById('result').innerHTML = '';
     }
@@ -4194,14 +4597,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if(d.type==='response'){
         stopThinkingFeedback();
         const r = d.data;
-        let deferWakeDone = false;
+        let resumeWakeListen = false;
         try {
           if (wakeListenPending) {
             wakeListenPending = false;
             if (r.wake_miss) {
+              wakeAudioInFlight = false;
+              if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
               var sttTxt = String(r.text||'').trim();
               wakeLog(sttTxt ? 'STT: "'+sttTxt+'" \u2192 miss (no wake word)' : 'silenzio / no speech', '#71717a');
               if (btn) btn.disabled = false;
+              resumeWakeListen = true;
               return;
             }
             if (r.wake_cmd_inline) {
@@ -4214,8 +4620,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               playWakeChime();
             }
             if (r.wake_ack) {
+              clearWakePipelineLock();
               if (wakeCommandMode) {
-                wakeListenPending = false;
                 if (btn) btn.disabled = false;
                 return;
               }
@@ -4226,8 +4632,26 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               if (wakeActiveMr) {
                 try { if (wakeActiveMr.state !== 'inactive') wakeActiveMr.stop(); } catch(_){}
               }
-              wakeLog('WAKE! Ti ascolto\u2026', '#22c55e');
-              playWakeChime();
+              if (r.response && String(r.response).trim()) {
+                wakeLog('WAKE: ' + String(r.response), '#22c55e');
+                document.getElementById('result').innerHTML = '<div><b>Hai detto:</b> '+(r.text||'')+'</div><div><b>Risposta:</b> '+(r.response||'')+'</div>';
+                var ackHasTts = lastPlayOn === 'browser' && r.audio_base64 && String(r.audio_base64).length > 50;
+                if (ackHasTts) {
+                  enqueueTtsPlayback(r.audio_base64, function(){
+                    wakeCommandMode = true;
+                    startWakeCommandIdleTimer();
+                    var wst = document.getElementById('wakeListenStatus');
+                    if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
+                    setTimeout(function(){ startListeningHum(); }, 250);
+                    scheduleNextWakeSliceIfListening();
+                  });
+                  if (btn) btn.disabled = false;
+                  return;
+                }
+              } else {
+                wakeLog('WAKE! Ti ascolto\u2026', '#22c55e');
+                playWakeChime();
+              }
               wakeCommandMode = true;
               startWakeCommandIdleTimer();
               if (btn) btn.disabled = false;
@@ -4238,11 +4662,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               return;
             }
             if (!r.response && r.message) {
+              clearWakePipelineLock();
               wakeLog('msg: '+r.message, '#f59e0b');
               const wst = document.getElementById('wakeListenStatus');
               if (wst) wst.textContent = wakeCommandMode ? 'Ti ascolto\u2026' : 'In ascolto per \u00abHey G1\u00bb\u2026';
               document.getElementById('result').innerHTML = '<div class="warn">'+r.message+'</div>';
               if (btn) btn.disabled = false;
+              resumeWakeListen = true;
               return;
             }
             if (r.text) wakeLog('CMD: "'+String(r.text||'')+'" \u2192 risposta', '#14b8a6');
@@ -4255,16 +4681,25 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           const dur = r.duration_ms ? ' <span style="color:#71717a;font-size:12px;">('+r.duration_ms+' ms)</span>' : '';
           document.getElementById('result').innerHTML = msg + '<div><b>Hai detto:</b> '+(r.text||'')+'</div><div><b>Risposta:</b> '+(r.response||'')+dur+'</div>';
           const hasTts = lastPlayOn === 'browser' && r.audio_base64 && String(r.audio_base64).length > 50;
-          if (hasTts) {
-            deferWakeDone = true;
-            enqueueTtsPlayback(r.audio_base64, onWakeResponseDone);
-          }
-          if (wakeCommandMode) {
-            resetWakeCommandMode();
-            wakeLog('Comando completato, torno in ascolto wake', '#71717a');
+          const hasServerTts = lastPlayOn === 'server' && r.response && String(r.response).trim().length > 0;
+          if (r.response && String(r.response).trim()) {
+            if (hasTts) {
+              enqueueTtsPlayback(r.audio_base64, onWakeResponseDone);
+            } else if (hasServerTts) {
+              setTimeout(onWakeResponseDone, 1200);
+            } else {
+              onWakeResponseDone();
+            }
+          } else {
+            wakeAudioInFlight = false;
+            if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
           }
         } finally {
-          if (!deferWakeDone) onWakeResponseDone();
+          if (resumeWakeListen) {
+            wakeDiscardCurrentSlice = false;
+            setRobotLed('listening');
+            scheduleNextWakeSliceIfListening();
+          }
         }
       } else if(d.type==='wake_chime'){
         if (!wakeCommandMode) { playWakeChime(); wakeLog('Hey G1 rilevato, elaboro...', '#22c55e'); }
@@ -4352,21 +4787,25 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         document.getElementById('result').innerHTML = '<div class="warn">Invio start fallito.</div>';
       }
     }
-    connect();
+    /* connect() dopo init UI — vedi fine script */
     (function loadServerTtsConfig(){
       fetch('/api/config').then(function(r){ return r.json(); }).then(function(cfg){
+        var mic = cfg && cfg.microphone;
+        var micIsBrowser = mic && mic.type === 'network' && mic.value && mic.value !== 'web_wait';
         var sp = cfg && cfg.speaker;
         var hasLocalSpk = sp && sp.type === 'local' && (sp.device_id !== undefined && sp.device_id !== null && sp.device_id !== '');
-        if (hasLocalSpk) {
+        var tts = document.getElementById('ttsPlayDest');
+        if (micIsBrowser && tts) {
+          tts.value = 'browser';
+        } else if (hasLocalSpk) {
           serverTtsDeviceId = parseInt(sp.device_id, 10);
-          var tts = document.getElementById('ttsPlayDest');
           if (tts && !isNaN(serverTtsDeviceId)) tts.value = 'server';
           var sb = document.getElementById('sbPlayDest');
           if (sb && !isNaN(serverTtsDeviceId)) sb.value = 'server';
         } else {
-          /* Senza cassa Jetson salvata in setup, la play API server fallisce: default su browser. */
           var sb0 = document.getElementById('sbPlayDest');
           if (sb0) { sb0.value = 'browser'; }
+          if (tts) tts.value = 'browser';
         }
         var wrap = document.getElementById('ttsOutputWrap');
         if (wrap) wrap.style.display = 'block';
@@ -4374,133 +4813,224 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }).catch(function(){});
     })();
 
-    async function requestAndLoadDevices(){
-      if (!navigator.mediaDevices) return;
-      const statusEl = document.getElementById('deviceStatus');
-      const allowWrap = document.getElementById('allowWrap');
-      statusEl.textContent = 'Richiesta permesso...';
+    async function ensureMicPermissionForEnumerate(){
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+      if (_micPermissionGranted) return true;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-        stream.getTracks().forEach(t => t.stop());
-        allowWrap.style.display = 'none';
-        await loadDevices();
-      } catch(e) {
-        allowWrap.style.display = 'block';
-        statusEl.textContent = "Accesso negato. Clicca il pulsante sopra e scegli Consenti. Se hai bloccato: apri impostazioni sito (lucchetto) e resetta permessi microfono.";
-        loadDevices();
+        if (navigator.permissions && navigator.permissions.query) {
+          var pst = await navigator.permissions.query({ name: 'microphone' });
+          if (pst.state === 'granted') {
+            _micPermissionGranted = true;
+            return true;
+          }
+          if (pst.state === 'denied') return false;
+        }
+      } catch(_){}
+      try {
+        var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(function(t){ t.stop(); });
+        _micPermissionGranted = true;
+        return true;
+      } catch(_) {
+        return false;
       }
     }
 
-    async function loadDevices(){
+    function preferBrowserMicOnClient(){
+      var micSel = document.getElementById('mic');
+      if (!micSel || !micSel.options || !micSel.options.length) return;
+      var pick = -1;
+      for (var i = 0; i < micSel.options.length; i++) {
+        var v = micSel.options[i].value;
+        if (v && v.indexOf('webmic_') === 0 && v.length > 7) {
+          var txt = (micSel.options[i].textContent || '').toLowerCase();
+          if (txt.indexOf('realsense') >= 0) { pick = i; break; }
+          if (pick < 0) pick = i;
+        }
+      }
+      if (pick >= 0) {
+        micSel.selectedIndex = pick;
+        updateActiveMicIndicator();
+        var st = document.getElementById('deviceStatus');
+        if (st) st.textContent = 'Microfono: ' + (micSel.options[pick].textContent || 'browser') + ' — premi Salva per memorizzarlo sul server.';
+        if (typeof startParlaMicPreviewIfEligible === 'function') setTimeout(startParlaMicPreviewIfEligible, 80);
+      }
+    }
+
+    async function requestAndLoadDevices(){
+      if (!navigator.mediaDevices) return;
+      const statusEl = document.getElementById('deviceStatus');
+      if (statusEl) statusEl.textContent = 'Microfono: attivazione…';
+      try {
+        var ok = await ensureMicPermissionForEnumerate();
+        if (!ok) throw new Error('permesso negato');
+        await loadDevices({ ensureMic: false, preferBrowser: true });
+      } catch(e) {
+        if (statusEl) statusEl.textContent = 'Microfono: permesso negato — abilita il mic per questo sito nelle impostazioni browser.';
+        await loadDevices({ ensureMic: false, preferBrowser: false });
+        updateActiveMicIndicator();
+      }
+    }
+    window.initClientMic = requestAndLoadDevices;
+
+    function applyMicListToUi(micSel, spkSel, serverData, mics, spks, seq){
+      const sm = (serverData.microphones || []).filter(function(m){
+        return m && (m.type === 'local' || (m.value && String(m.value).indexOf('local_') === 0));
+      });
+      const netm = (serverData.microphones || []).filter(function(m){
+        return m && m.type === 'network' && m.value && m.value !== 'web_wait';
+      });
+      let micHtml = '';
+      function attrEsc(v){ return String(v||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;'); }
+      if (sm.length) {
+        micHtml += '<optgroup label="Jetson - server (PortAudio)">';
+        sm.forEach(function(m){ micHtml += '<option value="'+attrEsc(m.value)+'">'+escapeHtmlDevices(m.name)+'</option>'; });
+        micHtml += '</optgroup>';
+      }
+      if (netm.length) {
+        micHtml += '<optgroup label="Client rete">';
+        netm.forEach(function(m){ micHtml += '<option value="'+attrEsc(m.value)+'">'+escapeHtmlDevices(m.name)+'</option>'; });
+        micHtml += '</optgroup>';
+      }
+      micHtml += '<optgroup label="Browser - questo dispositivo">';
+      if (mics.length === 0) micHtml += '<option value="">Nessun microfono browser</option>';
+      else mics.forEach(function(m,i){
+        const lab = m.label || ('Microfono '+(i+1));
+        micHtml += '<option value="webmic_'+encodeURIComponent(m.deviceId)+'">'+escapeHtmlDevices(lab)+'</option>';
+      });
+      micHtml += '</optgroup>';
+      if (seq !== _loadDevicesSeq) return false;
+      micSel.innerHTML = micHtml;
+      micSel.onchange = function(){
+        updateActiveMicIndicator();
+        autoSaveMicConfigFromUi();
+        setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 80);
+      };
+
+      const ss = (serverData.speakers || []).filter(function(s){
+        return s && (s.type === 'local' || (s.value && String(s.value).indexOf('local_') === 0));
+      });
+      const nets = (serverData.speakers || []).filter(function(s){
+        return s && s.type === 'network' && s.value && s.value !== 'web_wait';
+      });
+      spkSel.innerHTML = '';
+      function optLabel(s, fb){ var n = (s && s.name) ? String(s.name) : ''; return n.trim() ? n : (fb || (s && s.value) || '?'); }
+      if (ss.length) {
+        const og = document.createElement('optgroup');
+        og.label = 'Jetson - server (cassa robot)';
+        ss.forEach(function(s){ og.appendChild(new Option(optLabel(s, 'Cassa Jetson'), s.value)); });
+        spkSel.appendChild(og);
+      }
+      if (nets.length) {
+        const og2 = document.createElement('optgroup');
+        og2.label = 'Client rete';
+        nets.forEach(function(s){ og2.appendChild(new Option(optLabel(s, 'Client rete'), s.value)); });
+        spkSel.appendChild(og2);
+      }
+      const ogB = document.createElement('optgroup');
+      ogB.label = 'Browser - telefono/PC';
+      if (spks.length === 0) ogB.appendChild(new Option('Predefinito', 'browser_default'));
+      else spks.forEach(function(s,i){ ogB.appendChild(new Option(s.label || ('Output '+(i+1)), 'browser_'+s.deviceId)); });
+      spkSel.appendChild(ogB);
+      spkSel.onchange = function(){
+        const v = spkSel.value;
+        lastSinkId = (v && v.indexOf('browser_') === 0 && v !== 'browser_default') ? v.replace(/^browser_/, '') : null;
+        syncSbOutputFromSpeaker();
+        updateActiveMicIndicator();
+      };
+      const sbOut = document.getElementById('sbOutput');
+      if (sbOut) {
+        sbOut.innerHTML = '<option value="default">Predefinito</option>' + spks.map(function(s,i){
+          return '<option value="'+s.deviceId+'">'+escapeHtmlDevices(s.label || ('Output '+(i+1)))+'</option>';
+        }).join('');
+        sbOut.onchange = function(){ syncSpeakerFromSbOutput(); updateActiveMicIndicator(); };
+      }
+      return true;
+    }
+
+    function autoSaveMicConfigFromUi(){
+      var micSel = document.getElementById('mic');
+      var spkSel = document.getElementById('speaker');
+      if (!micSel || !spkSel || !micSel.value) return;
+      var body = { microphone: buildMicCfgFromSelect(micSel.value), speaker: buildSpkCfgFromSelect(spkSel.value) };
+      fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(function(){});
+    }
+
+    function finishMicDeviceUi(micSel, spkSel, statusEl, mics, spks, serverData, seq){
+      preferBrowserMicOnClient();
+      updateActiveMicIndicator();
+      autoSaveMicConfigFromUi();
+      if (typeof startParlaMicPreviewIfEligible === 'function') setTimeout(startParlaMicPreviewIfEligible, 120);
+      const nJet = ((serverData.microphones || []).filter(function(m){ return m && String(m.value||'').indexOf('local_') === 0; }).length)
+        + ((serverData.speakers || []).filter(function(s){ return s && String(s.value||'').indexOf('local_') === 0; }).length);
+        if (statusEl) {
+          if (!_micPermissionGranted && mics.length === 0 && (isSecure || isLocalhost)) {
+            statusEl.textContent = "Microfono: consenti l'accesso nelle impostazioni del browser per questo sito.";
+          } else if (mics.length) {
+            var selOpt = micSel.options[micSel.selectedIndex];
+            statusEl.textContent = 'Microfono attivo: ' + ((selOpt && selOpt.textContent) ? selOpt.textContent.trim() : mics.length + ' device');
+          } else {
+            statusEl.textContent = nJet ? ('Jetson: '+nJet+' device · Browser: nessun mic') : ('Browser: nessun microfono rilevato');
+          }
+        }
+      fetch('/api/config').then(function(r){ return r.json(); }).then(function(cfg){
+        if (seq !== _loadDevicesSeq || !cfg || !micSel) return;
+        if (cfg.microphone && cfg.microphone.value) {
+          var mv = cfg.microphone.value;
+          if (cfg.microphone.type === 'network' && mv && mv !== 'web_wait' && mv.indexOf('local_') !== 0 && mv.indexOf('net_') !== 0) {
+            var found = false;
+            for (var i = 0; i < micSel.options.length; i++) {
+              var o = micSel.options[i];
+              if (o.value.indexOf('webmic_') === 0 && decodeURIComponent(o.value.slice(7)) === mv) { micSel.selectedIndex = i; found = true; break; }
+            }
+            if (!found) { try { micSel.value = 'webmic_'+encodeURIComponent(mv); } catch(_){} }
+          } else if (mv) { try { micSel.value = mv; } catch(_){} }
+        }
+        if (cfg.speaker && cfg.speaker.value) {
+          try { spkSel.value = cfg.speaker.value; } catch(_){}
+        }
+        var savedBrowserMic = cfg.microphone && cfg.microphone.type === 'network' && cfg.microphone.value && cfg.microphone.value !== 'web_wait' && String(cfg.microphone.value).indexOf('local_') !== 0;
+        var curMic = micSel.value || '';
+        if (curMic.indexOf('local_') === 0 || !savedBrowserMic) preferBrowserMicOnClient();
+        var vsp = spkSel.value;
+        lastSinkId = (vsp && vsp.indexOf('browser_') === 0 && vsp !== 'browser_default') ? vsp.replace(/^browser_/, '') : null;
+        syncSbOutputFromSpeaker();
+        updateActiveMicIndicator();
+      }).catch(function(){ updateActiveMicIndicator(); });
+    }
+
+    async function loadDevices(opts){
+      opts = opts || {};
       if (!navigator.mediaDevices) return;
       const micSel = document.getElementById('mic');
       const spkSel = document.getElementById('speaker');
       const statusEl = document.getElementById('deviceStatus');
+      if (!micSel || !spkSel) return;
+      var seq = ++_loadDevicesSeq;
+      if (opts.ensureMic !== false && (isSecure || isLocalhost)) {
+        var permOk = await ensureMicPermissionForEnumerate();
+        if (seq !== _loadDevicesSeq) return;
+      }
       let serverData = { microphones: [], speakers: [], hardware_probe: null };
       try {
-        const r = await fetch('/api/devices?all=1');
-        if (r.ok) serverData = await r.json();
+        var devs = await navigator.mediaDevices.enumerateDevices();
+        if (seq !== _loadDevicesSeq) return;
+        var mics = devs.filter(function(d){ return d.kind === 'audioinput' && d.deviceId; });
+        var spks = devs.filter(function(d){ return d.kind === 'audiooutput' && d.deviceId; });
+        try {
+          var r = await Promise.race([
+            fetch('/api/devices?all=1').then(function(resp){ return resp.ok ? resp.json() : serverData; }),
+            new Promise(function(resolve){ setTimeout(function(){ resolve(serverData); }, 4000); })
+          ]);
+          if (r && typeof r === 'object') serverData = r;
+        } catch(_) {}
+        if (seq !== _loadDevicesSeq) return;
         _serverDevicesCache.microphones = serverData.microphones || [];
         _serverDevicesCache.speakers = serverData.speakers || [];
         _serverDevicesCache.hardware_probe = serverData.hardware_probe || null;
         updateHwProbe(serverData.hardware_probe);
-      } catch(_) { updateHwProbe(null); }
-      try {
-        const devs = await navigator.mediaDevices.enumerateDevices();
-        const mics = devs.filter(function(d){ return d.kind === 'audioinput'; });
-        const spks = devs.filter(function(d){ return d.kind === 'audiooutput'; });
-        const sm = (serverData.microphones || []).filter(function(m){
-          return m && (m.type === 'local' || (m.value && String(m.value).indexOf('local_') === 0));
-        });
-        const netm = (serverData.microphones || []).filter(function(m){
-          return m && m.type === 'network' && m.value && m.value !== 'web_wait';
-        });
-        let micHtml = '';
-        function attrEsc(v){ return String(v||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;'); }
-        if (sm.length) {
-          micHtml += '<optgroup label="Jetson - server (PortAudio)">';
-          sm.forEach(function(m){ micHtml += '<option value="'+attrEsc(m.value)+'">'+escapeHtmlDevices(m.name)+'</option>'; });
-          micHtml += '</optgroup>';
-        }
-        if (netm.length) {
-          micHtml += '<optgroup label="Client rete">';
-          netm.forEach(function(m){ micHtml += '<option value="'+attrEsc(m.value)+'">'+escapeHtmlDevices(m.name)+'</option>'; });
-          micHtml += '</optgroup>';
-        }
-        micHtml += '<optgroup label="Browser - questo dispositivo">';
-        if (mics.length === 0) micHtml += '<option value="">Nessun microfono browser</option>';
-        else mics.forEach(function(m,i){
-          const lab = m.label || ('Microfono '+(i+1));
-          micHtml += '<option value="webmic_'+encodeURIComponent(m.deviceId)+'">'+escapeHtmlDevices(lab)+'</option>';
-        });
-        micHtml += '</optgroup>';
-        micSel.innerHTML = micHtml;
-        micSel.onchange = function(){
-          updateActiveMicIndicator();
-          setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 80);
-        };
-
-        const ss = (serverData.speakers || []).filter(function(s){
-          return s && (s.type === 'local' || (s.value && String(s.value).indexOf('local_') === 0));
-        });
-        const nets = (serverData.speakers || []).filter(function(s){
-          return s && s.type === 'network' && s.value && s.value !== 'web_wait';
-        });
-        spkSel.innerHTML = '';
-        function optLabel(s, fb){ var n = (s && s.name) ? String(s.name) : ''; return n.trim() ? n : (fb || (s && s.value) || '?'); }
-        if (ss.length) {
-          const og = document.createElement('optgroup');
-          og.label = 'Jetson - server (cassa robot)';
-          ss.forEach(function(s){ og.appendChild(new Option(optLabel(s, 'Cassa Jetson'), s.value)); });
-          spkSel.appendChild(og);
-        }
-        if (nets.length) {
-          const og2 = document.createElement('optgroup');
-          og2.label = 'Client rete';
-          nets.forEach(function(s){ og2.appendChild(new Option(optLabel(s, 'Client rete'), s.value)); });
-          spkSel.appendChild(og2);
-        }
-        const ogB = document.createElement('optgroup');
-        ogB.label = 'Browser - telefono/PC';
-        if (spks.length === 0) ogB.appendChild(new Option('Predefinito', 'browser_default'));
-        else spks.forEach(function(s,i){ ogB.appendChild(new Option(s.label || ('Output '+(i+1)), 'browser_'+s.deviceId)); });
-        spkSel.appendChild(ogB);
-        spkSel.onchange = function(){
-          const v = spkSel.value;
-          lastSinkId = (v && v.indexOf('browser_') === 0 && v !== 'browser_default') ? v.replace(/^browser_/, '') : null;
-          syncSbOutputFromSpeaker();
-          updateActiveMicIndicator();
-        };
-        const sbOut = document.getElementById('sbOutput');
-        if (sbOut) {
-          sbOut.innerHTML = '<option value="default">Predefinito</option>' + spks.map(function(s,i){
-            return '<option value="'+s.deviceId+'">'+escapeHtmlDevices(s.label || ('Output '+(i+1)))+'</option>';
-          }).join('');
-          sbOut.onchange = function(){ syncSpeakerFromSbOutput(); updateActiveMicIndicator(); };
-        }
-        const nJet = sm.length + ss.length;
-        statusEl.textContent = nJet ? ('Jetson: '+sm.length+' mic, '+ss.length+' uscite · Browser: '+mics.length+'/'+spks.length) : ('Browser: '+mics.length+' mic · Server: nessun locale (controlla PortAudio sulla Jetson)');
-        fetch('/api/config').then(function(r){ return r.json(); }).then(function(cfg){
-          if (!cfg || !micSel) return;
-          if (cfg.microphone && cfg.microphone.value) {
-            var mv = cfg.microphone.value;
-            if (cfg.microphone.type === 'network' && mv && mv !== 'web_wait' && mv.indexOf('local_') !== 0 && mv.indexOf('net_') !== 0) {
-              var found = false;
-              for (var i = 0; i < micSel.options.length; i++) {
-                var o = micSel.options[i];
-                if (o.value.indexOf('webmic_') === 0 && decodeURIComponent(o.value.slice(7)) === mv) { micSel.selectedIndex = i; found = true; break; }
-              }
-              if (!found) { try { micSel.value = 'webmic_'+encodeURIComponent(mv); } catch(_){} }
-            } else if (mv) { try { micSel.value = mv; } catch(_){} }
-          }
-          if (cfg.speaker && cfg.speaker.value) {
-            try { spkSel.value = cfg.speaker.value; } catch(_){}
-          }
-          var vsp = spkSel.value;
-          lastSinkId = (vsp && vsp.indexOf('browser_') === 0 && vsp !== 'browser_default') ? vsp.replace(/^browser_/, '') : null;
-          syncSbOutputFromSpeaker();
-          updateActiveMicIndicator();
-        }).catch(function(){ updateActiveMicIndicator(); });
+        if (!applyMicListToUi(micSel, spkSel, serverData, mics, spks, seq)) return;
+        finishMicDeviceUi(micSel, spkSel, statusEl, mics, spks, serverData, seq);
       } catch(e) {
         micSel.innerHTML = '<option value="">Errore: '+escapeHtmlDevices(e.message)+'</option>';
         spkSel.innerHTML = '<option value="browser_default">Riproduci qui</option>';
@@ -4509,11 +5039,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           sbOut.innerHTML = '<option value="default">Predefinito</option>';
           sbOut.onchange = function(){ syncSpeakerFromSbOutput(); updateActiveMicIndicator(); };
         }
-        statusEl.textContent = 'Errore lettura dispositivi.';
+        if (statusEl) statusEl.textContent = 'Errore lettura dispositivi.';
+        updateActiveMicIndicator();
       }
     }
 
-    document.getElementById('btnAllow').onclick = () => { requestAndLoadDevices(); };
     (function bindDevicesPanel(){
       const dlf = document.getElementById('devicesLoadFull');
       if (dlf) dlf.onclick = function(){
@@ -4529,7 +5059,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       };
       const dr = document.getElementById('devicesRefresh');
       const ds = document.getElementById('devicesSave');
-      if (dr) dr.onclick = function(){ loadDevices(); };
+      if (dr) dr.onclick = function(){ requestAndLoadDevices(); };
       if (ds) ds.onclick = function(){
         const st = document.getElementById('devicesSaveStatus');
         const micVal = document.getElementById('mic').value;
@@ -4585,33 +5115,37 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
     })();
     if (navigator.mediaDevices) {
-      if (isLocalhost) {
-        loadDevices();
+      if (isLocalhost || isSecure) {
         requestAndLoadDevices();
-      } else if (isSecure) {
-        loadDevices();
-        requestAndLoadDevices();
+        try {
+          navigator.mediaDevices.addEventListener('devicechange', function(){
+            loadDevices({ ensureMic: false, preferBrowser: true });
+          });
+        } catch(_){}
       } else {
-        loadDevices();
+        loadDevices({ ensureMic: false, preferBrowser: false });
       }
-    } else {
-      loadDevices();
     }
 
     let knowledgeEntries = {};
     function renderKnowledge(){
       const el = document.getElementById('knowledgeList');
+      const cnt = document.getElementById('knowledgeCount');
+      var n = Object.keys(knowledgeEntries || {}).length;
+      if (cnt) cnt.textContent = n ? (n + ' voci sul server') : 'vuoto sul server';
       if (!el) return;
       el.innerHTML = Object.entries(knowledgeEntries).map(([k,v])=>'<div style="display:flex;align-items:center;gap:6px;margin:4px 0;font-size:12px;"><span style="color:#9ca3af;min-width:120px;">'+k.replace(/\u003c/g,'&lt;').replace(/&/g,'&amp;')+'</span><span style="color:#e8eaed;">'+(v.substring(0,40)+(v.length>40?'...':'')).replace(/\u003c/g,'&lt;').replace(/&/g,'&amp;')+'</span><button type="button" data-key="'+encodeURIComponent(k)+'" class="knowledgeDel" style="margin-left:auto;padding:2px 8px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:4px;cursor:pointer;font-size:11px;">Elimina</button></div>').join('') || '<span style="color:#71717a;">(vuoto)</span>';
       el.querySelectorAll('.knowledgeDel').forEach(btn=>{ btn.onclick=()=>{ delete knowledgeEntries[decodeURIComponent(btn.dataset.key||'')]; renderKnowledge(); }; });
     }
-    fetch('/api/knowledge').then(r=>r.json()).then(d=>{ knowledgeEntries = d.entries || {}; renderKnowledge(); }).catch(()=>{});
-    document.getElementById('knowledgeAdd').onclick = ()=>{
+    fetch('/api/knowledge').then(r=>r.json()).then(d=>{ knowledgeEntries = d.entries || {}; renderKnowledge(); }).catch(function(){ var c=document.getElementById('knowledgeCount'); if(c)c.textContent='errore caricamento'; });
+    var knowledgeAddEl = document.getElementById('knowledgeAdd');
+    if (knowledgeAddEl) knowledgeAddEl.onclick = function(){
       const p = (document.getElementById('knowledgePattern').value||'').trim();
       const r = (document.getElementById('knowledgeResponse').value||'').trim();
       if (p && r) { knowledgeEntries[p] = r; document.getElementById('knowledgePattern').value=''; document.getElementById('knowledgeResponse').value=''; renderKnowledge(); }
     };
-    document.getElementById('knowledgeSave').onclick = ()=>{
+    var knowledgeSaveEl = document.getElementById('knowledgeSave');
+    if (knowledgeSaveEl) knowledgeSaveEl.onclick = function(){
       fetch('/api/knowledge/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({entries:knowledgeEntries})})
         .then(r=>r.json()).then(d=>{ if(d.ok) document.getElementById('knowledgeSave').textContent='Salvato!'; else alert(d.error||'Errore'); })
         .catch(e=>alert('Errore: '+e.message));
@@ -4734,7 +5268,20 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     function sbApplyLitePayload(d){
       sbSetLoadErr('');
-      if (d && d.slots && d.slots.length) { soundboardSlots = d.slots; }
+      var n = (d && typeof d.slot_count === 'number' && d.slot_count > 0) ? d.slot_count : 20;
+      if (d && d.slots && d.slots.length) {
+        soundboardSlots = d.slots.slice();
+        while (soundboardSlots.length < n) {
+          var i = soundboardSlots.length;
+          soundboardSlots.push({ icon: sbIconAt(i), text: 'Comando '+(i+1), has_robot: false, has_clean: false });
+        }
+        var withAudio = soundboardSlots.filter(function(s){ return s.has_clean; }).length;
+        var hint = document.getElementById('soundboardLoadHint');
+        if (hint) hint.textContent = withAudio + ' slot con audio su ' + soundboardSlots.length + ' (dal Jetson)';
+      } else {
+        var hint2 = document.getElementById('soundboardLoadHint');
+        if (hint2) hint2.textContent = 'Nessuno slot dal server — controlla config/soundboard.json sul Jetson';
+      }
       if (typeof d.text_max_len === 'number' && d.text_max_len > 0) { sbTextMax = d.text_max_len; const mx = document.getElementById('sbModalCharMax'); if(mx) mx.textContent = sbTextMax; }
       renderSoundboard();
       const sbpd = document.getElementById('sbPlayDest');
@@ -4754,11 +5301,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     });
     renderSoundboard();
     sbLoadLiteSlots();
+    var sbReloadBtn = document.getElementById('sbReloadSlots');
+    if (sbReloadBtn) sbReloadBtn.addEventListener('click', function(){ sbLoadLiteSlots(); });
     (function(){
-      var prev = window.g1ActivateClientSection;
-      if (typeof prev !== 'function') return;
+      var baseNav = window.g1ActivateClientSection;
+      if (typeof baseNav !== 'function') return;
       window.g1ActivateClientSection = function(sec){
-        prev(sec);
+        baseNav(sec);
         if (sec === 'soundboard') {
           setTimeout(function(){
             if (!soundboardSlots.length) { sbLoadLiteSlots(); }
@@ -4766,9 +5315,25 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           }, 0);
         }
         if (sec === 'parla') {
-          setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 120);
+          setTimeout(function(){
+            if (typeof requestAndLoadDevices === 'function') requestAndLoadDevices();
+            if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible();
+          }, 120);
         } else {
           if (typeof stopParlaMicPreview === 'function') stopParlaMicPreview();
+        }
+        if (sec === 'occhi') {
+          setTimeout(function(){ if (typeof window.g1ClientCameraOnShow === 'function') window.g1ClientCameraOnShow(); }, 80);
+        } else if (typeof window.g1ClientCameraOnHide === 'function') {
+          window.g1ClientCameraOnHide();
+        }
+        if (sec === 'info' && typeof window.g1RefreshLanLinks === 'function') {
+          setTimeout(window.g1RefreshLanLinks, 0);
+        }
+        if (sec === 'log' && typeof window.g1ClientLogOnShow === 'function') {
+          setTimeout(window.g1ClientLogOnShow, 0);
+        } else if (typeof window.g1ClientLogOnHide === 'function') {
+          window.g1ClientLogOnHide();
         }
         return false;
       };
@@ -4820,6 +5385,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (st) st.innerHTML = 'Errore: '+(e.message||String(e));
       });
     }
+    window.editSoundboard = editSoundboard;
     var _sbLedColorMap = {
       'rainbow':'linear-gradient(90deg,red,orange,yellow,green,blue,violet)','breathe_blue':'#0078ff','breathe_green':'#00ff50',
       'breathe_red':'#ff2828','breathe_purple':'#a855f7','blink_red':'#ff0000','blink_blue':'#0064ff',
@@ -4838,8 +5404,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     const sbModalTextEl = document.getElementById('sbModalText');
     if (sbModalTextEl) { sbModalTextEl.oninput = updateSbCharCount; }
     function closeSbModal(){ document.getElementById('sbModal').style.display = 'none'; sbEditIdx = -1; sbEditAudio = null; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; }
-    document.getElementById('sbModalCancel').onclick = closeSbModal;
-    document.getElementById('sbModalSave').onclick = ()=>{
+    var sbModalCancelEl = document.getElementById('sbModalCancel');
+    if (sbModalCancelEl) sbModalCancelEl.onclick = closeSbModal;
+    var sbModalSaveEl = document.getElementById('sbModalSave');
+    if (sbModalSaveEl) sbModalSaveEl.onclick = function(){
       if (sbEditIdx < 0) return;
       const icon = (document.getElementById('sbModalIcon').value || '🎤').trim().substring(0,20);
       const text = (document.getElementById('sbModalText').value || 'Comando '+(sbEditIdx+1)).trim().substring(0, sbTextMax);
@@ -4850,7 +5418,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: '', format: sbEditFmtClean||'mp3', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco, led_effect, teaching_slot})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
     };
-    document.getElementById('sbModalSynth').onclick = async ()=>{
+    var sbModalSynthEl = document.getElementById('sbModalSynth');
+    if (sbModalSynthEl) sbModalSynthEl.onclick = async function(){
       const text = (document.getElementById('sbModalText').value||'').trim().substring(0, sbTextMax);
       if (!text) { alert('Scrivi il testo da sintetizzare'); return; }
       const btn = document.getElementById('sbModalSynth');
@@ -4868,7 +5437,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       } catch(e) { alert('Errore: '+e.message); }
       btn.disabled = false;
     };
-    document.getElementById('sbModalRecord').onclick = ()=>{
+    var sbModalRecordEl = document.getElementById('sbModalRecord');
+    if (sbModalRecordEl) sbModalRecordEl.onclick = function(){
       if (!navigator.mediaDevices) { alert('Microfono non disponibile'); return; }
       document.getElementById('sbModalRecord').disabled = true;
       document.getElementById('sbModalAudioStatus').innerHTML = 'Registrazione 3 sec...';
@@ -4892,9 +5462,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           fr.readAsArrayBuffer(blob);
         };
         mr.start(); setTimeout(()=>mr.stop(), 3000);
-      }).catch(()=>{ alert('Microfono non disponibile'); document.getElementById('sbModalRecord').disabled = false; });
+      }).catch(function(){ alert('Microfono non disponibile'); document.getElementById('sbModalRecord').disabled = false; });
     };
-    document.getElementById('sbModalFile').onchange = async (e)=>{
+    var _sbModalFile = document.getElementById('sbModalFile');
+    if (_sbModalFile) _sbModalFile.onchange = async function(e){
       const f = e.target.files && e.target.files[0];
       if (!f) return;
       const ext = (f.name.split('.').pop()||'').toLowerCase();
@@ -4908,8 +5479,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       updateSbModalStatus();
       e.target.value = '';
     };
-    document.getElementById('sbModalClear').onclick = ()=>{ sbEditAudio = null; sbEditFmt = ''; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; sbEditAudioRaw = null; updateSbModalStatus(); };
-    document.getElementById('sbModalTts').onclick = async ()=>{
+    var sbModalClearEl = document.getElementById('sbModalClear');
+    if (sbModalClearEl) sbModalClearEl.onclick = function(){ sbEditAudio = null; sbEditFmt = ''; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; sbEditAudioRaw = null; updateSbModalStatus(); };
+    var sbModalTtsEl = document.getElementById('sbModalTts');
+    if (sbModalTtsEl) sbModalTtsEl.onclick = async function(){
       if (!sbEditAudioClean || sbEditAudioClean.length < 100) { alert('Serve prima un audio (registra o importa)'); return; }
       const btn = document.getElementById('sbModalTts');
       btn.disabled = true;
@@ -4939,7 +5512,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         tb.innerHTML = rows.map((row,i)=>'<tr><td><input type="text" class="rs-fase" data-i="'+i+'" value="'+escAttr(row.fase)+'" /></td><td><input type="text" class="rs-att" value="'+escAttr(row.attivita)+'" /></td><td><input type="text" class="rs-ora" value="'+escAttr(row.ora_inizio)+'" /></td><td><input type="text" class="rs-dur" value="'+escAttr(row.durata_stimata)+'" /></td><td><input type="text" class="rs-note" value="'+escAttr(row.note)+'" /></td></tr>').join('');
       }).catch(()=>{});
     }
-    document.getElementById('runSheetSave').onclick = ()=>{
+    var runSheetSaveEl = document.getElementById('runSheetSave');
+    if (runSheetSaveEl) runSheetSaveEl.onclick = function(){
       const policy = (document.getElementById('runSheetPolicy').value||'').trim();
       const rows = [];
       document.querySelectorAll('#runSheetBody tr').forEach(tr=>{
@@ -4958,7 +5532,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     };
     loadRunSheet();
 
-    document.getElementById('btnTest').onclick = async () => {
+    var btnTestEl = document.getElementById('btnTest');
+    if (btnTestEl) btnTestEl.onclick = async function(){
       const btn = document.getElementById('btnTest');
       const status = document.getElementById('testStatus');
       btn.disabled = true;
@@ -4994,7 +5569,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       btn.disabled = false;
     };
 
-    document.getElementById('btnText').onclick = async () => {
+    var btnTextEl = document.getElementById('btnText');
+    if (btnTextEl) btnTextEl.onclick = async function(){
       const input = document.getElementById('textInput');
       const status = document.getElementById('textStatus');
       const txt = (input.value || '').trim();
@@ -5029,9 +5605,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       stopThinkingFeedback();
       document.getElementById('btnText').disabled = false;
     };
-    document.getElementById('textInput').onkeydown = (e) => { if (e.key === 'Enter') document.getElementById('btnText').click(); };
+    var _textInput = document.getElementById('textInput');
+    if (_textInput) _textInput.onkeydown = function(e) { if (e.key === 'Enter') { var b=document.getElementById('btnText'); if(b)b.click(); } };
 
-    document.getElementById('btnSample').onclick = async () => {
+    var btnSampleEl = document.getElementById('btnSample');
+    if (btnSampleEl) btnSampleEl.onclick = async function(){
       const btn = document.getElementById('btnSample');
       const status = document.getElementById('testStatus');
       btn.disabled = true;
@@ -5060,36 +5638,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       btn.disabled = false;
     };
 
-    const btn = document.getElementById('btn');
-    if (btn) {
-    function onRecStart(e){
-      if (e.pointerType === 'mouse' && e.button !== 0) return;
-      e.preventDefault();
-      if (!isRecording) startRec();
-      try {
-        if (e.pointerId != null && isRecording) btn.setPointerCapture(e.pointerId);
-      } catch (_) {}
-    }
-    function onRecStop(e){
-      if (!isRecording) return;
-      e.preventDefault();
-      stopRec();
-      try {
-        if (e.pointerId != null) btn.releasePointerCapture(e.pointerId);
-      } catch (_) {}
-    }
-    if (window.PointerEvent) {
-      btn.addEventListener('pointerdown', onRecStart);
-      btn.addEventListener('pointerup', onRecStop);
-      btn.addEventListener('pointercancel', onRecStop);
-    } else {
-      function onRecStartLegacy(ev){ ev.preventDefault(); if(!isRecording) startRec(); }
-      function onRecStopLegacy(ev){ if(!isRecording) return; ev.preventDefault(); stopRec(); }
-      btn.onmousedown = btn.ontouchstart = onRecStartLegacy;
-      btn.onmouseup = btn.ontouchend = btn.ontouchcancel = onRecStopLegacy;
-    }
-    }
-
     async function startRec(){
       if(isRecording) return;
       wakeListenPending = false;
@@ -5104,11 +5652,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const spkVal = document.getElementById('speaker').value;
       const ttsEl = document.getElementById('ttsPlayDest');
       const wantServerTts = ttsEl && ttsEl.value === 'server';
-      if (wantServerTts && (serverTtsDeviceId === null || isNaN(serverTtsDeviceId))) {
-        isRecording = false;
-        document.getElementById('result').innerHTML = '<div class="warn">Per sentire la risposta sulla cassa: sul Jetson apri il setup (<strong>/</strong>), scegli un altoparlante <strong>locale</strong>, Salva, poi ricarica questa pagina.</div>';
-        return;
-      }
       if (wantServerTts) {
         lastPlayOn = 'server';
         lastSinkId = null;
@@ -5145,7 +5688,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           }
           setTimeout(function(){
             sendAudio(lastPlayOn, deviceId);
-            if (document.getElementById('wakeListenToggle') && document.getElementById('wakeListenToggle').checked) setTimeout(function(){ startWakeRecorder(); }, 400);
             setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 350);
           }, 80);
         };
@@ -5188,7 +5730,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       } catch(err) {
         isRecording = false;
         pendingStop = false;
-        document.getElementById('result').innerHTML = '<div class="warn">Microfono non disponibile. Consenti accesso al microfono e scegli un dispositivo dalla lista.</div>';
+        var micVal = document.getElementById('mic') ? document.getElementById('mic').value : '';
+        var hint = (micVal && micVal.indexOf('local_') === 0)
+          ? 'Hai selezionato microfono Jetson: per parlare da questo PC/telefono scegli un microfono <strong>Browser</strong> nel menu sopra.'
+          : 'Abilita il microfono per questo sito nelle impostazioni browser, poi scegli il device <strong>Browser</strong> nel menu sopra.';
+        document.getElementById('result').innerHTML = '<div class="warn">Microfono non disponibile. '+hint+'</div>';
       }
     }
     function clearAllIntervals(){
@@ -5406,6 +5952,172 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         pmUpdateFromBrowser();
       }, 60);
     })();
+    (function(){
+      var _camStreaming = false, _camPoll = null;
+      function _camEl(id){ return document.getElementById(id); }
+      function _camStreamUrl(){ return location.origin + '/api/camera/stream?_=' + Date.now(); }
+      function _camShow(on){
+        var img = _camEl('clientCamStream'), ph = _camEl('clientCamPlaceholder');
+        if (!img) return;
+        if (on) {
+          img.onerror = function(){
+            _camSetStatus(_camEl('clientCamStatus'), 'Stream non disponibile (camera Jetson?)', false);
+            if (ph) { ph.style.display = 'flex'; ph.textContent = 'Stream non disponibile — controlla RealSense / G1_CAMERA_DEVICE'; }
+            img.style.display = 'none';
+            _camStreaming = false;
+          };
+          img.onload = function(){ if (ph) ph.style.display = 'none'; };
+          img.style.display = 'block';
+          img.src = _camStreamUrl();
+          if (ph) ph.style.display = 'none';
+          _camStreaming = true;
+        } else {
+          img.onerror = null;
+          img.onload = null;
+          img.style.display = 'none';
+          img.removeAttribute('src');
+          if (ph) { ph.style.display = 'flex'; ph.textContent = 'Stream non attivo'; }
+          _camStreaming = false;
+        }
+      }
+      function _camSetStatus(el, text, ok){
+        if (!el) return;
+        el.textContent = text;
+        el.className = 'val' + (ok === true ? ' ok' : ok === false ? ' err' : '');
+      }
+      async function _camPollStatus(){
+        try {
+          var r = await fetch(location.origin + '/api/camera/status', { credentials: 'same-origin' });
+          var s = await r.json();
+          _camSetStatus(_camEl('clientCamStatus'), s.open_error ? ('Errore: ' + String(s.open_error).slice(0, 48)) : (s.running && s.has_frame ? (s.backend || 'ok') + ' ' + (s.resolution || '') : (s.running ? 'Avvio…' : 'Ferma')), !s.open_error && s.has_frame);
+          if (s.yolo_enabled) {
+            _camSetStatus(_camEl('clientCamYolo'), s.yolo_loaded ? (s.yolo_model || 'ok') : (s.yolo_error ? String(s.yolo_error).slice(0, 32) : 'Caricamento…'), s.yolo_loaded);
+          } else {
+            _camSetStatus(_camEl('clientCamYolo'), 'Disabilitato', null);
+          }
+          _camEl('clientCamFps').textContent = s.fps ? String(s.fps) : '--';
+          _camEl('clientCamBackend').textContent = s.backend || (s.source || '--');
+          var dets = s.detections || [];
+          var detEl = _camEl('clientCamDets');
+          if (detEl) {
+            detEl.textContent = dets.length ? dets.map(function(d){
+              var t = d.class + ' ' + Math.round((d.confidence || 0) * 100) + '%';
+              if (d.depth_m != null) t += ' · ' + d.depth_m + 'm';
+              return t;
+            }).join(' · ') : 'Nessun oggetto rilevato';
+          }
+          _camPollPick();
+        } catch (e) {
+          _camSetStatus(_camEl('clientCamStatus'), 'API non raggiungibile', false);
+        }
+      }
+      function _camStartPoll(){
+        if (_camPoll) return;
+        _camPollStatus();
+        _camPoll = setInterval(_camPollStatus, 2000);
+      }
+      function _camStopPoll(){
+        if (_camPoll) { clearInterval(_camPoll); _camPoll = null; }
+      }
+      async function _camPollPick(){
+        try {
+          var r = await fetch(location.origin + '/api/pick/status', { credentials: 'same-origin' });
+          var p = await r.json();
+          var el = _camEl('clientPickStatus');
+          if (!el) return;
+          el.textContent = 'Auto-pick: ' + (p.enabled ? 'ON' : 'OFF')
+            + ' · ' + ((p.target_classes || []).join(', ') || '?')
+            + ' · slot ' + (p.teaching_slot != null ? p.teaching_slot : '?')
+            + ' · trigger ' + (p.trigger_count || 0);
+        } catch (_) {}
+      }
+      window.g1ClientPickSet = async function(on){
+        try {
+          await fetch(location.origin + '/api/pick/enable', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: !!on }),
+          });
+          _camPollPick();
+          if (on && !_camStreaming) window.g1ClientCameraStart();
+        } catch (e) {
+          var el = _camEl('clientPickStatus');
+          if (el) el.textContent = 'Auto-pick errore: ' + (e.message || e);
+        }
+      };
+      window.g1ClientCameraStart = async function(){
+        try {
+          var r = await fetch(location.origin + '/api/camera/start', { method: 'POST', credentials: 'same-origin' });
+          var d = await r.json().catch(function(){ return {}; });
+          if (!r.ok) {
+            var msg = (d && (d.message || d.detail || d.open_error)) ? String(d.message || d.detail || d.open_error) : ('HTTP '+r.status);
+            _camSetStatus(_camEl('clientCamStatus'), msg.slice(0, 80), false);
+            return;
+          }
+          _camShow(true);
+          _camStartPoll();
+        } catch (e) {
+          _camSetStatus(_camEl('clientCamStatus'), String(e.message || e), false);
+        }
+      };
+      window.g1ClientCameraStop = async function(){
+        try { await fetch(location.origin + '/api/camera/stop', { method: 'POST', credentials: 'same-origin' }); } catch (_) {}
+        _camShow(false);
+        _camStopPoll();
+        _camPollStatus();
+      };
+      window.g1ClientCameraRefresh = function(){
+        if (_camStreaming) {
+          var img = _camEl('clientCamStream');
+          if (img) img.src = _camStreamUrl();
+        }
+        _camPollStatus();
+      };
+      window.g1ClientCameraOnShow = function(){
+        _camPollStatus();
+        if (!_camStreaming) window.g1ClientCameraStart();
+      };
+      window.g1ClientCameraOnHide = function(){
+        if (_camStreaming) window.g1ClientCameraStop();
+        _camStopPoll();
+      };
+      var _camBtnStart = _camEl('clientCamBtnStart');
+      var _camBtnStop = _camEl('clientCamBtnStop');
+      var _camBtnRefresh = _camEl('clientCamBtnRefresh');
+      if (_camBtnStart) _camBtnStart.onclick = function(){ window.g1ClientCameraStart(); };
+      if (_camBtnStop) _camBtnStop.onclick = function(){ window.g1ClientCameraStop(); };
+      if (_camBtnRefresh) _camBtnRefresh.onclick = function(){ window.g1ClientCameraRefresh(); };
+    })();
+    (function(){
+      var _logTimer = null;
+      function _logBox(){ return document.getElementById('clientLogBox'); }
+      window.g1ClientLogRefresh = async function(){
+        var box = _logBox();
+        if (!box) return;
+        try {
+          var r = await fetch(location.origin + '/api/server-log?lines=120', { credentials: 'same-origin' });
+          var d = await r.json();
+          var text = (d.lines || []).join('\\n') || '(vuoto)';
+          box.textContent = text;
+          box.scrollTop = box.scrollHeight;
+        } catch (e) {
+          box.textContent = 'Errore log: ' + (e.message || e);
+        }
+      };
+      window.g1ClientLogOnShow = function(){
+        window.g1ClientLogRefresh();
+        if (_logTimer) return;
+        _logTimer = setInterval(function(){
+          var auto = document.getElementById('clientLogAuto');
+          if (!auto || auto.checked) window.g1ClientLogRefresh();
+        }, 3000);
+      };
+      window.g1ClientLogOnHide = function(){
+        if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+      };
+    })();
+    try { connect(); } catch (e) { console.error(e); }
   </script>
 </body>
 </html>
@@ -5619,7 +6331,19 @@ body{padding-bottom:max(24px,env(safe-area-inset-bottom));}
 .top-bar h1{font-size:15px;font-weight:700;color:#14b8a6;}
 .top-bar .status{font-size:11px;color:#71717a;}
 .top-bar .status.ok{color:#22c55e;}
-.top-bar .status.err{color:#ef4444;}
+.top-bar .status.warn{color:#fbbf24;}
+.sport-banner{margin:8px 12px 0;padding:10px 12px;border-radius:10px;font-size:12px;line-height:1.45;border:1px solid #3f3f46;background:#18181b;}
+.sport-banner .sport-title{font-weight:700;font-size:13px;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.sport-banner .sport-detail{color:#a1a1aa;}
+.sport-banner.sport_ok{border-color:rgba(34,197,94,0.45);background:rgba(34,197,94,0.08);}
+.sport-banner.sport_ok .sport-title{color:#86efac;}
+.sport-banner.dds_ok{border-color:rgba(251,191,36,0.45);background:rgba(251,191,36,0.08);}
+.sport-banner.dds_ok .sport-title{color:#fcd34d;}
+.sport-banner.ready{border-color:rgba(56,189,248,0.4);background:rgba(56,189,248,0.08);}
+.sport-banner.ready .sport-title{color:#7dd3fc;}
+.sport-banner.ai_blocked,.sport-banner.offline,.sport-banner.error{border-color:rgba(239,68,68,0.45);background:rgba(239,68,68,0.08);}
+.sport-banner.ai_blocked .sport-title,.sport-banner.offline .sport-title,.sport-banner.error .sport-title{color:#fca5a5;}
+.sport-banner button{font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid #3f3f46;background:#27272a;color:#e4e4e7;cursor:pointer;}
 .top-bar a{color:#5eead4;text-decoration:none;font-size:12px;}
 .container{display:block;padding:8px 8px 20px;}
 .actions-area{padding:0 0 8px;}
@@ -5727,13 +6451,19 @@ background-size:24px 24px,24px 24px,100% 100%;}
     <a href="/client">Client</a>
   </div>
 </div>
+<div id="sportBanner" class="sport-banner dds_ok" style="display:none;">
+  <div class="sport-title"><span id="sportLabel">Sport mode —</span><button type="button" onclick="refreshSportStatus()">Aggiorna</button></div>
+  <div class="sport-detail" id="sportDetail">Caricamento…</div>
+</div>
 <div class="container">
   <div class="actions-area">
     <div class="section-label">Gesti braccia</div>
+    <p class="hint" style="margin:0 0 8px;font-size:11px;color:#9ca3af;">Prima <strong>L1+A sul telecomando</strong> (sport mode). Poi <strong>Ready</strong> e un gesto braccio. «Modalità gesti» dal PC è opzionale (FSM spesso non leggibile).</p>
     <div class="gesture-grid" id="gestureGrid"></div>
     <div class="section-label">Locomozione (sport mode)</div>
     <div class="quick-btns">
       <button type="button" class="quick-btn loco" onclick="sendLoco('ready')">Ready</button>
+      <button type="button" class="quick-btn loco" onclick="sendLoco('arm_ready')" title="FSM 500 — necessario per gesti braccia">Modalità gesti</button>
       <button type="button" class="quick-btn loco" onclick="sendLoco('walk')">Walk</button>
       <button type="button" class="quick-btn loco" onclick="sendLoco('stop_walk')">Stop walk</button>
       <button type="button" class="quick-btn loco" onclick="sendLoco('low_stand')">Low stand</button>
@@ -5793,6 +6523,23 @@ background-size:24px 24px,24px 24px,100% 100%;}
       <div class="joint-group-label">Braccio DX</div>
       <div id="jgRight"></div>
     </div>
+  </div>
+
+  <div class="teach-section" style="margin-top:10px;border-top:1px solid #27272a;padding-top:10px;">
+    <div class="teach-header">
+      <h2 style="font-size:14px;margin:0;">Auto-pick (visione)</h2>
+      <span id="pickBadge" class="teach-status">off</span>
+    </div>
+    <p style="margin:0 0 8px;font-size:11px;color:#71717a;line-height:1.45;">Registra un <strong>teaching</strong> verso il punto presa. Con YOLO+depth attivi, se vede la classe (es. bottle) parte il <strong>replay dello slot</strong> (con correzione se hai calibrato). Opzionale: <code>G1_PICK_MODE=safe_reach</code> per la manovra a fasi sui joint.</p>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+      <button type="button" class="teach-btn play" onclick="pickSetEnabled(true)">Auto-pick ON</button>
+      <button type="button" class="teach-btn stop" onclick="pickSetEnabled(false)">OFF</button>
+      <button type="button" class="teach-btn" onclick="pickManeuverTest()">Test manovra</button>
+      <button type="button" class="teach-btn" onclick="pickTriggerTest()">Test replay slot</button>
+      <button type="button" class="teach-btn save" onclick="pickCalibrate()">Calibra bottiglia qui</button>
+    </div>
+    <p style="margin:0 0 6px;font-size:10px;color:#52525b;">Calibra con la bottiglia in vista (camera ON). Poi spostala: le ultime fasi correggono sinistra/destra e distanza. Regola le fasi in <code>config/pick_maneuver.json</code> sul Jetson.</p>
+    <div id="pickStatusLine" style="font-size:11px;color:#a1a1aa;line-height:1.5;">—</div>
   </div>
 
   <div class="joystick-area">
@@ -5915,8 +6662,41 @@ background-size:24px 24px,24px 24px,100% 100%;}
   function setStatus(s){
     var el = document.getElementById('connStatus');
     el.className = 'status ' + s;
-    el.textContent = s === 'ok' ? 'OK' : s === 'err' ? 'ERR' : '--';
+    el.textContent = s === 'ok' ? 'OK' : s === 'err' ? 'ERR' : s === 'warn' ? 'DDS?' : '--';
   }
+
+  function refreshSportStatus(){
+    fetch('/api/robot-fsm').then(function(r){ return r.json(); }).then(function(d){
+      var banner = document.getElementById('sportBanner');
+      var label = document.getElementById('sportLabel');
+      var detail = document.getElementById('sportDetail');
+      if (!banner || !label || !detail) return;
+      banner.style.display = 'block';
+      if (!d.ok) {
+        banner.className = 'sport-banner error';
+        label.textContent = 'Diagnostica fallita';
+        detail.textContent = d.message || 'Errore';
+        setStatus('err');
+        return;
+      }
+      var st = d.sport_status || 'unknown';
+      banner.className = 'sport-banner ' + st;
+      label.textContent = d.sport_label || st;
+      var lines = [d.detail || ''];
+      if (d.fsm_id != null) lines.push('FSM letto: ' + d.fsm_id + (d.fsm_mode != null ? ' mode=' + d.fsm_mode : ''));
+      else lines.push('FSM: non leggibile dal Jetson (normale)');
+      if (d.dds_ok) lines.push('DDS/loco: connesso (rc=0)');
+      else if (d.loco_vel_rc != null) lines.push('DDS/loco: rc=' + d.loco_vel_rc);
+      detail.textContent = lines.filter(Boolean).join(' · ');
+      if (st === 'sport_ok') setStatus('ok');
+      else if (st === 'dds_ok' || st === 'ready') setStatus('warn');
+      else setStatus('err');
+    }).catch(function(e){
+      setStatus('err');
+    });
+  }
+  refreshSportStatus();
+  setInterval(refreshSportStatus, 4000);
 
   function renderMotionPreview(vx, vy, vyaw, command) {
     var body = document.getElementById('motionBody');
@@ -6205,6 +6985,104 @@ background-size:24px 24px,24px 24px,100% 100%;}
       })
       .catch(function(){});
   }
+
+  function updatePickUI(d) {
+    var badge = document.getElementById('pickBadge');
+    var line = document.getElementById('pickStatusLine');
+    var range = document.getElementById('pickDepthRange');
+    if (!d || !line) return;
+    if (badge) {
+      badge.textContent = d.enabled ? 'ON' : 'off';
+      badge.className = 'teach-status ' + (d.enabled ? 'replaying' : 'idle');
+    }
+    if (range && d.depth_min_m != null) {
+      range.textContent = d.depth_min_m + '\u2013' + d.depth_max_m;
+    }
+    var parts = [
+      'Modo: ' + (d.pick_mode || 'teaching'),
+      'Classe: ' + ((d.target_classes || []).join(', ') || '?'),
+      'Slot: ' + (d.teaching_slot != null ? d.teaching_slot : '?'),
+      'Trigger: ' + (d.trigger_count || 0),
+    ];
+    if (d.enabled && d.cooldown_remaining_s > 0) {
+      parts.push('Cooldown ' + d.cooldown_remaining_s + 's');
+    }
+    if (d.last_detection) {
+      parts.push('Ultimo: ' + d.last_detection.class + ' ' + d.last_detection.depth_m + 'm');
+    }
+    if (d.last_adjustments) {
+      parts.push('Adj: ' + JSON.stringify(d.last_adjustments));
+    }
+    if (!d.calibrated) parts.push('Calibra la bottiglia sul punto teaching');
+    if (d.ref_bbox_u != null) parts.push('Ref u=' + d.ref_bbox_u + ' d=' + d.ref_depth_m + 'm');
+    if (d.last_error) parts.push('Err: ' + d.last_error);
+    line.textContent = parts.join(' \u00b7 ');
+  }
+
+  window.pickCalibrate = function() {
+    log('Pick: calibra riferimento bottiglia (camera ON, bottiglia in vista)');
+    fetch('/api/pick/calibrate', { method: 'POST' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.ok) {
+          log('Calibrazione OK u=' + d.ref_bbox_u + ' depth=' + d.ref_depth_m + 'm', 'ok');
+          pollPickStatus();
+        } else {
+          log('Calibra ERR: ' + (d.error || ''), 'err');
+        }
+      })
+      .catch(function(e){ log('Calibra rete: ' + e, 'err'); });
+  };
+
+  window.pickSetEnabled = function(on) {
+    log('Auto-pick ' + (on ? 'ON' : 'OFF'));
+    fetch('/api/pick/enable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!on }),
+    })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        updatePickUI(d);
+        if (d.enabled) log('Auto-pick attivo (camera deve essere ON)', 'ok');
+        else log('Auto-pick disattivato', 'ok');
+      })
+      .catch(function(e){ log('Pick rete: ' + e, 'err'); });
+  };
+
+  window.pickManeuverTest = function() {
+    log('Pick: test manovra safe_reach');
+    fetch('/api/pick/maneuver', { method: 'POST' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.ok) log('Manovra avviata', 'ok');
+        else log('Manovra ERR: ' + (d.error || ''), 'err');
+        pollPickStatus();
+      })
+      .catch(function(e){ log('Manovra rete: ' + e, 'err'); });
+  };
+
+  window.pickTriggerTest = function() {
+    log('Pick: test replay manuale');
+    fetch('/api/pick/trigger', { method: 'POST' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.ok) log('Pick test OK', 'ok');
+        else log('Pick test ERR: ' + (d.error || ''), 'err');
+        pollPickStatus();
+      })
+      .catch(function(e){ log('Pick test rete: ' + e, 'err'); });
+  };
+
+  function pollPickStatus() {
+    fetch('/api/pick/status')
+      .then(function(r){ return r.json(); })
+      .then(updatePickUI)
+      .catch(function(){});
+  }
+  pollPickStatus();
+  setInterval(pollPickStatus, 2500);
+
   loadSlotList();
 })();
 </script>

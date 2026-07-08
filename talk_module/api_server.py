@@ -18,7 +18,7 @@ except ImportError:
 
 from talk_module.config import settings
 from talk_module.stt import WhisperClient
-from talk_module.llm import LLMClient
+from talk_module.llm import create_llm_client
 from talk_module.tts import TTSClient
 from talk_module.audio import AudioPlayer, list_audio_devices
 
@@ -32,7 +32,7 @@ if HAS_FASTAPI:
     )
 
     _stt: WhisperClient | None = None
-    _llm: LLMClient | None = None
+    _llm = None
     _tts: TTSClient | None = None
     _player: AudioPlayer | None = None
 
@@ -42,10 +42,10 @@ if HAS_FASTAPI:
             _stt = WhisperClient()
         return _stt
 
-    def get_llm() -> LLMClient:
+    def get_llm():
         global _llm
         if _llm is None:
-            _llm = LLMClient()
+            _llm = create_llm_client()
         return _llm
 
     def get_tts() -> TTSClient:

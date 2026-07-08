@@ -6,6 +6,7 @@
 #   $env:G1_PUBLIC_IP="192.168.123.164"
 #   $env:G1_SSH_KEY="C:\path\to\id_ed25519_jetson"   # consigliato se non usi ssh-agent
 #   $env:G1_SKIP_OPENSSL="1"   # opzionale: salta generate_ssl_cert (se i certificati ci sono gia)
+#   $env:G1_SSH_BATCH="0"   # chiede password SSH (se non hai chiave configurata)
 #   $env:G1_SKIP_STRIP_CRLF="1"   # opzionale: salta sed CRLF su scripts/*.sh (se quel passaggio si blocca)
 #   soundboard.json NON viene MAI copiato dal deploy. I suoni restano SOLO sul Jetson.
 #   Backup manuale: .\scripts\pull_soundboard_from_jetson.ps1
@@ -30,20 +31,44 @@ if ($env:G1_SSH_KEY) {
         Write-Host "ATTENZIONE: G1_SSH_KEY non trovato: $keyPath" -ForegroundColor Yellow
     }
 }
+$batchRaw = if ($null -ne $env:G1_SSH_BATCH -and "$env:G1_SSH_BATCH".Trim() -ne "") { "$env:G1_SSH_BATCH".Trim() } else { "1" }
+$batchMode = if ($batchRaw -eq "0") { "no" } else { "yes" }
 $sshCommon = $sshKeyArgs + @(
     "-o", "ConnectTimeout=15",
-    "-o", "BatchMode=yes",
+    "-o", "BatchMode=$batchMode",
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=6",
     "-o", "TCPKeepAlive=yes"
 )
-# -n: stdin da /dev/null — senza questo ssh spesso resta in attesa e lo script sembra bloccato (PowerShell / console).
-# Non usare -n su scp: solo sulle invocazioni ssh sotto.
-$sshExec = $sshCommon + @("-n")
+# -n: stdin da /dev/null — ok con chiave SSH. Con password (G1_SSH_BATCH=0) NON usare -n altrimenti il prompt password non appare.
+$sshExec = if ($batchMode -eq "no") { $sshCommon } else { $sshCommon + @("-n") }
 
 Write-Host "Deploy G1 Talk Module su $sshHost" -ForegroundColor Cyan
 if ($env:G1_SSH_KEY) { Write-Host "  Chiave: $($env:G1_SSH_KEY)" -ForegroundColor Gray }
+if ($batchMode -eq "no") {
+    Write-Host "  Auth: password SSH (G1_SSH_BATCH=0) — inserisci la password quando richiesta" -ForegroundColor Yellow
+} else {
+    Write-Host "  Auth: chiave SSH (BatchMode). Se fallisce: `$env:G1_SSH_BATCH='0'; .\deploy.ps1" -ForegroundColor Gray
+}
+Write-Host ""
+
+Write-Host "  [0] Test SSH..." -NoNewline
+$preflight = & ssh @sshExec $sshHost "echo ok" 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or $preflight -notmatch "ok") {
+    Write-Host " FALLITO" -ForegroundColor Red
+    Write-Host $preflight.Trim()
+    Write-Host ""
+    Write-Host "  SSH non raggiunge il Jetson. Prova manualmente:" -ForegroundColor Yellow
+    Write-Host "    ssh unitree@192.168.123.164" -ForegroundColor White
+    Write-Host "  Poi rilancia (stessa finestra PowerShell, senza aprire un secondo powershell.exe):" -ForegroundColor Yellow
+    Write-Host "    cd `"$root`"" -ForegroundColor White
+    Write-Host "    `$env:G1_SSH_BATCH='0'" -ForegroundColor White
+    Write-Host "    .\deploy.ps1" -ForegroundColor White
+    Write-Host "  Oppure configura una chiave: `$env:G1_SSH_KEY='C:\Users\...\.ssh\id_ed25519_jetson'" -ForegroundColor Gray
+    exit 255
+}
+Write-Host " OK" -ForegroundColor Green
 Write-Host ""
 
 # Copia file Python
@@ -63,6 +88,14 @@ scp @sshCommon `
     "$root\talk_module\teaching_api.py" `
     "$root\talk_module\vr_teleop.py" `
     "$root\talk_module\vr_teleop_api.py" `
+    "$root\talk_module\camera_api.py" `
+    "$root\talk_module\camera_yolo.py" `
+    "$root\talk_module\yolo_onnx.py" `
+    "$root\talk_module\pick_on_detect.py" `
+    "$root\talk_module\pick_api.py" `
+    "$root\talk_module\pick_adjust.py" `
+    "$root\talk_module\pick_maneuver.py" `
+    "$root\talk_module\hand_grasp.py" `
     "${sshHost}:${remote}/talk_module/"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1a] codice $LASTEXITCODE (SSH/chiave/host?)" -ForegroundColor Red; exit $LASTEXITCODE }
 scp @sshCommon "$root\talk_module\llm\openai_client.py" "${sshHost}:${remote}/talk_module/llm/"
@@ -82,12 +115,15 @@ Write-Host " OK" -ForegroundColor Green
 Write-Host "  [2] config..." -NoNewline
 scp @sshCommon `
     "$root\config\knowledge.json" `
+    "$root\config\visitor_profiles.json" `
     "$root\config\robot_actions.json" `
     "$root\config\stt_config.json" `
     "$root\config\italian_vocabulary.txt" `
     "$root\config\run_sheet.json" `
     "$root\config\soundboard_script.json" `
     "$root\config\elenco_testi_soundboard.txt" `
+    "$root\config\pick_maneuver.json" `
+    "$root\config\hand_grasp.json" `
     "${sshHost}:${remote}/config/"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [2] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
@@ -151,24 +187,27 @@ Write-Host " OK" -ForegroundColor Green
 # Riavvia server (timeout 50s: script ~2+8+5*2=20s max)
 Write-Host "  [4] Restart server..." -ForegroundColor Gray
 $keyPathResolved = if ($env:G1_SSH_KEY) { $env:G1_SSH_KEY.Trim().Trim('"') } else { "" }
-$job = Start-Job -ScriptBlock {
-    param($h, $r, $keyPath)
-    $args = @(
-        "-n",
-        "-o", "ConnectTimeout=15",
-        "-o", "ServerAliveInterval=5",
-        "-o", "ServerAliveCountMax=10",
-        "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-T"
-    )
-    if ($keyPath -and (Test-Path -LiteralPath $keyPath)) { $args = @("-i", $keyPath) + $args }
-    & ssh @args $h "cd $r && timeout 45 bash scripts/restart_server.sh"
-} -ArgumentList $sshHost, $remote, $keyPathResolved
-$null = Wait-Job $job -Timeout 50
-$r = Receive-Job $job
-Stop-Job $job -ErrorAction SilentlyContinue
-Remove-Job $job -Force -ErrorAction SilentlyContinue
+$restartSshArgs = $sshKeyArgs + @(
+    "-o", "ConnectTimeout=15",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=10",
+    "-o", "BatchMode=$batchMode",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-T"
+)
+if ($batchMode -eq "no") {
+    # Foreground: permette password SSH (Start-Job non eredita la sessione interattiva)
+    $r = ssh @restartSshArgs $sshHost "cd $remote && timeout 45 bash scripts/restart_server.sh" 2>&1 | Out-String
+} else {
+    $job = Start-Job -ScriptBlock {
+        param($sshArgs, $h, $r)
+        & ssh @sshArgs $h "cd $r && timeout 45 bash scripts/restart_server.sh"
+    } -ArgumentList (,$restartSshArgs), $sshHost, $remote
+    $null = Wait-Job $job -Timeout 50
+    $r = Receive-Job $job
+    Stop-Job $job -ErrorAction SilentlyContinue
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+}
 Write-Host $r
 if ($r -match "OK:200") {
     Write-Host "  [4] HTTP 200 su /api/health" -ForegroundColor Green

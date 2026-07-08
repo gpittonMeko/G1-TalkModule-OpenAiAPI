@@ -116,6 +116,15 @@ const Api = (() => {
     return _post(`${_cfg().talk}/api/led`, { animation: anim, color, speed });
   }
 
+  // Camera + YOLO
+  function cameraStatus() { return _json(`${_cfg().talk}/api/camera/status`); }
+  function cameraStart()   { return _post(`${_cfg().talk}/api/camera/start`, {}); }
+  function cameraStop()    { return _post(`${_cfg().talk}/api/camera/stop`, {}); }
+  function cameraStreamUrl() { return `${_cfg().talk}/api/camera/stream`; }
+  function serverLog(lines = 120) {
+    return _json(`${_cfg().talk}/api/server-log?lines=${lines}`);
+  }
+
   // Text chat
   function textChat(text) {
     return _post(`${_cfg().talk}/api/text-chat`, { text }, { timeout: 30000 });
@@ -187,6 +196,7 @@ const Api = (() => {
     soundboardSaveSlot, soundboardSynth,
     robotActions, robotAction, robotMove, robotLoco,
     ledEffect, ledState, ledColor, ledAnimation,
+    cameraStatus, cameraStart, cameraStop, cameraStreamUrl, serverLog,
     textChat,
     wdHealth, wdTalkStatus, wdTalkRestart, wdTalkStop, wdTalkStart, wdTalkLog,
     isReachable, isWatchdogReachable,

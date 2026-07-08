@@ -1,0 +1,48 @@
+{
+  "_readme": "Attiva con G1_VISITOR_PROFILE=granzotto (o alpitronic) nel .env sul Jetson, poi restart server.",
+  "granzotto": {
+    "label": "Presentazione Granzotto @ Meko",
+    "company": "Granzotto",
+    "host": "Meko",
+    "greeting_response": "Buongiorno da Granzotto e benvenuti in Meko! Sono G1, il vostro host robotico: è un piacere avervi qui per la presentazione.",
+    "hey_g1_ack": "Buongiorno! Benvenuti alla presentazione Granzotto. Dimmi pure, sono in ascolto.",
+    "greeting_triggers": [
+      "buongiorno",
+      "buon giorno",
+      "buonasera",
+      "buona sera",
+      "salve",
+      "ciao",
+      "ciao g1",
+      "ciao robot",
+      "mi saluti",
+      "salutami",
+      "un saluto",
+      "benvenuti"
+    ],
+    "system_supplement": "CONTESTO VISITA (prioritario oggi — applica a OGNI risposta):\n- Oggi presentazione per Granzotto SRL, ospiti in sede Meko.\n- Granzotto ha pluriennale esperienza in progettazione, realizzazione e post-vendita di impianti industriali di grandi dimensioni, su misura per esigenze produttive specifiche.\n- Settori di riferimento: Food & Beverage (vino, bibite, superalcolici, salse, olio, aceto, sciroppi) e Chimico (oli lubrificanti, vernici, solventi, detergenti, cosmetici).\n- Tu sei G1, robot host di Meko: tono professionale, accogliente, tecnico ma chiaro; non inventare clienti, progetti o cifre non fornite.\n- Puoi collegare Meko e Granzotto all'innovazione industriale e all'automazione quando è naturale.\n- DGS supporta la robotica in questa demo; Meko ospita l'incontro.",
+    "whisper_hint": "Granzotto, Meko, impianti industriali, food beverage, chimico, vino, olio, vernici, cosmetici, buongiorno, salve, presentazione."
+  },
+  "alpitronic": {
+    "label": "Visita Alpitronic @ Meko",
+    "company": "Alpitronic",
+    "host": "Meko",
+    "greeting_response": "Buongiorno a voi Ion e Markus di Alpitronic, benvenuti in Meko!",
+    "hey_g1_ack": "Buongiorno a voi Ion e Markus di Alpitronic, benvenuti in Meko! Dimmi pure.",
+    "greeting_triggers": [
+      "buongiorno",
+      "buon giorno",
+      "buonasera",
+      "buona sera",
+      "salve",
+      "ciao",
+      "ciao g1",
+      "ciao robot",
+      "mi saluti",
+      "salutami",
+      "un saluto"
+    ],
+    "system_supplement": "CONTESTO VISITA (prioritario oggi — applica a OGNI risposta):\n- Oggi ospiti in sede Meko: Ion e Markus di Alpitronic, azienda altoatesina con sede a Bolzano (fondata 2009).\n- Alpitronic produce apparecchiature elettriche; con la linea Hypercharger (dal 2018) è leader nei caricabatterie ad alta potenza per veicoli elettrici, con forte quota in Europa.\n- Tu sei G1, robot host di Meko: accogli Ion e Markus con calore professionale; puoi citare Meko e Alpitronic quando è naturale.\n- Nei saluti riconosci che sono ospiti Alpitronic in visita da Meko.\n- Su e-mobility, ricarica rapida e ingegneria: tono curioso e tecnico, sobrio; non inventare clienti, contratti o cifre oltre a quelle note.\n- DGS supporta la parte robotica; Meko è l'azienda che vi ospita oggi in questa demo.",
+    "whisper_hint": "Meko, Alpitronic, Hypercharger, Bolzano, buongiorno, salve, ricarica elettrica, veicoli elettrici."
+  }
+}

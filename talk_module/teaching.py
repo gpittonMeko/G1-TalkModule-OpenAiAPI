@@ -9,11 +9,36 @@ Replay interpolates between recorded frames at 50Hz via rt/arm_sdk.
 """
 
 import math
+import os
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from talk_module import arm_sdk, teaching_store
+from talk_module.pick_adjust import ReplayAdjustments, apply_replay_adjustments
+
+_LEFT_ARM_SLICE = slice(3, 10)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or ("1" if default else "0")).strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _finalize_pose(
+    q: list[float],
+    adjustments: Optional[ReplayAdjustments],
+    initial_q: Optional[list[float]],
+    *,
+    pick_flow: bool,
+) -> list[float]:
+    out = apply_replay_adjustments(q, adjustments)
+    freeze_left = _env_bool("G1_PICK_FREEZE_LEFT_ARM", False)
+    if pick_flow and initial_q and freeze_left and not _env_bool("G1_PICK_TWO_HANDS", True):
+        for j in range(_LEFT_ARM_SLICE.start, min(_LEFT_ARM_SLICE.stop, len(out))):
+            if j < len(initial_q):
+                out[j] = initial_q[j]
+    return out
 
 
 class TeachingState:
@@ -112,10 +137,22 @@ class TeachingManager:
     def replay_temp(self) -> dict:
         return self._replay(teaching_store.load_temp())
 
-    def replay_slot(self, slot_id: int) -> dict:
-        return self._replay(teaching_store.load_trajectory(slot_id))
+    def replay_slot(
+        self,
+        slot_id: int,
+        adjustments: Optional[ReplayAdjustments] = None,
+        *,
+        grasp_after: bool = False,
+    ) -> dict:
+        return self._replay(teaching_store.load_trajectory(slot_id), adjustments, grasp_after=grasp_after)
 
-    def _replay(self, data: Optional[dict]) -> dict:
+    def _replay(
+        self,
+        data: Optional[dict],
+        adjustments: Optional[ReplayAdjustments] = None,
+        *,
+        grasp_after: bool = False,
+    ) -> dict:
         if data is None:
             return {"ok": False, "error": "Nessun dato traiettoria"}
 
@@ -125,13 +162,22 @@ class TeachingManager:
             self._state = TeachingState.REPLAYING
 
         frames = data["frames"]
+        pick_flow = grasp_after or adjustments is not None
         self._replay_thread = threading.Thread(
-            target=self._replay_worker, args=(frames,), daemon=True,
+            target=self._replay_worker,
+            args=(frames, adjustments, grasp_after, pick_flow),
+            daemon=True,
         )
         self._replay_thread.start()
         return {"ok": True, "frames": len(frames), "duration_s": data["meta"]["duration_s"]}
 
-    def _replay_worker(self, frames: list[dict]):
+    def _replay_worker(
+        self,
+        frames: list[dict],
+        adjustments: Optional[ReplayAdjustments] = None,
+        grasp_after: bool = False,
+        pick_flow: bool = False,
+    ):
         try:
             sdk = arm_sdk.G1ArmSDK()
             self._sdk = sdk
@@ -139,7 +185,8 @@ class TeachingManager:
 
             initial_q = sdk.get_joint_positions()
 
-            self._cosine_move(sdk, frames[0]["q"], duration=2.0)
+            first_q = _finalize_pose(frames[0]["q"], adjustments, initial_q, pick_flow=pick_flow)
+            self._cosine_move(sdk, first_q, duration=2.0)
 
             dt = arm_sdk.CONTROL_DT
             t0 = time.time()
@@ -155,7 +202,9 @@ class TeachingManager:
                     fi += 1
 
                 if fi >= len(frames) - 1:
-                    sdk.set_targets(frames[-1]["q"])
+                    sdk.set_targets(
+                        _finalize_pose(frames[-1]["q"], adjustments, initial_q, pick_flow=pick_flow)
+                    )
                 else:
                     f0 = frames[fi]
                     f1 = frames[fi + 1]
@@ -166,12 +215,30 @@ class TeachingManager:
                         f0["q"][j] + alpha * (f1["q"][j] - f0["q"][j])
                         for j in range(len(f0["q"]))
                     ]
-                    sdk.set_targets(interp)
+                    sdk.set_targets(
+                        _finalize_pose(interp, adjustments, initial_q, pick_flow=pick_flow)
+                    )
 
                 time.sleep(dt)
 
+            if grasp_after:
+                try:
+                    from talk_module.hand_grasp import grasp_close_and_hold
+
+                    grasp_close_and_hold()
+                except Exception as ge:
+                    print(f"[Teaching] grasp: {ge}", flush=True)
+
             if initial_q:
                 self._cosine_move(sdk, initial_q, duration=2.0)
+
+            if grasp_after:
+                try:
+                    from talk_module.hand_grasp import grasp_open_if_configured
+
+                    grasp_open_if_configured()
+                except Exception as ge:
+                    print(f"[Teaching] grasp open: {ge}", flush=True)
 
             sdk.stop()
 

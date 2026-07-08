@@ -47,6 +47,36 @@
       </div>
 
       <div class="card">
+        <div class="card-title">Camera G1 + YOLO</div>
+        <p class="form-hint" style="margin:0 0 8px;font-size:11px;line-height:1.4">
+          Stream dalla camera sul Jetson/robot (V4L2 o RealSense).
+          YOLO via ONNX + OpenCV (~12 MB, niente PyTorch).
+        </p>
+        <div class="camera-wrap">
+          <img id="camStream" alt="Camera YOLO" />
+          <div id="camPlaceholder" class="camera-placeholder">Stream non attivo</div>
+        </div>
+        <div class="status-row" style="margin-top:8px">
+          <span class="status-label">Camera</span>
+          <span class="status-value" id="camStatus">--</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">YOLO</span>
+          <span class="status-value" id="camYoloStatus">--</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">FPS</span>
+          <span class="status-value" id="camFps">--</span>
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn-primary btn-sm" id="btnCamStart" onclick="CameraPanel.start()">Avvia stream</button>
+          <button class="btn btn-ghost btn-sm" id="btnCamStop" onclick="CameraPanel.stop()">Ferma</button>
+          <button class="btn btn-ghost btn-sm" onclick="CameraPanel.refresh()">Aggiorna</button>
+        </div>
+        <div class="log-box" id="camDetections" style="margin-top:8px;max-height:72px">Nessun rilevamento</div>
+      </div>
+
+      <div class="card">
         <div class="card-title">Controllo Servizio</div>
         <div class="btn-row">
           <button class="btn btn-success btn-sm" id="btnStart" onclick="Services.start()">Avvia</button>
@@ -393,6 +423,7 @@
 <script src="js/services.js"></script>
 <script src="js/soundboard.js"></script>
 <script src="js/robot-panel.js"></script>
+<script src="js/camera-panel.js"></script>
 <script src="js/settings.js"></script>
 <script src="js/app.js"></script>
 </body>

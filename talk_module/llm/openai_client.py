@@ -6,6 +6,7 @@ from datetime import date
 from typing import Optional
 
 from talk_module.config import settings
+from talk_module.visitor_context import get_visitor_system_supplement
 from talk_module.openai_http import make_openai_client
 
 DEFAULT_SYSTEM = """Sei G1, robot umanoide Unitree, host digitale in sala durante un evento aziendale. Rispondi sempre in italiano.
@@ -129,6 +130,9 @@ class LLMClient:
         um = user_message.strip()
         effective_model = model or self.model
         base = system or self.system_prompt
+        visitor_sup = get_visitor_system_supplement()
+        if visitor_sup:
+            base = f"{base}\n\n{visitor_sup}"
         if _needs_mckinsey_or_consulting_context(um):
             base = f"{base}\n\n{MCKINSEY_EVENT_SUPPLEMENT}"
         sys = f"{base}\n\n{_dynamic_event_context(um)}"

@@ -113,12 +113,18 @@ const Services = (() => {
 
   async function refreshLog() {
     const box = _el("logBox");
+    box.textContent = "Caricamento...";
+    try {
+      const r = await Api.serverLog();
+      box.textContent = (r.lines || []).join("\n") || "(vuoto)";
+      box.scrollTop = box.scrollHeight;
+      return;
+    } catch (_) {}
     if (!_wdConnected) {
-      box.textContent = "Watchdog non raggiungibile.";
+      box.textContent = "Log non disponibile (né API server né watchdog).";
       return;
     }
     try {
-      box.textContent = "Caricamento...";
       const r = await Api.wdTalkLog();
       box.textContent = (r.lines || []).join("\n") || "(vuoto)";
       box.scrollTop = box.scrollHeight;

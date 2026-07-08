@@ -6,6 +6,7 @@
 # (rigenera con scripts/export_dependencies.ps1 o .sh)
 
 openai>=1.0.0
+google-genai>=1.0.0
 groq>=0.4.0
 deepgram-sdk>=3.0.0
 sounddevice>=0.4.6
@@ -20,3 +21,4 @@ uvicorn[standard]>=0.24.0
 # ffmpeg incluso (Windows/Linux) per WebM browser → WAV verso STT
 imageio-ffmpeg>=0.4.9
 tqdm>=4.66.0
+# Camera dashboard (Jetson: pip install -r requirements-camera.txt)

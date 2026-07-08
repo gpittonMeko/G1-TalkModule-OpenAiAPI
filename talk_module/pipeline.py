@@ -6,7 +6,7 @@ from typing import Optional
 
 from talk_module.audio import AudioRecorder, AudioPlayer
 from talk_module.stt import WhisperClient
-from talk_module.llm import LLMClient
+from talk_module.llm import create_llm_client
 from talk_module.tts import TTSClient
 from talk_module.config import settings
 
@@ -32,7 +32,7 @@ class TalkPipeline:
         )
         self.player = AudioPlayer()
         self.stt = WhisperClient()
-        self.llm = LLMClient()
+        self.llm = create_llm_client()
         self.tts = TTSClient()
 
     def run_once(self, duration_seconds: Optional[float] = None) -> bool:

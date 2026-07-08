@@ -42,10 +42,16 @@ class Settings:
     api_key: str = _str(os.getenv("OPENAI_API_KEY", ""))
     stt_model: str = _str(os.getenv("STT_MODEL", "gpt-4o-transcribe"))
     wake_stt_model: str = _str(os.getenv("WAKE_STT_MODEL", "")) or _str(os.getenv("STT_MODEL", "gpt-4o-transcribe"))
+    # LLM: openai (default) | gemini
+    llm_provider: str = _str(os.getenv("LLM_PROVIDER", "openai")).lower()
+    gemini_api_key: str = _str(os.getenv("GEMINI_API_KEY", ""))
+    gemini_model: str = _str(os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
     llm_model: str = _str(os.getenv("LLM_MODEL", "gpt-5.4-mini"))
     llm_text_model: str = _str(os.getenv("LLM_TEXT_MODEL", "")) or _str(os.getenv("LLM_MODEL", "gpt-5.4-mini"))
     # Limite token risposta (max_completion_tokens / max_tokens a seconda del modello)
     llm_max_completion_tokens: int = _int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "1024")) or 1024
+    # Voce: risposte corte = meno latenza LLM + TTS
+    llm_voice_max_tokens: int = _int(os.getenv("LLM_VOICE_MAX_TOKENS", "220")) or 220
 
     # STT: whisper = OpenAI Whisper API (stessa chiave OPENAI_API_KEY). groq/deepgram solo se imposti STT_PROVIDER.
     stt_provider: str = _str(os.getenv("STT_PROVIDER", "whisper")).lower()
@@ -54,6 +60,8 @@ class Settings:
     tts_voice: str = _str(os.getenv("TTS_VOICE", "nova"))
     tts_voice_robot: str = _str(os.getenv("TTS_VOICE_ROBOT", "echo"))  # voce più metallica per traccia robot
     tts_model: str = _str(os.getenv("TTS_MODEL", "gpt-4o-mini-tts"))  # gpt-4o-mini-tts più affidabile per italiano
+    tts_skip_loudnorm: bool = os.getenv("TTS_SKIP_LOUDNORM", "1").lower() in ("1", "true", "yes")
+    tts_speed: float = float(os.getenv("TTS_SPEED", "1.05"))
     robot_effect_preset: str = _str(os.getenv("ROBOT_EFFECT_PRESET", "robot_full"))  # telephone|ring_mod|bitcrush|robot_full
     tts_language: str = _str(os.getenv("TTS_LANGUAGE", "it"))
     whisper_prompt: str = _str(
@@ -70,6 +78,9 @@ class Settings:
     quick_lookup_enabled: bool = os.getenv("QUICK_LOOKUP_ENABLED", "true").lower() in ("1", "true", "yes")
     quick_lookup_timeout: int = _int(os.getenv("QUICK_LOOKUP_TIMEOUT", "3")) or 3
     default_weather_city: str = _str(os.getenv("DEFAULT_WEATHER_CITY", "Rome"))
+
+    # Profilo ospiti/visita (config/visitor_profiles.json): es. alpitronic
+    visitor_profile: str = _str(os.getenv("G1_VISITOR_PROFILE", ""))
 
     # Wake word: risposta TTS quando l'utente dice solo "Hey G1" senza domanda
     hey_g1_ack_text: str = _str(
@@ -100,6 +111,10 @@ class Settings:
         errors = []
         if not self.api_key:
             errors.append("OPENAI_API_KEY non configurata. Imposta in .env")
+        if self.llm_provider == "gemini" and not self.gemini_api_key:
+            errors.append("LLM_PROVIDER=gemini richiede GEMINI_API_KEY in .env")
+        if self.llm_provider not in ("openai", "gemini"):
+            errors.append("LLM_PROVIDER deve essere openai o gemini")
         if self.stt_provider == "deepgram" and not self.deepgram_api_key:
             errors.append("STT_PROVIDER=deepgram richiede DEEPGRAM_API_KEY in .env")
         if self.sample_rate not in (8000, 16000, 44100, 48000):

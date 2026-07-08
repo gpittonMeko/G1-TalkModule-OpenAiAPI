@@ -10,6 +10,7 @@ const App = (() => {
     Settings.init();
     await Soundboard.init();
     Services.startPolling();
+    if (typeof CameraPanel !== "undefined") CameraPanel.onDashboardShow();
     _restoreTab();
   }
 
@@ -29,6 +30,9 @@ const App = (() => {
     if (name === "soundboard") {
       Soundboard.render();
       Soundboard.maybeAutoSyncFromJetson();
+    }
+    if (name === "dashboard" && typeof CameraPanel !== "undefined") {
+      CameraPanel.onDashboardShow();
     }
     if (name === "settings") Settings.updateCacheStats();
     if (name === "robot") RobotPanel.loadActions();

@@ -117,7 +117,7 @@ def correct_transcript(
                 continue
             sim = _similarity(txt_lower, phrase)
             if sim >= 0.98:
-                print(f"[Fuzzy] Phrase match: '{txt}' → '{phrase}' (sim={sim:.3f})", flush=True)
+                print(f"[Fuzzy] Phrase match: '{txt}' -> '{phrase}' (sim={sim:.3f})", flush=True)
                 return phrase
 
     words_in_text = re.findall(r"[a-zA-ZàèéìòùçÀÈÉÌÒÙÇ]+|[^a-zA-ZàèéìòùçÀÈÉÌÒÙÇ]+", txt)
@@ -147,7 +147,7 @@ def correct_transcript(
                 best_ratio = r
                 best_match = v
         if best_match is not None:
-            corrections.append(f"'{token}'→'{best_match}'({best_ratio:.2f})")
+            corrections.append(f"'{token}'->'{best_match}'({best_ratio:.2f})")
             result_parts.append(best_match)
         else:
             result_parts.append(token)
@@ -164,5 +164,5 @@ def apply_fuzzy_correction(text: str, knowledge: dict[str, str]) -> str:
         return text
     result = correct_transcript(text, words, phrases, threshold, min_len)
     if result != text:
-        print(f"[Fuzzy] '{text}' → '{result}'", flush=True)
+        print(f"[Fuzzy] '{text}' -> '{result}'", flush=True)
     return result
