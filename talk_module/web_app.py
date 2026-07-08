@@ -1335,33 +1335,16 @@ self.addEventListener('activate', () => self.clients.claim());
         arm = str(s.get("robot_arm") or "").strip()
         loco = str(s.get("robot_loco") or "").strip()
         led_fx = str(s.get("led_effect") or "").strip()
-        if not arm and not loco:
-            arm = "face_wave"
-        if arm or loco or led_fx:
-            import threading as _thr
+        teach = s.get("teaching_slot")
+        from talk_module.speak_gestures import fire_soundboard_slot_robot
 
-            def _sb_robot(a, l, led):
-                try:
-                    from talk_module.robot_actions import (
-                        execute_g1_loco_command,
-                        execute_robot_action,
-                        loco_command_requires_confirm,
-                    )
-                    if led:
-                        try:
-                            from talk_module.processing import _led_animate, set_led_safe
-                            _fire_led_effect(led)
-                        except Exception as le:
-                            print(f"[soundboard-play-local] led: {le}", flush=True)
-                    if a:
-                        ok, msg = execute_robot_action(a)
-                        print(f"[soundboard-play-local] arm={a!r} ok={ok} msg={msg}", flush=True)
-                    if l and not loco_command_requires_confirm(l):
-                        execute_g1_loco_command(l)
-                except Exception as e:
-                    print(f"[soundboard-play-local] robot: {e}", flush=True)
-
-            _thr.Thread(target=_sb_robot, args=(arm, loco, led_fx), daemon=True).start()
+        fire_soundboard_slot_robot(
+            robot_arm=arm,
+            robot_loco=loco,
+            led_effect=led_fx,
+            teaching_slot=teach,
+            tag="soundboard-play-local",
+        )
         try:
             wav_bytes = _soundboard_bytes_to_wav_playable(raw, fmt)
             wav_g1 = wav_bytes
@@ -1548,8 +1531,8 @@ self.addEventListener('activate', () => self.clients.claim());
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             if audio_out:
                 audio_b64 = base64.b64encode(audio_out).decode()
-                from talk_module.processing import start_speak_gesture
-                start_speak_gesture(resp or "")
+                from talk_module.speak_gestures import start_talk_gesture
+                start_talk_gesture("buongiorno", resp or "", had_robot_match=False)
         except Exception as e:
             print(f"[Wake] ack TTS error: {e}", flush=True)
         _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
@@ -1685,8 +1668,8 @@ self.addEventListener('activate', () => self.clients.claim());
                             pass
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             if audio_out and not robot_match:
-                from talk_module.processing import start_speak_gesture
-                start_speak_gesture(resp or "")
+                from talk_module.speak_gestures import start_talk_gesture
+                start_talk_gesture(prompt or "", resp or "", had_robot_match=False)
             if resp:
                 _wake_cooldown[0] = time.time() + WAKE_COOLDOWN_S
             return {
@@ -1756,8 +1739,8 @@ self.addEventListener('activate', () => self.clients.claim());
                     )
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             if audio_out and not robot_match:
-                from talk_module.processing import start_speak_gesture
-                start_speak_gesture(resp or "")
+                from talk_module.speak_gestures import start_talk_gesture
+                start_talk_gesture(prompt.strip(), resp or "", had_robot_match=False)
             return {
                 "text": prompt.strip(),
                 "response": resp or "",
@@ -3828,7 +3811,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       var loco = (sd.robot_loco && String(sd.robot_loco).trim()) || '';
       var led = (sd.led_effect && String(sd.led_effect).trim()) || '';
       var teach = (sd.teaching_slot != null && String(sd.teaching_slot).trim()) || '';
-      if (!arm && !loco && !teach) arm = 'face_wave';
+      if (!arm && !loco && !teach && !led) return;
       var ip = '192.168.123.161';
       try {
         var ls = localStorage.getItem('g1_robot_ip');
@@ -4143,6 +4126,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       stopWakeRecorder();
       resetWakeCommandMode();
+      setRobotLed('idle');
       if (st) st.textContent = 'Ascolto disattivato — riattiva «Hey G1 continuo» per parlare di nuovo';
       wakeLog('Risposta finita: ascolto disattivato', '#71717a');
       updateActiveMicIndicator();
@@ -4233,7 +4217,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     function onWakeResponseDone(){
       setTimeout(function(){
-        resumeWakeListenAfterResponse();
+        disableWakeListenAfterResponse();
       }, WAKE_POST_TTS_PAUSE_MS);
     }
     let wakeResponseTimeout = null;
@@ -4638,12 +4622,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
                 var ackHasTts = lastPlayOn === 'browser' && r.audio_base64 && String(r.audio_base64).length > 50;
                 if (ackHasTts) {
                   enqueueTtsPlayback(r.audio_base64, function(){
-                    wakeCommandMode = true;
-                    startWakeCommandIdleTimer();
-                    var wst = document.getElementById('wakeListenStatus');
-                    if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
-                    setTimeout(function(){ startListeningHum(); }, 250);
-                    scheduleNextWakeSliceIfListening();
+                    disableWakeListenAfterResponse();
                   });
                   if (btn) btn.disabled = false;
                   return;
@@ -4652,13 +4631,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
                 wakeLog('WAKE! Ti ascolto\u2026', '#22c55e');
                 playWakeChime();
               }
-              wakeCommandMode = true;
-              startWakeCommandIdleTimer();
+              disableWakeListenAfterResponse();
               if (btn) btn.disabled = false;
-              var wst = document.getElementById('wakeListenStatus');
-              if (wst) wst.textContent = 'Ti ascolto\u2026 parla pure.';
-              setTimeout(function(){ startListeningHum(); }, 250);
-              scheduleNextWakeSliceIfListening();
               return;
             }
             if (!r.response && r.message) {
@@ -5196,7 +5170,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (s.audio_base64_clean && s.audio_base64_clean.length>50) {
         var arm0 = (s.robot_arm && String(s.robot_arm).trim()) || '';
         var loco0 = (s.robot_loco && String(s.robot_loco).trim()) || '';
-        if ((!arm0 && !loco0) && typeof slotIndex === 'number') {
+        var led0 = (s.led_effect && String(s.led_effect).trim()) || '';
+        var teach0 = (s.teaching_slot != null && String(s.teaching_slot).trim()) || '';
+        if ((!arm0 && !loco0 && !led0 && !teach0) && typeof slotIndex === 'number') {
           fetch('/api/soundboard-slot/'+slotIndex).then(function(r){
             if (!r.ok) return Promise.resolve(s);
             return r.json();
@@ -5204,6 +5180,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             var merged = Object.assign({}, s, {
               robot_arm: (full && full.robot_arm) ? String(full.robot_arm) : '',
               robot_loco: (full && full.robot_loco) ? String(full.robot_loco) : '',
+              led_effect: (full && full.led_effect) ? String(full.led_effect) : '',
               teaching_slot: (full && full.teaching_slot) ? String(full.teaching_slot) : ''
             });
             playFromData(merged);
@@ -6508,6 +6485,7 @@ background-size:24px 24px,24px 24px,100% 100%;}
     <div class="teach-slot-row" style="margin-bottom:8px;">
       <label>Salva in slot:</label>
       <input id="teachSlotId" type="number" min="0" max="99" value="0" />
+      <input id="teachSlotName" type="text" placeholder="nome (es. spiegazione)" style="max-width:140px;" />
       <button type="button" class="teach-btn save" id="btnSave" onclick="teachSaveSlot()" disabled>SAVE</button>
     </div>
     <div id="slotListWrap" style="margin-top:4px;">
@@ -6927,8 +6905,13 @@ background-size:24px 24px,24px 24px,100% 100%;}
 
   window.teachSaveSlot = function() {
     var slotId = parseInt(document.getElementById('teachSlotId').value) || 0;
-    log('Teaching: save to slot ' + slotId);
-    fetch('/api/teaching/save_to_slot/' + slotId, { method: 'POST' })
+    var slotName = (document.getElementById('teachSlotName') && document.getElementById('teachSlotName').value || '').trim();
+    log('Teaching: save to slot ' + slotId + (slotName ? ' (' + slotName + ')' : ''));
+    fetch('/api/teaching/save_to_slot/' + slotId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: slotName })
+    })
       .then(function(r){ return r.json(); })
       .then(function(d){
         if (d.ok) { log('Saved to slot ' + slotId, 'ok'); loadSlotList(); }
@@ -6973,7 +6956,8 @@ background-size:24px 24px,24px 24px,100% 100%;}
           var card = document.createElement('div');
           card.className = 'slot-card';
           var dur = s.duration_s ? s.duration_s.toFixed(1) + 's' : '--';
-          card.innerHTML = '<div class="slot-info"><span class="slot-id">#' + s.slot_id + '</span>'
+          var label = s.name ? ('«' + s.name + '»') : ('#' + s.slot_id);
+          card.innerHTML = '<div class="slot-info"><span class="slot-id">' + label + '</span>'
             + '<span>' + (s.frames || 0) + ' frames</span>'
             + '<span class="slot-dur">' + dur + '</span></div>'
             + '<div class="slot-actions">'

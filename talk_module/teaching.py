@@ -262,12 +262,15 @@ class TeachingManager:
 
     # ── Save to slot ──
 
-    def save_to_slot(self, slot_id: int) -> dict:
+    def save_to_slot(self, slot_id: int, name: str = "") -> dict:
         data = teaching_store.load_temp()
         if data is None:
             return {"ok": False, "error": "Nessuna registrazione temporanea da salvare"}
+        label = (name or "").strip()
+        if label:
+            data.setdefault("meta", {})["name"] = label
         teaching_store.save_trajectory(slot_id, data)
-        return {"ok": True, "slot_id": slot_id}
+        return {"ok": True, "slot_id": slot_id, "name": label or None}
 
     # ── Stop any ongoing operation ──
 

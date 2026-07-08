@@ -151,7 +151,9 @@ def process_after_wake(
         if audio_out:
             _led_animate("breathe", color=LED_SPEAKING, speed=1.0)
             if not robot_match:
-                start_speak_gesture(resp or "")
+                from talk_module.speak_gestures import start_talk_gesture
+
+                start_talk_gesture(prompt, resp or "", had_robot_match=bool(robot_match))
         else:
             set_led_safe(*LED_IDLE)
         return {

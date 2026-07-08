@@ -1,11 +1,13 @@
 {
   "_readme": "Attiva con G1_VISITOR_PROFILE=granzotto (o alpitronic) nel .env sul Jetson, poi restart server.",
   "granzotto": {
-    "label": "Presentazione Granzotto @ Meko",
+    "label": "Presentazione Granzotto @ Confindustria Veneto Est",
     "company": "Granzotto",
-    "host": "Meko",
-    "greeting_response": "Buongiorno da Granzotto e benvenuti in Meko! Sono G1, il vostro host robotico: è un piacere avervi qui per la presentazione.",
-    "hey_g1_ack": "Buongiorno! Benvenuti alla presentazione Granzotto. Dimmi pure, sono in ascolto.",
+    "host": "Confindustria Veneto Est — sede Granzotto SRL, Susegana",
+    "greeting_response": "Buongiorno! Benvenuti a Confindustria Veneto Est, nella sede di Granzotto SRL di Susegana. Sono G1, il vostro host robotico: è un piacere avervi qui per la presentazione.",
+    "hey_g1_ack": "Buongiorno! Benvenuti a Confindustria Veneto Est, nella sede di Granzotto SRL di Susegana. Dimmi pure, sono in ascolto.",
+    "greeting_gestures": ["face_wave"],
+    "explanation_gesture": "right_hand_up",
     "greeting_triggers": [
       "buongiorno",
       "buon giorno",
@@ -20,7 +22,7 @@
       "un saluto",
       "benvenuti"
     ],
-    "system_supplement": "CONTESTO VISITA (prioritario oggi — applica a OGNI risposta):\n- Oggi presentazione per Granzotto SRL, ospiti in sede Meko.\n- Granzotto ha pluriennale esperienza in progettazione, realizzazione e post-vendita di impianti industriali di grandi dimensioni, su misura per esigenze produttive specifiche.\n- Settori di riferimento: Food & Beverage (vino, bibite, superalcolici, salse, olio, aceto, sciroppi) e Chimico (oli lubrificanti, vernici, solventi, detergenti, cosmetici).\n- Tu sei G1, robot host di Meko: tono professionale, accogliente, tecnico ma chiaro; non inventare clienti, progetti o cifre non fornite.\n- Puoi collegare Meko e Granzotto all'innovazione industriale e all'automazione quando è naturale.\n- DGS supporta la robotica in questa demo; Meko ospita l'incontro.",
+    "system_supplement": "CONTESTO VISITA (prioritario oggi — applica a OGNI risposta):\n- Oggi presentazione per Granzotto SRL, ospiti a Confindustria Veneto Est nella sede di Susegana.\n- Granzotto ha pluriennale esperienza in progettazione, realizzazione e post-vendita di impianti industriali di grandi dimensioni, su misura per esigenze produttive specifiche.\n- Settori di riferimento: Food & Beverage (vino, bibite, superalcolici, salse, olio, aceto, sciroppi) e Chimico (oli lubrificanti, vernici, solventi, detergenti, cosmetici).\n- Tu sei G1, robot host di Meko: tono professionale, accogliente, tecnico ma chiaro; non inventare clienti, progetti o cifre non fornite.\n- Puoi collegare Meko e Granzotto all'innovazione industriale e all'automazione quando è naturale.\n- DGS supporta la robotica in questa demo; Meko ospita l'incontro.",
     "whisper_hint": "Granzotto, Meko, impianti industriali, food beverage, chimico, vino, olio, vernici, cosmetici, buongiorno, salve, presentazione."
   },
   "alpitronic": {

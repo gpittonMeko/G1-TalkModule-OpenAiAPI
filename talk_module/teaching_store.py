@@ -69,8 +69,28 @@ def delete_temp() -> bool:
     return False
 
 
+def find_slot_by_name(name: str) -> Optional[int]:
+    """Trova slot teaching per meta.name (es. «spiegazione»)."""
+    key = (name or "").strip().lower()
+    if not key:
+        return None
+    _ensure_dir()
+    for f in TEACHINGS_DIR.glob("slot_*.json"):
+        try:
+            slot_id = int(f.stem.split("_")[1])
+            with open(f, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            meta = data.get("meta") or {}
+            slot_name = str(meta.get("name") or "").strip().lower()
+            if slot_name == key:
+                return slot_id
+        except Exception:
+            pass
+    return None
+
+
 def list_teachings() -> list[dict]:
-    """Return list of {slot_id, frames_count, duration_s} for all saved trajectories."""
+    """Return list of {slot_id, name, frames, duration_s} for all saved trajectories."""
     _ensure_dir()
     result = []
     for f in TEACHINGS_DIR.glob("slot_*.json"):
@@ -80,7 +100,15 @@ def list_teachings() -> list[dict]:
                 data = json.load(fh)
             frames = data.get("frames", [])
             duration = frames[-1]["t"] - frames[0]["t"] if len(frames) > 1 else 0
-            result.append({"slot_id": slot_id, "frames": len(frames), "duration_s": round(duration, 2)})
+            meta = data.get("meta") or {}
+            result.append(
+                {
+                    "slot_id": slot_id,
+                    "name": str(meta.get("name") or "").strip(),
+                    "frames": len(frames),
+                    "duration_s": round(duration, 2),
+                }
+            )
         except Exception:
             pass
     return sorted(result, key=lambda x: x["slot_id"])

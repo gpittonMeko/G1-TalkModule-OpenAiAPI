@@ -114,8 +114,8 @@ const Soundboard = (() => {
 
     const dest = document.getElementById("sbPlayDest").value;
 
-    // Robot actions + LED when connected
-    if (Services.isConnected()) {
+    // Robot actions + LED when connected (solo riproduzione locale: su server le fa il Jetson)
+    if (Services.isConnected() && dest !== "server") {
       _fireRobotActions(s);
       if (s.led_effect) {
         try { await Api.ledEffect(s.led_effect); } catch {}
@@ -183,8 +183,10 @@ const Soundboard = (() => {
         await fetch(Api._base() + "/api/teaching/replay_slot/" + slot.teaching_slot, { method: "POST" });
       } catch {}
     }
-    const arm = slot.robot_arm || "face_wave";
-    try { await Api.robotAction(arm); } catch {}
+    const arm = (slot.robot_arm || "").trim();
+    if (arm) {
+      try { await Api.robotAction(arm); } catch {}
+    }
     if (slot.robot_loco) {
       try { await Api.robotLoco(slot.robot_loco); } catch {}
     }

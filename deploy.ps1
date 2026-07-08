@@ -147,7 +147,7 @@ Write-Host "       sed CRLF su script..." -NoNewline
 if ($env:G1_SKIP_STRIP_CRLF -eq "1") {
     Write-Host " saltato (G1_SKIP_STRIP_CRLF=1)" -ForegroundColor Gray
 } else {
-    # `$ in doppie virgolette: solo per bash remoto. Un solo argomento remoto (niente bash -lc annidato: rompe le " su "$f").
+    # Backtick per variabili bash remote. Un solo argomento remoto (niente bash -lc annidato).
     $stripCrlfRemote = "cd `"$remote`" && for f in scripts/*.sh; do [ -f `"`$f`" ] && sed -i 's/\r`$//' `"`$f`"; done; exit 0"
     ssh @sshExec -T $sshHost $stripCrlfRemote
     if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE sed CRLF $LASTEXITCODE" -ForegroundColor Yellow }

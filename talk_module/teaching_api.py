@@ -18,7 +18,7 @@ import asyncio
 import json
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from talk_module.teaching import TeachingManager, TeachingState
@@ -58,8 +58,9 @@ async def replay_slot(slot_id: int):
 
 
 @router.post("/save_to_slot/{slot_id}")
-async def save_to_slot(slot_id: int):
-    result = _manager.save_to_slot(slot_id)
+async def save_to_slot(slot_id: int, body: dict = Body(default={})):
+    name = str((body or {}).get("name") or "").strip()
+    result = _manager.save_to_slot(slot_id, name=name)
     return JSONResponse(result, status_code=200 if result["ok"] else 400)
 
 
