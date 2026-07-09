@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import queue
 import re
@@ -249,7 +250,11 @@ def _collect_host_ips() -> list[str]:
     return ips
 
 
-_SERVER_LOG_PATH = Path("/tmp/talk.log")
+if sys.platform == "win32":
+    _SERVER_LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "talk.log"
+    _SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+else:
+    _SERVER_LOG_PATH = Path("/tmp/talk.log")
 
 
 def _tail_server_log(max_lines: int = 80) -> list[str]:
@@ -292,6 +297,12 @@ if HAS_FASTAPI:
         app.include_router(camera_router)
     except Exception as _cam_err:
         print(f"[web_app] camera_api router not loaded: {_cam_err}")
+
+    try:
+        from talk_module.h2_movement_api import router as h2_router
+        app.include_router(h2_router)
+    except Exception as _h2_err:
+        print(f"[web_app] h2_movement_api router not loaded: {_h2_err}")
 
     try:
         from talk_module.pick_api import router as pick_router
@@ -468,9 +479,13 @@ self.addEventListener('activate', () => self.clients.claim());
             vlabel = (vprof or {}).get("label") if vprof else None
         except Exception:
             pass
+        key = (settings.api_key or "").strip()
         return {
             "status": "ok",
             "host": "AI Accelerator",
+            "platform": "windows" if sys.platform == "win32" else "linux",
+            "openai_configured": bool(key and key.startswith("sk-")),
+            "stt_provider": getattr(settings, "stt_provider", "whisper"),
             "visitor_profile": vpid,
             "visitor_label": vlabel,
             "llm_provider": llm_prov,
@@ -480,6 +495,7 @@ self.addEventListener('activate', () => self.clients.claim());
             "wake_stt_model": settings.wake_stt_model,
             "tts_model": settings.tts_model,
             "tts_voice": settings.tts_voice,
+            "env_hint": "Voce STT/LLM/TTS: OPENAI_API_KEY nel file .env del server",
         }
 
     @app.get("/api/network-info")
@@ -523,10 +539,38 @@ self.addEventListener('activate', () => self.clients.claim());
         }
 
     @app.get("/api/server-log")
-    def api_server_log(lines: int = 80):
-        """Ultime righe di /tmp/talk.log — visibili dal client HTTPS (senza watchdog :8082)."""
+    def api_server_log(lines: int = 80, channel: str = ""):
+        """Ultime righe log server — filtro opzionale: opencv, movement, hand, tts."""
         rows = _tail_server_log(lines)
-        return {"ok": True, "path": str(_SERVER_LOG_PATH), "lines": rows}
+        ch = (channel or "").strip().lower()
+        if ch in ("opencv", "movement", "hand", "tts"):
+            from talk_module.diagnostics_log import filter_file_lines, get_lines
+
+            rows = filter_file_lines(rows, ch) + get_lines(ch, lines)  # type: ignore[arg-type]
+            rows = rows[-max(10, min(int(lines), 300)) :]
+        return {"ok": True, "path": str(_SERVER_LOG_PATH), "lines": rows, "channel": ch or "all"}
+
+    @app.post("/api/tts-test")
+    def api_tts_test(body: dict = Body(default={})):
+        """Prova TTS server (.env) — per dashboard diagnostica."""
+        from talk_module.diagnostics_log import diag_log
+
+        text = (body.get("text") or "Test TTS G1 Talk.").strip()[:200]
+        errs = settings.validate()
+        if errs:
+            msg = "; ".join(errs)
+            diag_log("tts", f"FAIL {msg}")
+            return JSONResponse(status_code=400, content={"ok": False, "error": msg})
+        try:
+            from talk_module.tts.factory import get_tts_client
+
+            client = get_tts_client()
+            audio = client.synthesize(text)
+            diag_log("tts", f"OK synth len={len(audio or b'')} voice={settings.tts_voice}")
+            return {"ok": True, "bytes": len(audio or b""), "text": text}
+        except Exception as e:
+            diag_log("tts", f"FAIL {e}")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
     @app.get("/api/wake-debug")
     def api_wake_debug_list():

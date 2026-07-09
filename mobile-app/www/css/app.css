@@ -51,6 +51,54 @@ html, body {
   letter-spacing: 0.02em;
 }
 
+.diag-banner {
+  margin: 0 12px 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+}
+.diag-banner.ok { background: rgba(52, 211, 153, 0.12); color: var(--green); }
+.diag-banner.warn { background: rgba(251, 191, 36, 0.12); color: var(--yellow); }
+.diag-banner.err { background: rgba(248, 113, 113, 0.12); color: var(--red); }
+
+.slider-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 36px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text2);
+}
+.slider-row input[type="range"] { width: 100%; }
+
+.log-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.filter-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text2);
+  cursor: pointer;
+}
+.filter-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.diag-log {
+  max-height: 120px;
+  font-size: 11px;
+  margin-top: 8px;
+}
+
 .header {
   display: flex;
   align-items: center;

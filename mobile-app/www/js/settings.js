@@ -20,7 +20,6 @@ const Settings = (() => {
   function init() {
     const saved = Storage.loadSettings();
     if (saved) _cfg = { ...DEFAULTS, ...saved };
-    // Se aperta dal browser sullo stesso host (es. /dashboard/), usa IP/porta correnti.
     if (window.location.pathname.startsWith("/dashboard") && window.location.hostname) {
       _cfg.ip = window.location.hostname;
       _cfg.https = window.location.protocol === "https:";
@@ -29,6 +28,7 @@ const Settings = (() => {
     }
     _toUI();
     updateCacheStats();
+    if (typeof H2Panel !== "undefined") H2Panel.refreshTtsEnvStatus();
   }
 
   function get() { return { ..._cfg }; }
@@ -97,5 +97,14 @@ const Settings = (() => {
     _cfg.ttsModel = document.getElementById("setTtsModel").value;
   }
 
-  return { init, get, save, setIp, toggleHttps, toggleKeyVis, clearCache, updateCacheStats };
+  async function testLocalTts() {
+    try {
+      await OpenAiTts.synthesize("Test TTS soundboard locale.", { voice: _cfg.ttsVoice, model: _cfg.ttsModel });
+      App.toast("TTS locale OK");
+    } catch (e) {
+      App.toast("TTS locale: " + e.message);
+    }
+  }
+
+  return { init, get, save, setIp, toggleHttps, toggleKeyVis, clearCache, updateCacheStats, testLocalTts };
 })();

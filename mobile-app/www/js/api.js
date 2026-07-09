@@ -121,8 +121,25 @@ const Api = (() => {
   function cameraStart()   { return _post(`${_cfg().talk}/api/camera/start`, {}); }
   function cameraStop()    { return _post(`${_cfg().talk}/api/camera/stop`, {}); }
   function cameraStreamUrl() { return `${_cfg().talk}/api/camera/stream`; }
-  function serverLog(lines = 120) {
-    return _json(`${_cfg().talk}/api/server-log?lines=${lines}`);
+  function serverLog(lines = 120, channel = "") {
+    const q = channel ? `&channel=${encodeURIComponent(channel)}` : "";
+    return _json(`${_cfg().talk}/api/server-log?lines=${lines}${q}`);
+  }
+
+  function ttsTest(text) {
+    return _post(`${_cfg().talk}/api/tts-test`, { text }, { timeout: 45000 });
+  }
+
+  // H2 lab (Thor)
+  function h2Status() { return _json(`${_cfg().talk}/api/h2/status`, { timeout: 8000 }); }
+  function h2ArmMove(body) { return _post(`${_cfg().talk}/api/h2/arm/move`, body, { timeout: 15000 }); }
+  function h2ArmStop() { return _post(`${_cfg().talk}/api/h2/arm/stop`, {}, { timeout: 30000 }); }
+  function h2ArmStatus() { return _json(`${_cfg().talk}/api/h2/arm/status`); }
+  function h2WakePc2() { return _post(`${_cfg().talk}/api/h2/hand/wake-pc2`, {}, { timeout: 90000 }); }
+  function h2HandProbe() { return _post(`${_cfg().talk}/api/h2/hand/probe`, {}, { timeout: 60000 }); }
+  function h2HandGrip(body) { return _post(`${_cfg().talk}/api/h2/hand/grip`, body, { timeout: 90000 }); }
+  function h2Logs(channel, lines = 50) {
+    return _json(`${_cfg().talk}/api/h2/logs/${channel}?lines=${lines}`);
   }
 
   // Text chat
@@ -196,7 +213,8 @@ const Api = (() => {
     soundboardSaveSlot, soundboardSynth,
     robotActions, robotAction, robotMove, robotLoco,
     ledEffect, ledState, ledColor, ledAnimation,
-    cameraStatus, cameraStart, cameraStop, cameraStreamUrl, serverLog,
+    cameraStatus, cameraStart, cameraStop, cameraStreamUrl, serverLog, ttsTest,
+    h2Status, h2ArmMove, h2ArmStop, h2ArmStatus, h2WakePc2, h2HandProbe, h2HandGrip, h2Logs,
     textChat,
     wdHealth, wdTalkStatus, wdTalkRestart, wdTalkStop, wdTalkStart, wdTalkLog,
     isReachable, isWatchdogReachable,

@@ -6,39 +6,59 @@
  */
 const Services = (() => {
   let _pollTimer = null;
+  let _logTimer = null;
   let _connected = false;
   let _wdConnected = false;
+  let _openaiOk = false;
+  let _logFilter = "all";
 
   function isConnected() { return _connected; }
-
-  // ── Polling ───────────────────────────────
 
   function startPolling() {
     stopPolling();
     _poll();
     _pollTimer = setInterval(_poll, 5000);
+    startLogAutoRefresh();
   }
 
   function stopPolling() {
     if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+    stopLogAutoRefresh();
+  }
+
+  function startLogAutoRefresh() {
+    stopLogAutoRefresh();
+    refreshLog();
+    _logTimer = setInterval(refreshLog, 5000);
+    if (typeof H2Panel !== "undefined") {
+      setInterval(() => {
+        if (document.getElementById("tab-dashboard")?.classList.contains("active")) {
+          H2Panel.refreshAllDiagLogs();
+        }
+      }, 8000);
+    }
+  }
+
+  function stopLogAutoRefresh() {
+    if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
   }
 
   async function _poll() {
-    // Talk service health
     try {
       const h = await Api.health();
       _connected = true;
+      _openaiOk = !!h.openai_configured;
       _setStatus("svcStatus", "Attivo", "ok");
       _setConn(true);
       if (h.host) _el("svcHost").textContent = h.host;
     } catch {
       _connected = false;
+      _openaiOk = false;
       _setStatus("svcStatus", "Non raggiungibile", "err");
       _setConn(false);
       _el("svcHost").textContent = "--";
     }
 
-    // Version (only when connected)
     if (_connected) {
       try {
         const v = await Api.version();
@@ -48,7 +68,6 @@ const Services = (() => {
       _el("svcVersion").textContent = "--";
     }
 
-    // Watchdog (solo HTTP; su dashboard HTTPS non fare richieste mixed-content)
     if (!Settings.get().https) {
       try {
         await Api.wdHealth();
@@ -63,11 +82,40 @@ const Services = (() => {
       _setStatus("wdStatus", "Solo HTTP", "warn");
     }
 
+    _updateDiagBanner();
     _updateButtons();
     _updateAppMode();
+    if (typeof H2Panel !== "undefined") H2Panel.refreshTtsEnvStatus();
   }
 
-  // ── Actions ───────────────────────────────
+  function _updateDiagBanner() {
+    const b = _el("diagBanner");
+    if (!b) return;
+    if (!_connected) {
+      b.className = "diag-banner err";
+      b.textContent = "DISCONNESSO — controlla IP/porta in Impostazioni (Thor H2: 192.168.123.163, locale: 127.0.0.1)";
+      return;
+    }
+    if (!_openaiOk) {
+      b.className = "diag-banner warn";
+      b.textContent = "SERVER OK ma OPENAI MANCANTE — imposta OPENAI_API_KEY nel .env e riavvia";
+      return;
+    }
+    if (Settings.get().https && !_wdConnected) {
+      b.className = "diag-banner warn";
+      b.textContent = "HTTPS: watchdog disabilitato. Usa log API / Avvia da SSH se serve.";
+      return;
+    }
+    b.className = "diag-banner ok";
+    b.textContent = "Talk online — OpenAI configurata";
+  }
+
+  function setLogFilter(filter, btn) {
+    _logFilter = filter;
+    document.querySelectorAll(".filter-chip").forEach(c => c.classList.remove("active"));
+    if (btn) btn.classList.add("active");
+    refreshLog();
+  }
 
   async function start() {
     if (!_wdConnected) return App.toast("Watchdog non raggiungibile");
@@ -113,15 +161,20 @@ const Services = (() => {
 
   async function refreshLog() {
     const box = _el("logBox");
-    box.textContent = "Caricamento...";
+    if (!box) return;
+    const ch = _logFilter === "all" ? "" : _logFilter;
     try {
-      const r = await Api.serverLog();
+      const r = await Api.serverLog(150, ch);
       box.textContent = (r.lines || []).join("\n") || "(vuoto)";
       box.scrollTop = box.scrollHeight;
       return;
     } catch (_) {}
     if (!_wdConnected) {
-      box.textContent = "Log non disponibile (né API server né watchdog).";
+      if (_connected) {
+        box.textContent = "(usa filtri OpenCV/Movimento/TTS sopra se log generale vuoto)";
+      } else {
+        box.textContent = "Log non disponibile — server offline.";
+      }
       return;
     }
     try {
@@ -133,12 +186,22 @@ const Services = (() => {
     }
   }
 
-  // ── Helpers ───────────────────────────────
+  async function copyLog() {
+    const box = _el("logBox");
+    if (!box) return;
+    try {
+      await navigator.clipboard.writeText(box.textContent || "");
+      App.toast("Log copiato");
+    } catch {
+      App.toast("Copia non riuscita");
+    }
+  }
 
   function _el(id) { return document.getElementById(id); }
 
   function _setStatus(id, text, cls) {
     const el = _el(id);
+    if (!el) return;
     el.textContent = text;
     el.className = "status-value " + (cls || "");
   }
@@ -146,19 +209,21 @@ const Services = (() => {
   function _setConn(ok) {
     const dot = _el("connDot");
     const lbl = _el("connLabel");
-    dot.className = "conn-dot " + (ok ? "ok" : "");
-    lbl.textContent = ok ? "Connesso" : "Disconnesso";
+    if (dot) dot.className = "conn-dot " + (ok ? "ok" : "");
+    if (lbl) lbl.textContent = ok ? "Connesso" : "Disconnesso";
   }
 
   function _updateButtons() {
     const dis = !_wdConnected;
-    _el("btnStart").disabled = dis;
-    _el("btnRestart").disabled = dis;
-    _el("btnStop").disabled = dis;
+    ["btnStart", "btnRestart", "btnStop"].forEach(id => {
+      const el = _el(id);
+      if (el) el.disabled = dis;
+    });
   }
 
   function _updateAppMode() {
     const el = _el("appMode");
+    if (!el) return;
     if (_connected) {
       el.textContent = "Connesso";
       el.className = "status-value ok";
@@ -169,10 +234,14 @@ const Services = (() => {
   }
 
   function _disableServiceBtns(v) {
-    _el("btnStart").disabled = v;
-    _el("btnRestart").disabled = v;
-    _el("btnStop").disabled = v;
+    ["btnStart", "btnRestart", "btnStop"].forEach(id => {
+      const el = _el(id);
+      if (el) el.disabled = v;
+    });
   }
 
-  return { startPolling, stopPolling, isConnected, start, restart, stop, refreshLog };
+  return {
+    startPolling, stopPolling, isConnected,
+    start, restart, stop, refreshLog, copyLog, setLogFilter,
+  };
 })();

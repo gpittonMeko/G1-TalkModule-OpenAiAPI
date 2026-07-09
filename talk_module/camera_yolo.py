@@ -137,6 +137,11 @@ class CameraYoloService:
             if not cap.isOpened():
                 cap.release()
                 self._open_error = f"V4L2: impossibile aprire {self.device!r} (prova ls /dev/video*)"
+                try:
+                    from talk_module.diagnostics_log import diag_log
+                    diag_log("opencv", self._open_error)
+                except Exception:
+                    print(f"[camera] {self._open_error}", flush=True)
                 return False
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
@@ -147,7 +152,11 @@ class CameraYoloService:
             return True
         except Exception as e:
             self._open_error = f"OpenCV: {e}"
-            print(f"[camera] {self._open_error}", flush=True)
+            try:
+                from talk_module.diagnostics_log import diag_log
+                diag_log("opencv", self._open_error)
+            except Exception:
+                print(f"[camera] {self._open_error}", flush=True)
             return False
 
     def _open_realsense(self) -> bool:
@@ -275,6 +284,11 @@ class CameraYoloService:
                 print(f"[camera] YOLO ultralytics: {self.model_name}", flush=True)
             except Exception as e:
                 self._yolo_error = str(e)
+                try:
+                    from talk_module.diagnostics_log import diag_log
+                    diag_log("opencv", f"YOLO FAIL {e}")
+                except Exception:
+                    pass
                 print(f"[camera] ultralytics non disponibile: {e}", flush=True)
             return
         try:

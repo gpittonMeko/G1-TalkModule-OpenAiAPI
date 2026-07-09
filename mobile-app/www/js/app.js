@@ -31,8 +31,9 @@ const App = (() => {
       Soundboard.render();
       Soundboard.maybeAutoSyncFromJetson();
     }
-    if (name === "dashboard" && typeof CameraPanel !== "undefined") {
-      CameraPanel.onDashboardShow();
+    if (name === "dashboard") {
+      if (typeof CameraPanel !== "undefined") CameraPanel.onDashboardShow();
+      if (typeof H2Panel !== "undefined") H2Panel.onDashboardShow();
     }
     if (name === "settings") Settings.updateCacheStats();
     if (name === "robot") RobotPanel.loadActions();

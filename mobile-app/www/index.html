@@ -27,6 +27,8 @@
 
     <!-- ═══ DASHBOARD TAB ═══ -->
     <div id="tab-dashboard" class="tab-page active">
+      <div id="diagBanner" class="diag-banner">In attesa di connessione...</div>
+
       <div class="card">
         <div class="card-title">Stato Servizio</div>
         <div class="status-row">
@@ -75,6 +77,72 @@
           <button class="btn btn-ghost btn-sm" onclick="CameraPanel.refresh()">Aggiorna</button>
         </div>
         <div class="log-box" id="camDetections" style="margin-top:8px;max-height:72px">Nessun rilevamento</div>
+        <div class="log-box diag-log" id="logOpenCV" style="margin-top:8px;max-height:100px">Log OpenCV...</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Movimento braccio (H2)</div>
+        <p class="form-hint" style="margin:0 0 10px;font-size:11px">Braccio sinistro via DDS su Thor. Locomozione = telecomando (non Sport Mode G1).</p>
+        <div class="slider-row">
+          <label>Salita (s)</label>
+          <input type="range" id="armRise" min="2" max="20" value="8" oninput="H2Panel.syncArmLabels()">
+          <span id="armRiseVal">8</span>
+        </div>
+        <div class="slider-row">
+          <label>Pausa (s)</label>
+          <input type="range" id="armHold" min="0" max="15" value="2" oninput="H2Panel.syncArmLabels()">
+          <span id="armHoldVal">2</span>
+        </div>
+        <div class="slider-row">
+          <label>Discesa (s)</label>
+          <input type="range" id="armLower" min="2" max="20" value="8" oninput="H2Panel.syncArmLabels()">
+          <span id="armLowerVal">8</span>
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn-primary btn-sm" onclick="H2Panel.armMove()">Esegui braccio SX</button>
+          <button class="btn btn-danger btn-sm" onclick="H2Panel.armStop()">STOP</button>
+        </div>
+        <div class="status-row" style="margin-top:8px">
+          <span class="status-label">Stato braccio</span>
+          <span class="status-value" id="armRunStatus">--</span>
+        </div>
+        <div class="log-box diag-log" id="logMovement">Log movimento...</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Mani BrainCo (PC2 .162)</div>
+        <p class="form-hint" style="margin:0 0 10px;font-size:11px">Wake servizio mani sulla .162 (via Thor). Poi probe DDS e grip.</p>
+        <div class="btn-row">
+          <button class="btn btn-warn btn-sm" onclick="H2Panel.wakePc2()">Wake servizio mani</button>
+          <button class="btn btn-ghost btn-sm" onclick="H2Panel.handProbe()">Probe hand-dds</button>
+        </div>
+        <div class="slider-row" style="margin-top:8px">
+          <label>Chiusura dita %</label>
+          <input type="range" id="handGrip" min="0" max="98" value="50" oninput="H2Panel.syncHandLabel()">
+          <span id="handGripVal">50</span>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-primary btn-sm" onclick="H2Panel.handGrip(false)">Chiudi mano SX</button>
+          <button class="btn btn-ghost btn-sm" onclick="H2Panel.handGrip(true)">Apri mano SX</button>
+        </div>
+        <div class="status-row" style="margin-top:8px">
+          <span class="status-label">Mani / PC2</span>
+          <span class="status-value" id="handStatus">--</span>
+        </div>
+        <div class="log-box diag-log" id="logHand">Log mani...</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">TTS / Voce — diagnostica</div>
+        <div class="status-row">
+          <span class="status-label">OpenAI server (.env)</span>
+          <span class="status-value" id="ttsEnvStatus">--</span>
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn-primary btn-sm" onclick="H2Panel.testTtsServer()">Prova TTS server</button>
+          <button class="btn btn-ghost btn-sm" onclick="App.switchTab('settings')">Impostazioni API Key</button>
+        </div>
+        <div class="log-box diag-log" id="logTTS">Log TTS...</div>
       </div>
 
       <div class="card">
@@ -101,15 +169,23 @@
       </div>
 
       <div class="card">
-        <div class="card-title">Log Servizio</div>
+        <div class="card-title">Log Servizio (generale)</div>
+        <div class="log-filter-row">
+          <button class="filter-chip active" data-log-filter="all" onclick="Services.setLogFilter('all', this)">Tutti</button>
+          <button class="filter-chip" data-log-filter="opencv" onclick="Services.setLogFilter('opencv', this)">OpenCV</button>
+          <button class="filter-chip" data-log-filter="movement" onclick="Services.setLogFilter('movement', this)">Movimento</button>
+          <button class="filter-chip" data-log-filter="hand" onclick="Services.setLogFilter('hand', this)">Mani</button>
+          <button class="filter-chip" data-log-filter="tts" onclick="Services.setLogFilter('tts', this)">TTS</button>
+        </div>
         <div class="log-box" id="logBox">In attesa di connessione...</div>
-        <div style="margin-top:8px;text-align:right">
-          <button class="btn btn-ghost btn-sm" onclick="Services.refreshLog()">Aggiorna Log</button>
+        <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-ghost btn-sm" onclick="Services.copyLog()">Copia</button>
+          <button class="btn btn-ghost btn-sm" onclick="Services.refreshLog()">Aggiorna</button>
         </div>
       </div>
 
       <div class="card">
-        <div class="card-title">Web sul robot (Jetson)</div>
+        <div class="card-title">Moduli collegati</div>
         <p class="form-hint" style="margin:0 0 10px;font-size:11px;line-height:1.4">
           <strong>Ascolto continuo + risposta (wake, STT, LLM, TTS)</strong> gira sulla <strong>Jetson</strong> con il file
           <code>.env</code> del server (OpenAI, STT, ecc.): apri <em>Parla</em> nel browser.
@@ -244,6 +320,7 @@
           <div class="preset-chips">
             <span class="preset-chip" onclick="Settings.setIp('192.168.123.161')">Robot G1</span>
             <span class="preset-chip" onclick="Settings.setIp('192.168.10.191')">AI Accel.</span>
+            <span class="preset-chip" onclick="Settings.setIp('192.168.123.163')">Thor H2</span>
             <span class="preset-chip" onclick="Settings.setIp('192.168.123.164')">Jetson</span>
           </div>
         </div>
@@ -269,14 +346,26 @@
       </div>
 
       <div class="card">
-        <div class="card-title">OpenAI (Standalone)</div>
+        <div class="card-title">Voce robot (server .env)</div>
+        <div class="status-row">
+          <span class="status-label">OPENAI_API_KEY</span>
+          <span class="status-value" id="setEnvKeyStatus">--</span>
+        </div>
+        <p class="form-hint">Wake, STT, LLM e TTS vocale usano il file <code>.env</code> sulla Jetson/PC server — non la key sotto.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">TTS soundboard (telefono)</div>
         <div class="form-group">
-          <label class="form-label" for="setApiKey">API Key</label>
+          <label class="form-label" for="setApiKey">API Key OpenAI</label>
           <div class="api-key-wrap">
             <input class="form-input" id="setApiKey" type="password" placeholder="sk-...">
             <button class="api-key-toggle" onclick="Settings.toggleKeyVis()">&#128065;</button>
           </div>
-          <div class="form-hint">Solo per TTS soundboard offline. Wake, STT e LLM usano il <code>.env</code> sulla Jetson.</div>
+          <div class="form-hint">Solo per generare TTS soundboard offline sul telefono.</div>
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn-primary btn-sm" type="button" onclick="Settings.testLocalTts()">Prova TTS locale</button>
         </div>
         <div class="form-row">
           <div class="form-group">
@@ -426,6 +515,7 @@
 <script src="js/robot-panel.js"></script>
 <script src="js/camera-panel.js"></script>
 <script src="js/settings.js"></script>
+<script src="js/h2-panel.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
