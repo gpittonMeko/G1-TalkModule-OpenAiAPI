@@ -9,6 +9,17 @@ Assistente vocale per robot **Unitree G1**: parli → STT → GPT → TTS → ri
 
 ---
 
+## Branch `h2-testing` (Unitree H2)
+
+Per il robot **Unitree H2** (Jetson Thor, lab demo): dashboard, telecamera, teaching e voce
+sono sviluppati sul ramo **`h2-testing`**.
+
+- Sviluppo: questo repo, ramo `h2-testing` — vedi [BRANCH_H2_TESTING.md](BRANCH_H2_TESTING.md)
+- Deploy lab: repo **[unitree-h2-testing](https://github.com/gpittonMeko/unitree-h2-testing)** (`python scripts/deploy_g1_talk_to_h2.py`)
+- Dashboard: `https://<IP-Thor>:8081/dashboard/`
+
+---
+
 ## Guida completa
 
 **Leggi [GUIDA.md](GUIDA.md)** per:

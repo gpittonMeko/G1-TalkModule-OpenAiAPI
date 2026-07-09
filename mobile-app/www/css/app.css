@@ -41,6 +41,16 @@ html, body {
 }
 
 /* ── Header ─────────────────────────────────── */
+.h2-banner {
+  background: linear-gradient(90deg, #0d9488, #14b8a6);
+  color: #0c0e14;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 10px;
+  letter-spacing: 0.02em;
+}
+
 .header {
   display: flex;
   align-items: center;
