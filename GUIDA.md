@@ -82,6 +82,14 @@ cd G1-TalkModule-OpenAiAPI
 bash install.sh
 ```
 
+**Jetson G1 (computer di bordo)** — dopo `install.sh` servono anche **Unitree SDK** (braccia/loco) e **OpenCV** (dashboard camera):
+
+```bash
+bash scripts/install_jetson_completo.sh
+```
+
+Vedi **[docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md](docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md)**.
+
 ### 4. Configura le chiavi API
 
 Modifica `.env` e inserisci almeno:
@@ -104,7 +112,8 @@ bash scripts/restart_server.sh
 
 Poi apri **http://&lt;IP&gt;:8081/client** (o localhost:8081 con tunnel).
 
-Sul **Jetson del G1**, per DDS (braccia + locomozione / LocoClient): dopo `install.sh` esegui anche `bash scripts/install_unitree_sdk_jetson.sh` — guida **[docs/JETSON_UNITREE_SDK.md](docs/JETSON_UNITREE_SDK.md)**.
+Sul **Jetson del G1** usa **`bash scripts/install_jetson_completo.sh`** (base + SDK + OpenCV/YOLO).  
+`install.sh` da solo non installa `unitree_sdk2py` né `opencv` — guida **[docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md](docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md)**.
 
 ---
 
@@ -139,6 +148,7 @@ G1-TalkModule-OpenAiAPI/
 |---------------------|------------------------------------------|
 | Crea pacchetto      | `.\scripts\crea_pacchetto.ps1`           |
 | Installa (Linux)    | `bash install.sh` o `bash INSTALLA`       |
+| Installa Jetson G1  | `bash scripts/install_jetson_completo.sh` |
 | Avvia server        | `bash scripts/restart_server.sh`         |
 | Da Windows (tunnel) | `.\avvia.ps1`                            |
 

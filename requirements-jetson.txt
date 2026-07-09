@@ -1,0 +1,9 @@
+# G1 Talk Module — dipendenze complete Jetson (nuovo G1)
+# Uso: pip install -r requirements-jetson.txt   (dentro .venv, dopo install.sh)
+#
+# Include voce/web + camera/YOLO (OpenCV).
+# NON include unitree_sdk2py: installare con bash scripts/install_unitree_sdk_jetson.sh
+# RealSense (occhi robot): opzionale — bash scripts/install_realsense_jetson.sh
+
+-r requirements.txt
+-r requirements-camera.txt

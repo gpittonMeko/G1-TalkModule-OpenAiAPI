@@ -22,6 +22,10 @@ INSTALLAZIONE (5 passi)
 2. Installa
    bash install.sh
 
+   Jetson G1 (computer di bordo) — installazione COMPLETA:
+   bash scripts/install_jetson_completo.sh
+   (include Unitree SDK movimenti + OpenCV visione; install.sh da solo non basta)
+
 3. Configurazione
    Il pacchetto include .env con le chiavi API gia configurate.
    Se serve modificare: nano .env
@@ -80,6 +84,7 @@ DOCUMENTAZIONE
 
 - LEGGIMI.txt (questo file) - guida rapida
 - GUIDA.md - connessione, pacchetto, comandi
+- docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md - nuovo G1: SDK + OpenCV
 - docs/INSTALLAZIONE.md - installazione dettagliata
 - docs/STT.md - provider STT (Whisper, Groq, Deepgram)
 - docs/ROBOT_ACTIONS.md - azioni vocali (dare la mano, saluta)

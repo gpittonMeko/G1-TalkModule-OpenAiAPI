@@ -11,13 +11,22 @@ L’app Talk gira in `.venv` sotto `~/G1-TalkModule-OpenAiAPI`.
 
 ## Installazione automatica (consigliata)
 
-Sul Jetson, dopo aver creato la venv del progetto (`install.sh` / `scripts/install_jetson_tutto_in_cartella.sh`):
+**Nuovo G1** — una sola riga (base + SDK + OpenCV/YOLO):
+
+```bash
+cd ~/G1-TalkModule-OpenAiAPI
+bash scripts/install_jetson_completo.sh
+```
+
+Solo SDK (se hai già la venv e OpenCV):
 
 ```bash
 cd ~/G1-TalkModule-OpenAiAPI
 bash scripts/install_unitree_sdk_jetson.sh
 bash scripts/restart_server.sh
 ```
+
+Guida completa: [INSTALLAZIONE_G1_JETSON_COMPLETA.md](INSTALLAZIONE_G1_JETSON_COMPLETA.md).
 
 Lo script:
 
@@ -81,6 +90,8 @@ cd ~/G1-TalkModule-OpenAiAPI
 |------|--------|
 | `scripts/install_unitree_sdk_jetson.sh` | Installazione completa Cyclone C + pip + patch |
 | `scripts/patch_unitree_sdk2py_init.sh` | Patch post-install `unitree_sdk2py/__init__.py` |
+| `scripts/install_jetson_completo.sh` | Installazione completa Jetson (base + SDK + camera) |
+| `scripts/verify_jetson_deps.py` | Verifica SDK + OpenCV + YOLO |
 | `scripts/verify_unitree_loco_import.py` | Test import `LocoClient` |
 | `scripts/restart_server.sh` | Riavvio modulo Talk dopo modifiche |
 

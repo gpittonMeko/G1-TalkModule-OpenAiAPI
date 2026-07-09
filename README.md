@@ -44,7 +44,13 @@ Assistente vocale per robot **Unitree G1**: parli → STT → GPT → TTS → ri
 |-----------|-------------|
 | `UNITREE_ROBOT_IP` | IP del robot per "dare la mano", "saluta" |
 
-**Jetson (DDS + LocoClient)**: vedi [docs/JETSON_UNITREE_SDK.md](docs/JETSON_UNITREE_SDK.md) e `scripts/install_unitree_sdk_jetson.sh`.
+**Jetson (nuovo G1)**: `bash install.sh` **non basta** — serve anche SDK movimenti e OpenCV visione:
+
+```bash
+bash scripts/install_jetson_completo.sh
+```
+
+Guida: [docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md](docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md) · SDK: [docs/JETSON_UNITREE_SDK.md](docs/JETSON_UNITREE_SDK.md)
 
 ---
 
@@ -72,6 +78,8 @@ G1-TalkModule-OpenAiAPI/
 ├── avvia.ps1               # Avvio da Windows
 ├── avvia_ai_accelerator.sh  # Avvio server
 ├── requirements.txt
+├── requirements-camera.txt   # OpenCV (visione dashboard)
+├── requirements-jetson.txt     # base + camera (pip)
 └── .env.example
 ```
 
@@ -107,7 +115,9 @@ Oppure usa `.\deploy.ps1` se configurato.
 ## Documentazione
 
 - **[GUIDA.md](GUIDA.md)** - Guida rapida: connessione, installazione, pacchetto
+- **[docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md](docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md)** - Nuovo G1: SDK + OpenCV + checklist
 - [docs/INSTALLAZIONE.md](docs/INSTALLAZIONE.md) - Guida installazione dettagliata
+- [docs/JETSON_UNITREE_SDK.md](docs/JETSON_UNITREE_SDK.md) - Unitree SDK2 / Cyclone DDS
 - [docs/STT.md](docs/STT.md) - Provider STT e correzioni fuzzy
 - [docs/ROBOT_ACTIONS.md](docs/ROBOT_ACTIONS.md) - Azioni vocali G1
 - [docs/AUDIO.md](docs/AUDIO.md) - PortAudio e dispositivi

@@ -35,23 +35,22 @@ Su alcune immagini Jetson il PPA non è supportato: in quel caso usa un’immagi
 
 ## Installazione su Jetson (es. `unitree@192.168.123.164`)
 
+> **`install.sh` da solo non basta su G1 nuovo**: mancano **Unitree SDK** (movimenti) e **OpenCV** (visione).  
+> Usa la guida dedicata: **[INSTALLAZIONE_G1_JETSON_COMPLETA.md](INSTALLAZIONE_G1_JETSON_COMPLETA.md)**.
+
+### Installazione rapida (nuovo G1)
+
 1. Copia il progetto in `~/G1-TalkModule-OpenAiAPI` (git clone, scp, zip).
-2. In `.env` imposta almeno `OPENAI_API_KEY` e, per redirect HTTP→HTTPS e certificato coerenti con la LAN:
-
-   ```env
-   TALK_PUBLIC_HOST=192.168.123.164
-   ```
-
-3. Installazione (tutto il progetto e il venv restano in `~/G1-TalkModule-OpenAiAPI`; Python 3.10 di sistema va installato con `apt`):
+2. Installazione completa (base + OpenCV/YOLO + Unitree SDK):
 
    ```bash
    cd ~/G1-TalkModule-OpenAiAPI
-   bash scripts/install_jetson_tutto_in_cartella.sh
+   bash scripts/install_jetson_completo.sh
    ```
 
-   In alternativa manuale: `PYTHON=python3.10 bash install.sh --no-audio`
+   Opzioni: `--realsense` (camera occhi G1), `--skip-sdk`, `--skip-camera`.
 
-   (`--no-audio` se usi solo browser/telefono sulla rete e non ti serve PortAudio sul Jetson.)
+3. In `.env` imposta almeno `OPENAI_API_KEY` e `TALK_PUBLIC_HOST` (IP Jetson sulla LAN).
 
 4. Certificati (CN = IP che usi dal telefono):
 
@@ -59,15 +58,12 @@ Su alcune immagini Jetson il PPA non è supportato: in quel caso usa un’immagi
    TALK_PUBLIC_HOST=192.168.123.164 bash scripts/generate_ssl_cert.sh
    ```
 
-   oppure `bash scripts/generate_ssl_cert.sh 192.168.123.164`
-
-5. **Unitree SDK2 (G1 braccia + LocoClient)** — necessario per joystick / Ready / Walk e azioni braccia via DDS sul Jetson:
+5. Verifica dipendenze:
 
    ```bash
-   bash scripts/install_unitree_sdk_jetson.sh
+   .venv/bin/python3 scripts/verify_jetson_deps.py
+   bash scripts/diagnose_g1_robot.py
    ```
-
-   Dettagli, limiti PyPI aarch64 e patch: **[docs/JETSON_UNITREE_SDK.md](JETSON_UNITREE_SDK.md)**.
 
 6. Avvio:
 
@@ -76,6 +72,17 @@ Su alcune immagini Jetson il PPA non è supportato: in quel caso usa un’immagi
    ```
 
 7. Test: `curl -k https://127.0.0.1:8081/api/health` — dal PC: `https://192.168.123.164:8081/client`
+
+### Solo base (voce/web, senza braccia né camera)
+
+```bash
+bash scripts/install_jetson_tutto_in_cartella.sh
+# oppure: PYTHON=python3.10 bash install.sh --no-audio
+```
+
+Poi aggiungi manualmente SDK e camera come in [INSTALLAZIONE_G1_JETSON_COMPLETA.md](INSTALLAZIONE_G1_JETSON_COMPLETA.md).
+
+Dettaglio SDK: **[JETSON_UNITREE_SDK.md](JETSON_UNITREE_SDK.md)**.
 
 Da Windows, senza modificare gli script, puoi impostare:
 

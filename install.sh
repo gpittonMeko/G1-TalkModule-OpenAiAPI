@@ -102,13 +102,18 @@ python3 -c "from talk_module.web_app import app; print('      Modulo OK')" 2>/de
 
 echo ""
 echo "=============================================="
-echo "  Installazione completata"
+echo "  Installazione completata (base)"
 echo "=============================================="
 echo ""
 echo "  Prossimi passi:"
 echo "  1. Modifica .env e inserisci OPENAI_API_KEY"
-echo "  2. bash scripts/restart_server.sh"
-echo "  3. Apri: http://<IP>:8081/client"
+if [ -f /etc/nv_tegra_release ] 2>/dev/null || uname -m 2>/dev/null | grep -q aarch64; then
+    echo "  2. Jetson G1 — installazione COMPLETA (SDK movimenti + OpenCV visione):"
+    echo "       bash scripts/install_jetson_completo.sh"
+    echo "     (install.sh da solo NON include unitree_sdk2py né opencv)"
+fi
+echo "  3. bash scripts/restart_server.sh"
+echo "  4. Apri: http://<IP>:8081/client"
 echo ""
-echo "  Leggi: LEGGIMI.txt"
+echo "  Leggi: docs/INSTALLAZIONE_G1_JETSON_COMPLETA.md"
 echo ""
