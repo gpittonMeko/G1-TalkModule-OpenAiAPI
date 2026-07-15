@@ -9,6 +9,14 @@ Assistente vocale per robot **Unitree G1**: parli → STT → GPT → TTS → ri
 
 ---
 
+## Branch e robot
+
+Questo repo e il ramo **`main`** sono per **Unitree G1**.
+
+Sviluppo **Unitree H2**: ramo [`h2-testing`](https://github.com/gpittonMeko/G1-TalkModule-OpenAiAPI/tree/h2-testing) + repo [`unitree-h2-testing`](https://github.com/gpittonMeko/unitree-h2-testing).
+
+---
+
 ## Guida completa
 
 **Leggi [GUIDA.md](GUIDA.md)** per:
