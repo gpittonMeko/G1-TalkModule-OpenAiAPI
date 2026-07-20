@@ -49,12 +49,13 @@ RUN_SHEET_PATH = Path(__file__).resolve().parent.parent / "config" / "run_sheet.
 
 def _soundboard_slot_count() -> int:
     try:
-        n = int((os.getenv("G1_SOUNDBOARD_SLOTS") or "20").strip())
+        n = int((os.getenv("G1_SOUNDBOARD_SLOTS") or "100").strip())
     except ValueError:
-        n = 20
-    return max(1, min(n, 64))
+        n = 100
+    return max(1, min(n, 100))
 
 
+SOUNDBOARD_AUDIO_ZONE_COUNT = 50
 SOUNDBOARD_SLOT_COUNT = _soundboard_slot_count()
 SOUNDBOARD_TEXT_MAX_LEN = 280
 # soundboard.json può essere ~20MB: una sola lettura parse in RAM finché il file non cambia (mtime).
@@ -975,7 +976,12 @@ self.addEventListener('activate', () => self.clients.claim());
                     "text": s.get("text"),
                     "format": s.get("format") or "webm",
                     "format_clean": s.get("format_clean") or "mp3",
-                    "has_robot": False,
+                    "has_robot": bool(
+                        str(s.get("robot_arm") or "").strip()
+                        or str(s.get("robot_loco") or "").strip()
+                        or str(s.get("led_effect") or "").strip()
+                        or str(s.get("teaching_slot") or "").strip()
+                    ),
                     "has_clean": len(ac) > 50,
                     "robot_arm": str(s.get("robot_arm") or ""),
                     "robot_loco": str(s.get("robot_loco") or ""),
@@ -1133,6 +1139,8 @@ self.addEventListener('activate', () => self.clients.claim());
         rl = data.get("robot_loco")
         le = data.get("led_effect")
         ts = data.get("teaching_slot")
+        if slot < SOUNDBOARD_AUDIO_ZONE_COUNT:
+            ra, rl, le, ts = "", "", "", ""
         slots[slot] = {
             "icon": str(data.get("icon", "🎤")).strip()[:20],
             "text": txt,
@@ -1418,6 +1426,31 @@ self.addEventListener('activate', () => self.clients.claim());
             return {"ok": True, **st}
         except Exception as e:
             return {"ok": False, "message": str(e)}
+
+    @app.get("/api/robot-unitree-teachings")
+    def api_robot_unitree_teachings():
+        """Teach registrati nell'app Unitree sul robot (GetActionList API 7107)."""
+        try:
+            from talk_module.robot_actions import fetch_unitree_robot_action_catalog
+
+            return fetch_unitree_robot_action_catalog()
+        except Exception as e:
+            return {"ok": False, "error": str(e), "custom": [], "preset": []}
+
+    @app.post("/api/robot-unitree-teachings/play")
+    def api_robot_unitree_teaching_play(data: dict = Body(...)):
+        """Riproduce un teach dell'app Unitree per nome (API 7108)."""
+        name = str(data.get("name") or data.get("action_name") or "").strip()
+        robot_ip = data.get("robot_ip") or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
+        if not name:
+            raise HTTPException(400, "name richiesto")
+        try:
+            from talk_module.robot_actions import execute_unitree_custom_teaching
+
+            ok, msg = execute_unitree_custom_teaching(name, robot_ip=robot_ip)
+            return {"ok": ok, "message": msg, "name": name}
+        except Exception as e:
+            return {"ok": False, "message": str(e), "name": name}
 
     @app.post("/api/robot-action")
     def api_execute_robot_action(data: dict = Body(...)):
@@ -2548,8 +2581,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       box-sizing: border-box;
       z-index: 10005;
       isolation: isolate;
-      -webkit-backface-visibility: hidden;
-      backface-visibility: hidden;
       touch-action: manipulation;
     }
     .hamburger {
@@ -2576,7 +2607,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       display: none;
       position: fixed;
       top: 0;
-      left: 0 !important;
+      left: max(0px, calc((100vw - min(420px, 100vw)) / 2)) !important;
       right: auto !important;
       transform: none !important;
       width: min(280px, 85vw);
@@ -2586,7 +2617,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       box-sizing: border-box;
       background: linear-gradient(180deg, #0f1117 0%, #141922 100%);
       border-right: 1px solid rgba(255,255,255,0.08);
-      z-index: 10001;
+      box-shadow: 4px 0 28px rgba(0,0,0,0.55);
+      z-index: 99999;
       padding: 20px 0;
       padding-top: max(20px, env(safe-area-inset-top));
       overflow-y: auto;
@@ -2632,13 +2664,16 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     .overlay {
       position: fixed;
       inset: 0;
-      background: rgba(0,0,0,0.5);
-      z-index: 10000;
+      background: rgba(0,0,0,0.55);
+      z-index: 99998;
       display: none;
       opacity: 0;
       transition: opacity 0.25s;
       pointer-events: none;
     }
+    body.g1-drawer-open { overflow: hidden; }
+    body.g1-drawer-open .header { z-index: 9990 !important; }
+    body.g1-drawer-open .main-content { pointer-events: none; }
     .overlay.visible { display: block; opacity: 1; pointer-events: auto; }
     .overlay:not(.visible) {
       display: none !important;
@@ -2682,6 +2717,34 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     .section.active { display: block; }
     #section-soundboard.section.active { display: block !important; }
     #section-robot.section.active { display: flex !important; flex-direction: column; min-height: calc(100vh - 100px); }
+    .robot-panel-tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+    .robot-panel-tab {
+      padding: 8px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05); color: #a1a1aa; font-size: 12px; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+    }
+    .robot-panel-tab.active { background: rgba(99,102,241,0.18); border-color: rgba(99,102,241,0.45); color: #c4b5fd; }
+    #robotPanelUnitreeTeach { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .unitree-teach-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+    .unitree-teach-bar .hint { margin: 0; font-size: 11px; color: #71717a; flex: 1; min-width: 160px; }
+    .unitree-teach-bar button {
+      padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(20,184,166,0.35);
+      background: rgba(20,184,166,0.12); color: #5eead4; font-size: 11px; font-weight: 600; cursor: pointer;
+    }
+    #unitreeTeachList {
+      flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px;
+      max-height: min(52vh, 420px); padding-right: 2px;
+    }
+    .unitree-teach-item {
+      display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+    }
+    .unitree-teach-item .ut-name { flex: 1; font-size: 12px; color: #e4e4e7; word-break: break-word; }
+    .unitree-teach-item .ut-dur { font-size: 10px; color: #71717a; font-family: monospace; min-width: 36px; text-align: right; }
+    .unitree-teach-item button {
+      padding: 5px 10px; border-radius: 6px; border: 1px solid rgba(20,184,166,0.4);
+      background: rgba(20,184,166,0.15); color: #5eead4; font-size: 10px; font-weight: 700; cursor: pointer;
+    }
     #robotControlFrame { flex: 1; width: 100%; min-height: 360px; border: 0; border-radius: 12px; background: #0f1115; }
     .client-camera-wrap { position: relative; background: #0f1115; border-radius: 12px; overflow: hidden; aspect-ratio: 4/3; max-height: min(52vh, 420px); border: 1px solid rgba(255,255,255,0.08); margin-bottom: 12px; }
     .client-camera-wrap img { width: 100%; height: 100%; object-fit: contain; display: none; background: #000; }
@@ -2694,7 +2757,23 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     .client-cam-dets { font-size: 11px; color: #a1a1aa; min-height: 2.4em; line-height: 1.4; padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 8px; border: 1px solid rgba(255,255,255,0.06); }
     .client-cam-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
     .client-cam-btns button { padding: 10px 16px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: #e4e4e7; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .client-cam-btns button:disabled { opacity: 0.35; cursor: not-allowed; }
     .client-cam-btns button.primary { background: rgba(20,184,166,0.2); border-color: rgba(20,184,166,0.45); color: #5eead4; }
+    .client-cam-vision-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 10px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      font-size: 13px;
+      color: #d4d4d8;
+      cursor: pointer;
+      user-select: none;
+    }
+    .client-cam-vision-toggle input { width: 16px; height: 16px; accent-color: #14b8a6; cursor: pointer; }
     .client-log-box { margin-top: 8px; padding: 10px 12px; background: #0a0b10; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; line-height: 1.45; color: #a1a1aa; max-height: min(58vh, 480px); overflow: auto; white-space: pre-wrap; word-break: break-word; }
     h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 4px; }
     .step {
@@ -2793,23 +2872,28 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       .btn-allow { padding: 16px 20px; min-height: 48px; font-size: 15px; }
       input[type="text"] { font-size: 16px; min-height: 44px; }
       .step { padding: 14px; margin: 10px 0; }
-      #soundboardGrid { grid-template-columns: repeat(4, 1fr) !important; gap: 10px !important; }
-      #soundboardScroll { min-height: 200px; }
+      .soundboard-grid { grid-template-columns: repeat(6, 1fr) !important; gap: 4px !important; }
       #sbModal > div { max-width: 100%; margin: env(safe-area-inset-top) 12px env(safe-area-inset-bottom); padding: 20px; }
       #sbModal button, #sbModal label { min-height: 44px; padding: 12px 16px; display: inline-flex; align-items: center; justify-content: center; }
       #sbModal input[type="range"] { min-height: 36px; }
       #textInput, #btnText { min-height: 48px !important; }
       .result { padding: 14px; font-size: 14px; }
     }
+    @media (max-width: 400px) {
+      .soundboard-grid { grid-template-columns: repeat(5, 1fr) !important; }
+    }
     @media (max-width: 360px) {
-      #soundboardGrid { grid-template-columns: repeat(3, 1fr) !important; }
+      .soundboard-grid { grid-template-columns: repeat(4, 1fr) !important; gap: 4px !important; }
+    }
+    @media (min-width: 900px) {
+      .soundboard-grid { grid-template-columns: repeat(8, 1fr) !important; }
     }
     @media (orientation: landscape) {
       body { max-width: 100%; }
       .header { max-width: 100%; padding-top: max(8px, env(safe-area-inset-top, 0px)); padding-bottom: 8px; }
       .main-content { padding-top: calc(16px + 4.5rem + env(safe-area-inset-top, 0px)); }
-      #soundboardGrid { grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)) !important; }
-      #soundboardScroll { max-height: 50vh; }
+      .soundboard-grid { grid-template-columns: repeat(8, 1fr) !important; gap: 3px !important; }
+      .soundboard-grid [role="button"] { min-height: 46px; }
       .btn { width: 120px; height: 120px; font-size: 13px; margin: 12px auto; }
     }
     @media (orientation: landscape) and (max-height: 500px) {
@@ -2829,18 +2913,94 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       input.wake-checkbox { width: auto !important; height: auto !important; min-width: 44px; min-height: 44px; }
     }
     button, .btn, .btn-allow, .hamburger, .client-tab { -webkit-user-select: none; user-select: none; }
-    #soundboardScroll { max-height: min(62vh, 520px); overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y pinch-zoom; margin-bottom: 8px; }
-    #soundboardScroll, #soundboardGrid, #soundboardGrid [role="button"] {
+    #section-soundboard.section.active {
+      display: flex !important;
+      flex-direction: column;
+      min-height: calc(100dvh - 5.5rem - env(safe-area-inset-top, 0px));
+    }
+    #section-soundboard h2 { font-size: 1rem; margin: 0 0 6px; }
+    #section-soundboard .sb-controls { margin-bottom: 6px !important; }
+    #soundboardScroll { overflow: visible; max-height: none; margin-bottom: 0; flex: 1; }
+    .soundboard-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 4px;
+      align-content: start;
+    }
+    .soundboard-grid [role="button"] {
+      min-height: 52px;
+      padding: 3px 2px 12px;
+      border-radius: 7px;
+      touch-action: manipulation;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .soundboard-grid [role="button"].sb-slot-filled-teal {
+      background: rgba(20,184,166,0.08);
+      border: 2px solid #14b8a6;
+    }
+    .soundboard-grid [role="button"].sb-slot-filled-purple {
+      background: rgba(139,92,246,0.12);
+      border: 2px solid #a78bfa;
+    }
+    .soundboard-grid [role="button"] .sb-slot-icon { font-size: 16px; margin-bottom: 1px; line-height: 1; }
+    .soundboard-grid [role="button"] .sb-slot-text { font-size: 8.5px; line-height: 1.1; -webkit-line-clamp: 2; color: #9ca3af; text-align: center; max-width: 100%; pointer-events: none; }
+    .soundboard-grid [role="button"] .sb-slot-edit {
+      position: absolute;
+      bottom: 2px;
+      right: 2px;
+      margin: 0;
+      padding: 1px 3px;
+      font-size: 9px;
+      line-height: 1;
+      min-height: 0;
+      border-radius: 4px;
+      opacity: 0.75;
+      background: rgba(255,255,255,0.1);
+      color: #9ca3af;
+      border: none;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+  .sb-zone-head {
+    font-size: 10px;
+    font-weight: 600;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0 0 5px;
+  }
+  .sb-zone-head.sb-zone-robot { color: #a78bfa; margin-top: 2px; }
+  .sb-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0 8px;
+    color: #52525b;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .sb-divider::before,
+  .sb-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: rgba(255,255,255,0.12);
+  }
+    #soundboardScroll, .soundboard-grid, .soundboard-grid [role="button"] {
       pointer-events: auto !important;
     }
-    #soundboardGrid [role="button"] { touch-action: manipulation; }
-    .sb-slot-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.25; word-break: break-word; }
+    .soundboard-grid [role="button"] { touch-action: manipulation; }
+    .sb-slot-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.15; word-break: break-word; }
     #sbModalText { width: 100%; min-height: 72px; padding: 10px; margin-top: 4px; background: #27272a; border: 1px solid #3f3f46; border-radius: 8px; color: #fff; font-family: inherit; font-size: 13px; resize: vertical; }
-    #runSheetTable { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
-    #runSheetTable th, #runSheetTable td { border: 1px solid rgba(255,255,255,0.1); padding: 8px; text-align: left; vertical-align: top; }
-    #runSheetTable th { color: #9ca3af; font-weight: 600; }
-    #runSheetTable input { width: 100%; box-sizing: border-box; padding: 6px 8px; background: #27272a; border: 1px solid #3f3f46; border-radius: 6px; color: #e4e4e7; font-size: 12px; }
-    #runSheetPolicy { width: 100%; min-height: 56px; padding: 10px; background: #27272a; border: 1px solid #3f3f46; border-radius: 8px; color: #e4e4e7; font-size: 13px; font-family: inherit; }
     .quick-guide {
       background: rgba(20,184,166,0.09);
       border: 1px solid rgba(20,184,166,0.28);
@@ -2901,75 +3061,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <!-- overlay/sidebar poi <main>; header in fondo al body: ultimo sibling = hit-test corretto su WebKit mobile (hamburger). -->
-  <div class="overlay" id="overlay"></div>
-  <aside class="sidebar" id="sidebar">
-    <div class="sidebar-head">
-      <span>Menu</span>
-      <button type="button" class="sidebar-close" id="sidebarClose" aria-label="Chiudi menu" onclick="return window.g1CloseDrawer && window.g1CloseDrawer()">&#10005;</button>
-    </div>
-    <nav>
-      <a href="#soundboard" data-section="soundboard" class="active" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('soundboard')"><span class="icon">&#128266;</span> Soundboard</a>
-      <a href="#runsheet" data-section="runsheet" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('runsheet')"><span class="icon">&#128197;</span> Tempi evento</a>
-      <a href="#parla" data-section="parla" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('parla')"><span class="icon">&#127908;</span> Parla</a>
-      <a href="#occhi" data-section="occhi" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('occhi')"><span class="icon">&#128065;</span> Occhi robot</a>
-      <a href="#log" data-section="log" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('log')"><span class="icon">&#128196;</span> Log Jetson</a>
-      <a href="#knowledge" data-section="knowledge" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('knowledge')"><span class="icon">&#128214;</span> Knowledge</a>
-      <a href="#devices" data-section="devices" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('devices')"><span class="icon">&#128268;</span> Dispositivi</a>
-      <a href="#robot" data-section="robot" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('robot')"><span class="icon">&#127918;</span> Robot (G1)</a>
-      <a href="#info" data-section="info" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('info')"><span class="icon">&#8505;</span> Info</a>
-    </nav>
-  </aside>
-  <script>
-  (function(){
-    function g1OpenDrawer(){
-      var sb = document.getElementById('sidebar');
-      var ov = document.getElementById('overlay');
-      var hb = document.getElementById('hamburger');
-      if (sb) sb.classList.add('open');
-      if (ov) ov.classList.add('visible');
-      if (hb) hb.setAttribute('aria-expanded', 'true');
-    }
-    function g1CloseDrawer(){
-      var sb = document.getElementById('sidebar');
-      var ov = document.getElementById('overlay');
-      var hb = document.getElementById('hamburger');
-      if (sb) sb.classList.remove('open');
-      if (ov) ov.classList.remove('visible');
-      if (hb) hb.setAttribute('aria-expanded', 'false');
-    }
-    window.g1ToggleDrawer = function(e){
-      if (e) { e.preventDefault(); e.stopPropagation(); }
-      var sb = document.getElementById('sidebar');
-      if (sb && sb.classList.contains('open')) g1CloseDrawer(); else g1OpenDrawer();
-      return false;
-    };
-    window.g1CloseDrawer = g1CloseDrawer;
-    window.g1OpenDrawer = g1OpenDrawer;
-    var _sbClose = document.getElementById('sidebarClose');
-    if (_sbClose) _sbClose.addEventListener('click', function(e){ e.preventDefault(); g1CloseDrawer(); });
-  })();
-  </script>
   <main class="main-content">
-    <div id="lanConnectBar" style="padding:8px 12px 10px;font-size:11px;line-height:1.45;background:rgba(20,184,166,0.07);border-bottom:1px solid rgba(20,184,166,0.2);">
-      <div style="color:#9ca3af;margin-bottom:4px;">App sul robot (salva su telefono/PC):</div>
-      <a id="lanClientLink" href="/client" style="color:#5eead4;font-weight:700;font-size:12px;word-break:break-all;text-decoration:none;"></a>
-      <div id="lanAltLinks" style="margin-top:6px;color:#71717a;font-size:10px;line-height:1.4;"></div>
-    </div>
-    <div id="persistentMicLevel" style="padding:5px 12px;display:flex;align-items:center;gap:8px;background:rgba(20,184,166,0.05);border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:2px;">
-      <span style="font-size:11px;color:#71717a;white-space:nowrap;">&#127908; Mic</span>
-      <div style="flex:1;height:10px;background:#1e1e2e;border-radius:5px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
-        <div id="persistMicBar" style="width:0%;height:100%;background:#22c55e;transition:width 0.06s;border-radius:5px;"></div>
-      </div>
-      <span id="persistMicLabel" style="font-size:10px;color:#71717a;font-family:monospace;min-width:50px;">--</span>
-    </div>
     <script>
     (function(){
       function closeDrawer(){
-        var sb = document.getElementById('sidebar');
-        var ov = document.getElementById('overlay');
-        if (sb) sb.classList.remove('open');
-        if (ov) ov.classList.remove('visible');
+        if (window.g1CloseDrawer) window.g1CloseDrawer();
       }
       window.g1ActivateClientSection = function(sec){
         var nodes, i, el = document.getElementById('section-'+sec);
@@ -2984,14 +3080,21 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         try { window.scrollTo(0, 0); } catch (e) {}
         if (sec === 'robot') {
           var rf = document.getElementById('robotControlFrame');
-          if (rf) { rf.src = location.origin + '/robot-control'; }
+          if (rf && (!rf.src || rf.src === 'about:blank')) { rf.src = location.origin + '/robot-control'; }
+          if (typeof window.g1LoadUnitreeTeachings === 'function') window.g1LoadUnitreeTeachings();
         }
         setTimeout(function(){
           if ((sec === 'soundboard' || sec === 'parla') && navigator.mediaDevices) {
             var o = document.getElementById('sbOutput');
             if (o && o.options && o.options.length <= 1 && typeof requestAndLoadDevices === 'function') requestAndLoadDevices();
           }
-          if (sec === 'runsheet' && typeof loadRunSheet === 'function') loadRunSheet();
+          if (sec === 'parla') {
+            setTimeout(function(){
+              if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible();
+            }, 80);
+          } else if (typeof stopParlaMicPreview === 'function') {
+            stopParlaMicPreview();
+          }
         }, 0);
         return false;
       };
@@ -3000,7 +3103,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       function g1ApplyClientHash(){
         var h = (location.hash||'').replace(/^#/, '').trim();
         if (!h) return;
-        var allowed = {soundboard:1,runsheet:1,parla:1,occhi:1,log:1,knowledge:1,devices:1,robot:1,info:1};
+        var allowed = {soundboard:1,parla:1,occhi:1,log:1,knowledge:1,devices:1,robot:1,info:1};
         if (allowed[h] && typeof window.g1ActivateClientSection === 'function') {
           window.g1ActivateClientSection(h);
         }
@@ -3015,22 +3118,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     (function(){
       function _lanFill(data){
         var cur = location.origin + '/client';
-        var a = document.getElementById('lanClientLink');
-        if (a) { a.href = cur; a.textContent = cur; }
-        var alt = document.getElementById('lanAltLinks');
-        if (alt) {
-          var parts = [];
-          if (data && data.links && data.links.length) {
-            data.links.forEach(function(l){
-              if (l.client && l.client.indexOf(location.hostname) < 0) {
-                parts.push('<a href="'+l.client+'" style="color:#94a3b8;text-decoration:none;">'+l.client+'</a>');
-              }
-            });
-          }
-          alt.innerHTML = parts.length
-            ? 'Altri IP sulla rete robot: ' + parts.join(' · ')
-            : 'Se non si apre da un altro dispositivo, verifica stessa WiFi/router e IP Jetson (<code style="color:#a1a1aa;">hostname -I</code>).';
-        }
         var ic = document.getElementById('infoClientUrl');
         if (ic) { ic.href = cur; ic.textContent = cur; }
         var io = document.getElementById('infoOcchiUrl');
@@ -3057,44 +3144,33 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     })();
     </script>
     <section id="section-soundboard" class="section active">
-  <h2 style="font-size:1.2rem;margin:0 0 16px;">Soundboard</h2>
-  <p class="hint" style="margin-bottom:8px;"><strong>Predefinito: cassa del robot</strong> (uscita audio sulla Jetson). Serve setup <code>/</code> con altoparlante <em>locale</em> salvato. «Browser» = audio su questo telefono/PC. <strong>Voce:</strong> solo TTS / registrazione naturale.</p>
-  <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    <label style="font-size:12px;color:#9ca3af;">Uscita audio:</label>
+  <h2>Soundboard</h2>
+  <div class="sb-controls" style="margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <label style="font-size:12px;color:#9ca3af;">Uscita</label>
     <select id="sbPlayDest" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;min-width:220px;">
       <option value="server" selected>Cassa sul Jetson (robot)</option>
       <option value="browser">Browser (PC / telefono)</option>
     </select>
-    <label id="sbBrowserSinkLabel" style="font-size:12px;color:#9ca3af;">Riproduci su (solo se Browser):</label>
+    <label id="sbBrowserSinkLabel" style="font-size:12px;color:#9ca3af;">Riproduci su</label>
     <select id="sbOutput" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;min-width:180px;">
       <option value="default">Predefinito</option>
     </select>
     <button type="button" id="sbOutputRefresh" style="padding:6px 12px;font-size:12px;background:rgba(255,255,255,0.08);color:#9ca3af;border:1px solid rgba(255,255,255,0.1);border-radius:8px;cursor:pointer;">Aggiorna</button>
   </div>
-  <div style="margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;max-width:520px;">
-    <label for="sbGainSlider" style="font-size:12px;color:#9ca3af;">Volume soundboard (browser, guadagno digitale):</label>
+  <div class="sb-controls" style="margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;max-width:520px;">
+    <label for="sbGainSlider" style="font-size:12px;color:#9ca3af;">Volume</label>
     <input type="range" id="sbGainSlider" min="0.5" max="3" step="0.05" value="1.35" style="flex:1;min-width:140px;max-width:220px;accent-color:#14b8a6;" />
     <span id="sbGainLabel" style="font-size:12px;color:#a1a1aa;font-family:monospace;min-width:44px;">1.35×</span>
   </div>
-  <p id="soundboardLoadErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;grid-column:1/-1;"></p>
-  <p id="soundboardLoadHint" class="hint" style="margin:0 0 8px;font-size:11px;color:#71717a;">Caricamento slot…</p>
-  <button type="button" id="sbReloadSlots" style="margin:0 0 10px;padding:8px 14px;font-size:12px;background:rgba(20,184,166,0.12);color:#5eead4;border:1px solid rgba(20,184,166,0.35);border-radius:8px;cursor:pointer;">Ricarica slot soundboard</button>
+  <p id="soundboardLoadErr" class="hint" style="display:none;margin:0 0 6px;color:#f87171;grid-column:1/-1;"></p>
+  <p id="soundboardLoadHint" class="hint" style="display:none;margin:0 0 6px;font-size:11px;color:#71717a;"></p>
   <div id="soundboardScroll">
-  <div id="soundboardGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;"></div>
+    <p class="sb-zone-head">Solo audio</p>
+    <div id="soundboardGridAudio" class="soundboard-grid"></div>
+    <div class="sb-divider" aria-hidden="true">Audio + robot</div>
+    <p class="sb-zone-head sb-zone-robot">Con movimento robot</p>
+    <div id="soundboardGridRobot" class="soundboard-grid"></div>
   </div>
-  <p class="hint" style="margin-top:8px;font-size:11px;">Modifica (✏️): registra, importa, <b>Genera TTS dal testo</b>, icona. Audio sempre naturale.</p>
-    <div class="quick-guide" id="quickGuide">
-      <details>
-        <summary>Come funziona (apri per la guida rapida)</summary>
-        <p style="margin:8px 0 4px;"><strong>Due modi, un solo server</strong> — voce e IA girano sul <strong>PC del G1</strong> (o Linux sulla stessa rete). Questa pagina è il <strong>telecomando</strong> dal telefono o dal PC.</p>
-        <ul>
-          <li><strong>Browser (consigliato):</strong> stesso WiFi del robot → apri questo indirizzo (<code id="guideUrl">/client</code>). Per il microfono serve HTTPS; al primo accesso «Avanzate → Procedi».</li>
-          <li><strong>APK Android:</strong> stessa schermata; inserisci l’IP del server nell’app launcher. Per la <strong>cassa Bluetooth</strong>: accoppia il telefono all’altoparlante in Impostazioni → l’audio esce lì.</li>
-          <li><strong>Prima volta sul robot:</strong> copia lo zip d’installazione, <code>bash install.sh</code>, configura <code>.env</code>, poi <code>bash scripts/restart_server.sh</code>. Pacchetto Windows: <code>dist/G1_Pacchetto_Installazione_Completa.zip</code>.</li>
-        </ul>
-        <p class="hint" style="margin:6px 0 0;font-size:11px;">Dettagli in menu <strong>Info</strong> · Leggi anche <code>LEGGIMI.txt</code> nel pacchetto.</p>
-      </details>
-    </div>
   <div id="sbModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:15000;padding:8px;flex-direction:column;align-items:center;justify-content:flex-start;overflow-y:auto;-webkit-overflow-scrolling:touch;">
     <div style="background:#1a1d24;border-radius:12px;padding:14px;max-width:400px;width:100%;border:1px solid rgba(255,255,255,0.1);margin:8px auto;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -3113,6 +3189,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           <button type="button" id="sbModalClear" style="padding:6px 10px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:11px;">Rimuovi</button>
         </div>
       </div>
+      <div id="sbModalRobotBlock">
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;">
         <select id="sbModalArm" style="flex:1;min-width:100px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;">
           <option value="">Gesto: nessuno</option>
@@ -3161,26 +3238,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         <div id="sbModalLedPreview" style="width:22px;height:22px;border-radius:50%;border:2px solid #3f3f46;background:#27272a;flex-shrink:0;"></div>
         <input type="number" id="sbModalTeaching" min="" max="99" value="" placeholder="Teach" style="width:60px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;text-align:center;" title="Teaching slot (numero)" />
       </div>
+      </div>
       <div style="display:flex;gap:6px;margin-top:8px;">
         <button type="button" id="sbModalSave" style="flex:1;padding:10px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva</button>
         <button type="button" id="sbModalCancel" style="padding:10px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border:none;border-radius:8px;cursor:pointer;font-size:13px;">Annulla</button>
       </div>
     </div>
   </div>
-    </section>
-    <section id="section-runsheet" class="section">
-  <h2 style="font-size:1.2rem;margin:0 0 12px;">Run sheet / tempistica</h2>
-  <p class="hint" style="margin-bottom:10px;"><strong>Uso:</strong> tabella di supporto per l’evento. Inserisci orari e note quando l’organizzatore te li comunica; <strong>Salva tempi</strong> memorizza sul server. Consultala mentre usi la soundboard o Parla.</p>
-  <label style="font-size:12px;color:#9ca3af;display:block;margin-bottom:6px;">Policy autonomia robot</label>
-  <textarea id="runSheetPolicy" style="margin-bottom:14px;"></textarea>
-  <div style="overflow-x:auto;">
-    <table id="runSheetTable">
-      <thead><tr><th>Fase</th><th>Attività</th><th>Ora inizio</th><th>Durata stimata</th><th>Note</th></tr></thead>
-      <tbody id="runSheetBody"></tbody>
-    </table>
-  </div>
-  <button type="button" id="runSheetSave" style="margin-top:14px;padding:10px 20px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Salva tempi</button>
-  <span id="runSheetStatus" class="hint" style="margin-left:12px;"></span>
     </section>
     <section id="section-parla" class="section">
 
@@ -3194,7 +3258,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       </label>
     </div>
     <p id="wakeListenStatus" style="margin:0 0 6px;font-size:13px;color:#71717a;">Disattivato</p>
-    <p style="margin:0 0 8px;font-size:11px;color:#52525b;">Dopo ogni risposta di G1 l&apos;ascolto si spegne da solo: riattiva il toggle per un nuovo &laquo;Hey G1&raquo;.</p>
     <div id="wakeDebugLog" style="max-height:60px;overflow-y:auto;font-size:10px;font-family:monospace;color:#52525b;line-height:1.4;margin:0 0 8px;padding:4px 8px;background:rgba(0,0,0,0.2);border-radius:6px;display:none;"></div>
     <div id="recStatus" style="min-height:30px;">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
@@ -3212,8 +3275,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <details id="parlaMicPreviewPanel" style="margin:12px 0 0;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2);">
       <summary style="padding:10px 12px;cursor:pointer;font-size:12px;color:#93c5fd;font-weight:600;user-select:none;">Microfono e sensibilit&agrave;</summary>
       <div style="padding:0 12px 12px;">
-      <p class="hint" id="parlaSetupHintTop" style="margin:0 0 8px;font-size:10px;color:#64748b;line-height:1.4;"><strong>Setup tipico:</strong> microfono su questo telefono (es. DJI Mic Mini), cassa <strong>Bluetooth</strong> accoppiata al telefono — in Soundboard scegli <strong>Browser</strong> e la cassa in <strong>Riproduci su</strong>. Dopo &laquo;Hey G1&raquo; hai ~22&nbsp;s per la domanda; una pausa fino a ~3&nbsp;s non taglia l&apos;audio.</p>
-      <div id="parlaPreviewDisabledMsg" style="display:none;font-size:11px;color:#f59e0b;margin-bottom:8px;">Seleziona un microfono <strong>Browser</strong> nel menu sopra (es. Intel RealSense).</div>
+      <div id="parlaPreviewDisabledMsg" style="display:none;font-size:11px;color:#f59e0b;margin-bottom:8px;">Seleziona un microfono Browser.</div>
       <div id="parlaPreviewMeterWrap" style="position:relative;">
         <div style="position:relative;height:20px;background:#1e1e2e;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
           <div id="parlaPreviewThresholdLine" style="position:absolute;top:0;bottom:0;width:3px;background:#f97316;z-index:3;opacity:0.9;left:4%;box-shadow:0 0 4px #f97316;"></div>
@@ -3225,11 +3287,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
       <div style="margin-top:12px;">
-        <label for="micWakeThresholdSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Sensibilit&agrave; ascolto continuo (soglia invio voce): <strong id="wakeThDisplay">14</strong> <span style="color:#52525b;">(pi&ugrave; basso = pi&ugrave; sensibile)</span></label>
+        <label for="micWakeThresholdSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Soglia voce: <strong id="wakeThDisplay">14</strong></label>
         <input type="range" id="micWakeThresholdSlider" min="1" max="80" value="14" style="width:100%;max-width:340px;accent-color:#3b82f6;" />
       </div>
       <div style="margin-top:10px;">
-        <label for="micMonitorGainSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Guadagno indicatore (solo barra, non cambia l&apos;audio registrato): <strong id="micGainDisplay">1.0</strong>×</label>
+        <label for="micMonitorGainSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Guadagno barra: <strong id="micGainDisplay">1.0</strong>×</label>
         <input type="range" id="micMonitorGainSlider" min="0.4" max="4" step="0.1" value="1" style="width:100%;max-width:340px;accent-color:#64748b;" />
       </div>
       </div>
@@ -3286,7 +3348,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         <option value="browser" selected>Browser (telefono/PC)</option>
         <option value="server">Cassa robot (Jetson)</option>
       </select>
-      <p id="ttsServerHint" class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;"></p>
+      <p id="ttsServerHint" class="hint" style="display:none;margin:4px 0 0;font-size:10px;color:#52525b;"></p>
     </div>
   </details>
   <details style="margin-top:8px;">
@@ -3308,10 +3370,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="section-knowledge" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Knowledge</h2>
-  <p class="hint" style="margin-bottom:10px;"><strong>Uso:</strong> frasi «chiave → risposta» per McKinsey host, curiosità, FAQ. Se l’utente (o tu in <strong>Parla</strong>) dice qualcosa che <strong>contiene</strong> il pattern, il robot risponde subito senza chiamare il modello GPT (più veloce e coerente col testo).</p>
   <details id="knowledgeWrap" class="step" open style="margin-bottom:12px;border:1px solid rgba(255,255,255,0.06);">
     <summary style="cursor:pointer;color:#a1a1aa;">Pattern -&gt; risposta (<span id="knowledgeCount">caricamento…</span>)</summary>
-    <p class="hint" style="margin-top:8px;">Aggiungi righe e <strong>Salva su server</strong>. La corrispondenza è per sottostringa nel testo riconosciuto.</p>
     <div id="knowledgeList" style="margin-top:8px;"></div>
     <div style="margin-top:8px;">
       <input type="text" id="knowledgePattern" placeholder="Pattern" style="width:45%;padding:8px;margin-right:4px;" />
@@ -3323,20 +3383,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="section-devices" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 12px;">Dispositivi</h2>
-  <p class="hint" style="margin:0 0 12px;font-size:12px;">Microfono e altoparlante si scelgono in <strong>Parla</strong>. Qui: volume TTS e diagnostica hardware Jetson.</p>
   <div class="step">
     <div style="margin-top:14px;padding:12px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;">
-      <label style="display:block;font-size:12px;color:#86efac;font-weight:600;margin-bottom:6px;">Volume risposta TTS</label>
+      <label style="display:block;font-size:12px;color:#86efac;font-weight:600;margin-bottom:6px;">Volume TTS</label>
       <div style="display:flex;align-items:center;gap:10px;">
         <input type="range" id="ttsGainSlider" min="0.5" max="10.0" step="0.1" style="flex:1;accent-color:#22c55e;" />
         <span id="ttsGainLabel" style="font-size:12px;color:#a1a1aa;font-family:monospace;min-width:40px;">2.5x</span>
       </div>
-      <p class="hint" style="margin:4px 0 0;font-size:10px;color:#52525b;">1.0 = originale, 2.5 = default. Max 10x. L&apos;audio viene anche normalizzato lato server (loudnorm).</p>
     </div>
     <details style="margin-top:12px;">
-      <summary style="cursor:pointer;font-size:12px;color:#71717a;">Avanzate (hardware Jetson, nomi PortAudio)</summary>
+      <summary style="cursor:pointer;font-size:12px;color:#71717a;">Avanzate</summary>
       <div style="padding-top:8px;">
-        <p class="hint" style="margin-bottom:8px;"><strong>Jetson:</strong> scansione PortAudio + ALSA + USB. Voci <em>Jetson (server)</em> = audio sul robot.</p>
         <pre id="hwProbe" style="margin:0 0 10px;padding:10px;background:#18181b;border-radius:8px;font-size:10px;line-height:1.35;max-height:180px;overflow:auto;color:#a1a1aa;white-space:pre-wrap;">—</pre>
         <button type="button" id="devicesLoadFull" style="padding:6px 12px;background:rgba(59,130,246,0.25);color:#93c5fd;border:1px solid rgba(59,130,246,0.4);border-radius:8px;cursor:pointer;font-size:11px;margin-bottom:8px;">Mostra tutti i nomi</button>
         <pre id="devicesFullDump" style="margin:0 0 10px;padding:10px;background:#0f172a;border-radius:8px;font-size:10px;line-height:1.35;max-height:min(50vh,420px);overflow:auto;color:#cbd5e1;white-space:pre-wrap;display:none;">—</pre>
@@ -3347,27 +3404,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <section id="section-info" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Info</h2>
   <div class="step">
-    <p style="margin:0 0 8px;"><strong>Pacchetti pronti (PC Windows, cartella <code>dist/</code>):</strong></p>
-    <ul class="hint" style="margin:0 0 14px;padding-left:18px;font-size:12px;line-height:1.5;">
-      <li><code>G1_Pacchetto_Installazione_Completa.zip</code> — server + audio soundboard + APK launcher + <code>LEGGIMI_INSTALLAZIONE_COMPLETA.txt</code></li>
-      <li><code>G1-TalkModule-OpenAiAPI.zip</code> — solo installazione Linux sul G1 (<code>install.sh</code>)</li>
-    </ul>
-    <p style="margin:0 0 8px;">G1 Talk Module — assistente vocale per Unitree G1.</p>
-    <p class="hint" style="margin:0 0 16px;">Menu: <strong>Soundboard</strong>, <strong>Tempi</strong>, <strong>Parla</strong>, <strong>Knowledge</strong>, <strong>Dispositivi</strong>, <strong>Robot</strong> (joystick + gesti G1 verso <code>192.168.123.161</code> da <code>.env</code>). Guida in cima alla pagina.</p>
-    <p style="margin:0 0 8px;font-size:14px;"><b>Da telefono o PC (stessa rete del router / WiFi robot):</b></p>
-    <p class="hint" style="margin:0 0 8px;">Apri questo link (HTTPS — necessario per il microfono):</p>
     <a id="infoClientUrl" href="/client" style="display:inline-block;padding:12px 18px;background:#14b8a6;color:#0c0e14;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;margin-bottom:6px;word-break:break-all;"></a>
-    <p class="hint" style="margin:0 0 8px;font-size:11px;">Occhi robot: <a id="infoOcchiUrl" href="/client#occhi" style="color:#5eead4;">client#occhi</a> · Dashboard: <a id="infoDashUrl" href="/dashboard/" style="color:#5eead4;">/dashboard/</a></p>
-    <p class="hint" style="margin:0 0 8px;font-size:11px;">Alternativa HTTP (reindirizza a HTTPS): <span id="infoHttpUrls" style="color:#a1a1aa;">—</span></p>
-    <p class="hint" style="margin:0 0 12px;font-size:11px;">Al primo accesso: <strong>Avanzate → Procedi</strong> (certificato locale). IP Jetson: <code id="infoJetsonIps">—</code></p>
-    <button type="button" onclick="window.g1RefreshLanLinks && g1RefreshLanLinks()" style="padding:8px 14px;background:rgba(255,255,255,0.08);color:#e4e4e7;border:1px solid rgba(255,255,255,0.12);border-radius:8px;cursor:pointer;font-size:12px;margin-bottom:12px;">Aggiorna indirizzi rete</button>
-    <p style="margin:0 0 6px;font-size:13px;"><b>Da PC (rete diversa dal robot):</b></p>
-    <p class="hint" style="margin:0;font-size:12px;">Tunnel SSH poi localhost:8081/client</p>
+    <p style="margin:8px 0 0;font-size:12px;"><a id="infoOcchiUrl" href="/client#occhi" style="color:#5eead4;">Occhi</a> · <a id="infoDashUrl" href="/dashboard/" style="color:#5eead4;">Dashboard</a></p>
+    <span id="infoHttpUrls" style="display:none;"></span>
+    <code id="infoJetsonIps" style="display:none;"></code>
   </div>
     </section>
     <section id="section-log" class="section">
       <h2 style="font-size:1.2rem;margin:0 0 8px;">Log Jetson</h2>
-      <p class="hint" style="margin:0 0 10px;font-size:12px;">Ultime righe di <code>/tmp/talk.log</code> (server, camera, errori). Si aggiorna da solo mentre sei su questa scheda.</p>
       <div class="client-cam-btns" style="margin-top:0;margin-bottom:8px;">
         <button type="button" class="primary" onclick="window.g1ClientLogRefresh && g1ClientLogRefresh()">Aggiorna ora</button>
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#9ca3af;">
@@ -3377,11 +3421,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <pre id="clientLogBox" class="client-log-box">Caricamento log…</pre>
     </section>
     <section id="section-occhi" class="section">
-      <h2 style="font-size:1.2rem;margin:0 0 8px;">Occhi robot (RealSense)</h2>
-      <p class="hint" style="margin:0 0 12px;font-size:12px;">Stream live dalla camera sulla testa del G1. YOLO rileva persone, tavoli, ecc.; con RealSense mostra anche la distanza (depth) su ogni box.</p>
+      <h2 style="font-size:1.2rem;margin:0 0 8px;">Occhi robot</h2>
+      <label class="client-cam-vision-toggle" for="clientCamVisionEnable">
+        <input type="checkbox" id="clientCamVisionEnable" />
+        <span>Attiva visione (stream camera)</span>
+      </label>
       <div class="client-camera-wrap">
         <img id="clientCamStream" alt="Occhi robot G1" />
-        <div id="clientCamPlaceholder" class="client-camera-placeholder">Stream non attivo — premi Avvia</div>
+        <div id="clientCamPlaceholder" class="client-camera-placeholder">Visione disattivata — spunta la casella sopra per collegare la camera</div>
       </div>
       <div class="client-cam-meta">
         <span class="lbl">Camera</span><span class="val" id="clientCamStatus">--</span>
@@ -3400,19 +3447,81 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <div class="hint" id="clientPickStatus" style="margin-top:8px;font-size:11px;color:#71717a;">Auto-pick: —</div>
     </section>
     <section id="section-robot" class="section">
-      <h2 style="font-size:1.2rem;margin:0 0 8px;">Robot G1 — Sport mode</h2>
-      <p class="hint" style="margin:0 0 12px;font-size:12px;">Joystick e gesti braccia: comandi al robot (default IP <code>192.168.123.161</code>, modificabile sotto). Sport mode (L1+A sul telecomando), poi <strong>Ready</strong>. Se un gesto a due braccia muove solo il DX, controlla il log sotto (deve mostrare l'id corretto) e prova <strong>Rilascia braccia</strong> prima.</p>
-      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-        <a href="/vr-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.4);color:#c4b5fd;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#x1F576; VR Control (Quest 3)</a>
-        <a href="/robot-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);color:#a5b4fc;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#127918; Robot Control (fullscreen)</a>
+      <h2 style="font-size:1.2rem;margin:0 0 8px;">Robot G1</h2>
+      <div class="robot-panel-tabs">
+        <button type="button" class="robot-panel-tab active" data-robot-panel="control" onclick="return window.g1RobotPanelTab && window.g1RobotPanelTab('control')">Controllo</button>
+        <button type="button" class="robot-panel-tab" data-robot-panel="unitree-teach" onclick="return window.g1RobotPanelTab && window.g1RobotPanelTab('unitree-teach')">Teach app Unitree</button>
       </div>
-      <iframe id="robotControlFrame" title="Robot control" src="about:blank"></iframe>
+      <div id="robotPanelControl">
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+          <a href="/vr-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.4);color:#c4b5fd;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#x1F576; VR Control (Quest 3)</a>
+          <a href="/robot-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);color:#a5b4fc;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#127918; Robot Control (fullscreen)</a>
+        </div>
+        <iframe id="robotControlFrame" title="Robot control" src="about:blank"></iframe>
+      </div>
+      <div id="robotPanelUnitreeTeach" style="display:none;">
+        <div class="unitree-teach-bar">
+          <p class="hint">Teach registrati nell'app Unitree sul robot (non quelli REC di questa dashboard).</p>
+          <button type="button" id="unitreeTeachRefresh" onclick="window.g1LoadUnitreeTeachings && window.g1LoadUnitreeTeachings()">Aggiorna</button>
+        </div>
+        <p id="unitreeTeachErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;"></p>
+        <div id="unitreeTeachList"><p class="hint" style="margin:0;font-size:11px;color:#52525b;">Caricamento…</p></div>
+      </div>
     </section>
   </main>
   <header class="header">
     <button type="button" class="hamburger" id="hamburger" aria-label="Menu" aria-expanded="false" onclick="return window.g1ToggleDrawer && window.g1ToggleDrawer(event)">&#9776;</button>
     <h1>G1 Talk</h1>
   </header>
+  <div class="overlay" id="overlay"></div>
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <span>Menu</span>
+      <button type="button" class="sidebar-close" id="sidebarClose" aria-label="Chiudi menu" onclick="return window.g1CloseDrawer && window.g1CloseDrawer()">&#10005;</button>
+    </div>
+    <nav>
+      <a href="#soundboard" data-section="soundboard" class="active" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('soundboard')"><span class="icon">&#128266;</span> Soundboard</a>
+      <a href="#parla" data-section="parla" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('parla')"><span class="icon">&#127908;</span> Parla</a>
+      <a href="#occhi" data-section="occhi" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('occhi')"><span class="icon">&#128065;</span> Occhi robot</a>
+      <a href="#log" data-section="log" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('log')"><span class="icon">&#128196;</span> Log Jetson</a>
+      <a href="#knowledge" data-section="knowledge" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('knowledge')"><span class="icon">&#128214;</span> Knowledge</a>
+      <a href="#devices" data-section="devices" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('devices')"><span class="icon">&#128268;</span> Dispositivi</a>
+      <a href="#robot" data-section="robot" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('robot')"><span class="icon">&#127918;</span> Robot (G1)</a>
+      <a href="#info" data-section="info" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('info')"><span class="icon">&#8505;</span> Info</a>
+    </nav>
+  </aside>
+  <script>
+  (function(){
+    function g1OpenDrawer(){
+      var sb = document.getElementById('sidebar');
+      var ov = document.getElementById('overlay');
+      var hb = document.getElementById('hamburger');
+      if (sb) sb.classList.add('open');
+      if (ov) ov.classList.add('visible');
+      if (hb) hb.setAttribute('aria-expanded', 'true');
+      document.body.classList.add('g1-drawer-open');
+    }
+    function g1CloseDrawer(){
+      var sb = document.getElementById('sidebar');
+      var ov = document.getElementById('overlay');
+      var hb = document.getElementById('hamburger');
+      if (sb) sb.classList.remove('open');
+      if (ov) ov.classList.remove('visible');
+      if (hb) hb.setAttribute('aria-expanded', 'false');
+      document.body.classList.remove('g1-drawer-open');
+    }
+    window.g1ToggleDrawer = function(e){
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      var sb = document.getElementById('sidebar');
+      if (sb && sb.classList.contains('open')) g1CloseDrawer(); else g1OpenDrawer();
+      return false;
+    };
+    window.g1CloseDrawer = g1CloseDrawer;
+    window.g1OpenDrawer = g1OpenDrawer;
+    var _sbClose = document.getElementById('sidebarClose');
+    if (_sbClose) _sbClose.addEventListener('click', function(e){ e.preventDefault(); g1CloseDrawer(); });
+  })();
+  </script>
 
   <script>
     (function(){
@@ -3456,10 +3565,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       if (window.g1CloseDrawer) window.g1CloseDrawer();
     })();
-    (function(){
-      const g = document.getElementById('guideUrl');
-      if (g) g.textContent = location.origin + '/client';
-    })();
+
     const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
     const wsParlaUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/parla';
     var btn = null;
@@ -5204,20 +5310,29 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const el = document.getElementById('sbModalCharCount');
       if(el) el.textContent = n;
     }
-    function renderSoundboard(){
-      const grid = document.getElementById('soundboardGrid');
-      if (!grid) return;
-      grid.innerHTML = soundboardSlots.map((s,i)=>{
-        const hasN = (typeof s.has_clean === 'boolean') ? s.has_clean : !!(s.audio_base64_clean && s.audio_base64_clean.length > 50);
-        const hasAudio = hasN;
-        const border = hasAudio ? '2px solid #14b8a6' : '1px solid rgba(255,255,255,0.08)';
-        const bg = hasAudio ? 'rgba(20,184,166,0.08)' : 'rgba(255,255,255,0.05)';
-        let badgeTitle = 'Vuoto', badgeHtml = '&#8212;';
-        if(hasAudio){ badgeTitle = 'Audio'; badgeHtml = '&#9654;'; }
-        const badge = hasAudio ? '<span style="position:absolute;top:4px;right:4px;font-size:9px;font-weight:700;color:#14b8a6;" title="'+badgeTitle+'">'+badgeHtml+'</span>' : '<span style="position:absolute;top:4px;right:4px;font-size:10px;color:#71717a;" title="Vuoto">&#8212;</span>';
-        const label = (s.text||'Comando '+(i+1)).replace(/\u003c/g,'&lt;').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-        return '<div id="sb'+i+'" role="button" tabindex="0" aria-label="Riproduci slot '+(i+1)+'" style="position:relative;display:flex;flex-direction:column;align-items:center;padding:8px;background:'+bg+';border-radius:10px;cursor:pointer;border:'+border+';min-height:88px;touch-action:manipulation;-webkit-tap-highlight-color:rgba(20,184,166,0.2);">'+badge+'<span style="font-size:22px;margin-bottom:4px;pointer-events:none;">'+(s.icon||sbIconAt(i))+'</span><span class="sb-slot-text" style="font-size:10px;color:#9ca3af;text-align:center;max-width:100%;pointer-events:none;">'+label+'</span><button type="button" onclick="event.stopPropagation();editSoundboard('+i+')" style="margin-top:4px;padding:8px 10px;font-size:10px;background:rgba(255,255,255,0.1);color:#9ca3af;border:none;border-radius:4px;cursor:pointer;touch-action:manipulation;">✏️</button></div>';
-      }).join('');
+    const SB_AUDIO_COUNT = 50;
+    const SB_ROBOT_START = 50;
+    function sbSlotHasAudio(s){
+      return (typeof s.has_clean === 'boolean') ? s.has_clean : !!(s.audio_base64_clean && s.audio_base64_clean.length > 50);
+    }
+    function sbBuildSlotHtml(s, i, zone){
+      const hasAudio = sbSlotHasAudio(s);
+      let cls = 'sb-slot';
+      let badgeColor = '#71717a';
+      if (zone === 'robot') {
+        if (hasAudio) { cls += ' sb-slot-filled-purple'; badgeColor = '#a78bfa'; }
+      } else {
+        if (hasAudio) { cls += ' sb-slot-filled-teal'; badgeColor = '#14b8a6'; }
+      }
+      let badgeTitle = 'Vuoto', badgeHtml = '&#8212;';
+      if (hasAudio){ badgeTitle = 'Audio'; badgeHtml = '&#9654;'; }
+      const badge = hasAudio
+        ? '<span style="position:absolute;top:4px;right:4px;font-size:9px;font-weight:700;color:'+badgeColor+';" title="'+badgeTitle+'">'+badgeHtml+'</span>'
+        : '<span style="position:absolute;top:4px;right:4px;font-size:10px;color:#71717a;" title="Vuoto">&#8212;</span>';
+      const label = (s.text||'Comando '+(i+1)).replace(/\u003c/g,'&lt;').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      return '<div id="sb'+i+'" class="'+cls+'" role="button" tabindex="0" aria-label="Riproduci slot '+(i+1)+'">'+badge+'<span class="sb-slot-icon" style="pointer-events:none;">'+(s.icon||sbIconAt(i))+'</span><span class="sb-slot-text" style="pointer-events:none;">'+label+'</span><button type="button" class="sb-slot-edit" onclick="event.stopPropagation();editSoundboard('+i+')">✏️</button></div>';
+    }
+    function sbBindSlotEvents(){
       soundboardSlots.forEach((s,i)=>{
         const el = document.getElementById('sb'+i);
         if (!el) return;
@@ -5236,6 +5351,16 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         });
       });
     }
+    function renderSoundboard(){
+      const gridAudio = document.getElementById('soundboardGridAudio');
+      const gridRobot = document.getElementById('soundboardGridRobot');
+      if (!gridAudio && !gridRobot) return;
+      const audioSlots = soundboardSlots.slice(0, SB_AUDIO_COUNT);
+      const robotSlots = soundboardSlots.slice(SB_ROBOT_START);
+      if (gridAudio) gridAudio.innerHTML = audioSlots.map((s,i)=>sbBuildSlotHtml(s, i, 'audio')).join('');
+      if (gridRobot) gridRobot.innerHTML = robotSlots.map((s,j)=>sbBuildSlotHtml(s, SB_ROBOT_START + j, 'robot')).join('');
+      sbBindSlotEvents();
+    }
     window.renderSoundboard = renderSoundboard;
     function sbSetLoadErr(msg){
       const e = document.getElementById('soundboardLoadErr');
@@ -5245,7 +5370,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     function sbApplyLitePayload(d){
       sbSetLoadErr('');
-      var n = (d && typeof d.slot_count === 'number' && d.slot_count > 0) ? d.slot_count : 20;
+      var n = (d && typeof d.slot_count === 'number' && d.slot_count > 0) ? d.slot_count : 100;
       if (d && d.slots && d.slots.length) {
         soundboardSlots = d.slots.slice();
         while (soundboardSlots.length < n) {
@@ -5254,10 +5379,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         }
         var withAudio = soundboardSlots.filter(function(s){ return s.has_clean; }).length;
         var hint = document.getElementById('soundboardLoadHint');
-        if (hint) hint.textContent = withAudio + ' slot con audio su ' + soundboardSlots.length + ' (dal Jetson)';
+        if (hint) { hint.style.display = 'none'; hint.textContent = ''; }
       } else {
         var hint2 = document.getElementById('soundboardLoadHint');
-        if (hint2) hint2.textContent = 'Nessuno slot dal server — controlla config/soundboard.json sul Jetson';
+        if (hint2) { hint2.style.display = 'none'; hint2.textContent = ''; }
       }
       if (typeof d.text_max_len === 'number' && d.text_max_len > 0) { sbTextMax = d.text_max_len; const mx = document.getElementById('sbModalCharMax'); if(mx) mx.textContent = sbTextMax; }
       renderSoundboard();
@@ -5273,13 +5398,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         sbSetLoadErr('Elenco slot dal server non disponibile ('+(err && err.message ? err.message : 'rete')+'). I pulsanti sotto restano usabili; torna su Sound o ricarica per riprovare.');
       });
     }
-    soundboardSlots = Array.from({length: 20}, function(_, i){
+    soundboardSlots = Array.from({length: 100}, function(_, i){
       return { icon: sbIconAt(i), text: 'Comando '+(i+1), has_robot: false, has_clean: false };
     });
     renderSoundboard();
     sbLoadLiteSlots();
-    var sbReloadBtn = document.getElementById('sbReloadSlots');
-    if (sbReloadBtn) sbReloadBtn.addEventListener('click', function(){ sbLoadLiteSlots(); });
     (function(){
       var baseNav = window.g1ActivateClientSection;
       if (typeof baseNav !== 'function') return;
@@ -5315,6 +5438,60 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         return false;
       };
     })();
+    window.g1RobotPanelTab = function(panel){
+      var ctl = document.getElementById('robotPanelControl');
+      var teach = document.getElementById('robotPanelUnitreeTeach');
+      var tabs = document.querySelectorAll('.robot-panel-tab');
+      for (var i = 0; i < tabs.length; i++) {
+        tabs[i].classList.toggle('active', tabs[i].getAttribute('data-robot-panel') === panel);
+      }
+      if (ctl) ctl.style.display = (panel === 'control') ? '' : 'none';
+      if (teach) teach.style.display = (panel === 'unitree-teach') ? 'flex' : 'none';
+      if (panel === 'unitree-teach' && typeof window.g1LoadUnitreeTeachings === 'function') window.g1LoadUnitreeTeachings();
+    };
+    window.g1PlayUnitreeTeaching = function(name){
+      if (!name) return;
+      fetch('/api/robot-unitree-teachings/play', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name })
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (!d.ok) alert('Teach: ' + (d.message || 'errore'));
+      }).catch(function(e){ alert('Teach: ' + (e.message || String(e))); });
+    };
+    window.g1LoadUnitreeTeachings = function(){
+      var list = document.getElementById('unitreeTeachList');
+      var err = document.getElementById('unitreeTeachErr');
+      if (!list) return;
+      list.innerHTML = '<p class="hint" style="margin:0;font-size:11px;color:#52525b;">Caricamento…</p>';
+      if (err) { err.style.display = 'none'; err.textContent = ''; }
+      fetch('/api/robot-unitree-teachings')
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if (!d.ok) {
+            if (err) { err.style.display = 'block'; err.textContent = d.error || 'Elenco non disponibile'; }
+            list.innerHTML = '<p class="hint" style="margin:0;font-size:11px;color:#52525b;">—</p>';
+            return;
+          }
+          var items = d.custom || [];
+          if (!items.length) {
+            list.innerHTML = '<p class="hint" style="margin:0;font-size:11px;color:#52525b;">Nessun teach nell&#39;app Unitree sul robot.</p>';
+            return;
+          }
+          list.innerHTML = items.map(function(t){
+            var dur = (t.duration_s != null) ? (t.duration_s + 's') : '—';
+            var nm = String(t.name || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+            var jsName = JSON.stringify(String(t.name || ''));
+            return '<div class="unitree-teach-item"><span class="ut-name">' + nm + '</span>'
+              + '<span class="ut-dur">' + dur + '</span>'
+              + '<button type="button" onclick="window.g1PlayUnitreeTeaching(' + jsName + ')">PLAY</button></div>';
+          }).join('');
+        })
+        .catch(function(e){
+          if (err) { err.style.display = 'block'; err.textContent = e.message || 'Rete'; }
+          list.innerHTML = '';
+        });
+    };
     function updateSbModalStatus(){
       const st = document.getElementById('sbModalAudioStatus');
       if(!st) return;
@@ -5340,10 +5517,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       var locoSel = document.getElementById('sbModalLoco');
       var ledSel = document.getElementById('sbModalLed');
       var teachSel = document.getElementById('sbModalTeaching');
-      if (armSel) armSel.value = s.robot_arm || '';
-      if (locoSel) locoSel.value = s.robot_loco || '';
-      if (ledSel) { ledSel.value = s.led_effect || ''; sbUpdateLedPreview(); }
-      if (teachSel) teachSel.value = s.teaching_slot || '';
+      var robotBlock = document.getElementById('sbModalRobotBlock');
+      var isRobotZone = idx >= SB_ROBOT_START;
+      if (robotBlock) robotBlock.style.display = isRobotZone ? '' : 'none';
+      if (armSel) armSel.value = isRobotZone ? (s.robot_arm || '') : '';
+      if (locoSel) locoSel.value = isRobotZone ? (s.robot_loco || '') : '';
+      if (ledSel) { ledSel.value = isRobotZone ? (s.led_effect || '') : ''; sbUpdateLedPreview(); }
+      if (teachSel) teachSel.value = isRobotZone ? (s.teaching_slot || '') : '';
       document.getElementById('sbModal').style.display = 'flex';
       if (s.audio_base64_clean && s.audio_base64_clean.length>50) {
         applyFull(s);
@@ -5354,10 +5534,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       sbEditAudio = null; sbEditFmt = 'webm'; sbEditAudioClean = null; sbEditFmtClean = 'mp3';
       fetch('/api/soundboard-slot/'+idx).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(function(full){
         applyFull(full);
-        if (armSel) armSel.value = full.robot_arm || '';
-        if (locoSel) locoSel.value = full.robot_loco || '';
-        if (ledSel) { ledSel.value = full.led_effect || ''; sbUpdateLedPreview(); }
-        if (teachSel) teachSel.value = full.teaching_slot || '';
+        if (isRobotZone) {
+          if (armSel) armSel.value = full.robot_arm || '';
+          if (locoSel) locoSel.value = full.robot_loco || '';
+          if (ledSel) { ledSel.value = full.led_effect || ''; sbUpdateLedPreview(); }
+          if (teachSel) teachSel.value = full.teaching_slot || '';
+        }
       }).catch(function(e){
         if (st) st.innerHTML = 'Errore: '+(e.message||String(e));
       });
@@ -5388,10 +5570,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (sbEditIdx < 0) return;
       const icon = (document.getElementById('sbModalIcon').value || '🎤').trim().substring(0,20);
       const text = (document.getElementById('sbModalText').value || 'Comando '+(sbEditIdx+1)).trim().substring(0, sbTextMax);
-      const robot_arm = (document.getElementById('sbModalArm')||{}).value || '';
-      const robot_loco = (document.getElementById('sbModalLoco')||{}).value || '';
-      const led_effect = (document.getElementById('sbModalLed')||{}).value || '';
-      const teaching_slot = (document.getElementById('sbModalTeaching')||{}).value || '';
+      let robot_arm = '', robot_loco = '', led_effect = '', teaching_slot = '';
+      if (sbEditIdx >= SB_ROBOT_START) {
+        robot_arm = (document.getElementById('sbModalArm')||{}).value || '';
+        robot_loco = (document.getElementById('sbModalLoco')||{}).value || '';
+        led_effect = (document.getElementById('sbModalLed')||{}).value || '';
+        teaching_slot = (document.getElementById('sbModalTeaching')||{}).value || '';
+      }
       fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: '', format: sbEditFmtClean||'mp3', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco, led_effect, teaching_slot})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
     };
@@ -5479,36 +5664,6 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     var sbOutRef = document.getElementById('sbOutputRefresh');
     if (sbOutRef) sbOutRef.onclick = () => { if (typeof requestAndLoadDevices === 'function') requestAndLoadDevices(); };
     function escAttr(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/\u003c/g,'&lt;'); }
-    function loadRunSheet(){
-      fetch('/api/run-sheet').then(r=>r.json()).then(d=>{
-        const pol = document.getElementById('runSheetPolicy');
-        if(pol) pol.value = d.policy || '';
-        const tb = document.getElementById('runSheetBody');
-        if(!tb) return;
-        const rows = d.rows || [];
-        tb.innerHTML = rows.map((row,i)=>'<tr><td><input type="text" class="rs-fase" data-i="'+i+'" value="'+escAttr(row.fase)+'" /></td><td><input type="text" class="rs-att" value="'+escAttr(row.attivita)+'" /></td><td><input type="text" class="rs-ora" value="'+escAttr(row.ora_inizio)+'" /></td><td><input type="text" class="rs-dur" value="'+escAttr(row.durata_stimata)+'" /></td><td><input type="text" class="rs-note" value="'+escAttr(row.note)+'" /></td></tr>').join('');
-      }).catch(()=>{});
-    }
-    var runSheetSaveEl = document.getElementById('runSheetSave');
-    if (runSheetSaveEl) runSheetSaveEl.onclick = function(){
-      const policy = (document.getElementById('runSheetPolicy').value||'').trim();
-      const rows = [];
-      document.querySelectorAll('#runSheetBody tr').forEach(tr=>{
-        rows.push({
-          fase: (tr.querySelector('.rs-fase')&&tr.querySelector('.rs-fase').value)||'',
-          attivita: (tr.querySelector('.rs-att')&&tr.querySelector('.rs-att').value)||'',
-          ora_inizio: (tr.querySelector('.rs-ora')&&tr.querySelector('.rs-ora').value)||'',
-          durata_stimata: (tr.querySelector('.rs-dur')&&tr.querySelector('.rs-dur').value)||'',
-          note: (tr.querySelector('.rs-note')&&tr.querySelector('.rs-note').value)||''
-        });
-      });
-      const st = document.getElementById('runSheetStatus');
-      fetch('/api/run-sheet', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({policy, rows})})
-        .then(r=>r.json()).then(d=>{ if(st) st.textContent = d.ok ? 'Salvato.' : (d.error||'Errore'); if(st) st.style.color = d.ok ? '#22c55e' : '#f87171'; })
-        .catch(e=>{ if(st) st.textContent = e.message; if(st) st.style.color = '#f87171'; });
-    };
-    loadRunSheet();
-
     var btnTestEl = document.getElementById('btnTest');
     if (btnTestEl) btnTestEl.onclick = async function(){
       const btn = document.getElementById('btnTest');
@@ -5855,20 +6010,31 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       };
     })();
 
-    /* ---- Persistent Mic Level (always visible above tabs) ---- */
+    /* ---- Mic level (solo tab Parla: usa levelBar / levelLabel) ---- */
     (function(){
       var _pmWs = null;
       var _pmTimer = null;
       var _pmSource = null;
 
+      function pmParlaActive() {
+        var sec = document.getElementById('section-parla');
+        return !!(sec && sec.classList.contains('active'));
+      }
+
+      function pmBars() {
+        return {
+          bar: document.getElementById('levelBar'),
+          lbl: document.getElementById('levelLabel'),
+        };
+      }
+
       function pmUpdateFromBrowser() {
-        var bar = document.getElementById('persistMicBar');
-        var lbl = document.getElementById('persistMicLabel');
-        if (!bar) return;
+        var ui = pmBars();
+        if (!ui.bar) return;
         var an = analyserNode || parlaPreviewAnalyser || wakeAnalyser || null;
         if (!an) {
-          bar.style.width = '0%';
-          if (lbl) lbl.textContent = '--';
+          ui.bar.style.width = '0%';
+          if (ui.lbl) ui.lbl.textContent = 'Livello: --';
           return;
         }
         var buf = new Uint8Array(an.frequencyBinCount);
@@ -5877,9 +6043,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         for (var i = 0; i < buf.length; i++) if (buf[i] > peak) peak = buf[i];
         var gain = typeof getParlaMonitorGain === 'function' ? getParlaMonitorGain() : 1;
         var pct = Math.min(100, peak * gain * (100 / 255));
-        bar.style.width = pct.toFixed(1) + '%';
-        bar.style.background = peak > 128 ? '#ef4444' : peak > 50 ? '#22c55e' : peak > 13 ? '#eab308' : '#52525b';
-        if (lbl) lbl.textContent = peak > 5 ? (pct|0) + '%' : '--';
+        ui.bar.style.width = pct.toFixed(1) + '%';
+        ui.bar.style.background = peak > 128 ? '#ef4444' : peak > 50 ? '#22c55e' : peak > 13 ? '#eab308' : '#52525b';
+        if (ui.lbl) ui.lbl.textContent = peak > 5 ? ('Livello: ' + (pct|0) + '%') : 'Livello: --';
       }
 
       function pmStartServerWs() {
@@ -5890,14 +6056,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           try {
             var d = JSON.parse(ev.data);
             if (d.type === 'level') {
-              var bar = document.getElementById('persistMicBar');
-              var lbl = document.getElementById('persistMicLabel');
-              if (bar) {
-                var pct = Math.max(0, Math.min(100, ((d.db + 60) / 60) * 100));
-                bar.style.width = pct.toFixed(1) + '%';
-                bar.style.background = d.peak > 0.5 ? '#ef4444' : d.rms > 0.02 ? '#22c55e' : d.rms > 0.005 ? '#eab308' : '#52525b';
+              var ui = pmBars();
+              var pct = Math.max(0, Math.min(100, ((d.db + 60) / 60) * 100));
+              if (ui.bar) {
+                ui.bar.style.width = pct.toFixed(1) + '%';
+                ui.bar.style.background = d.peak > 0.5 ? '#ef4444' : d.rms > 0.02 ? '#22c55e' : d.rms > 0.005 ? '#eab308' : '#52525b';
               }
-              if (lbl) lbl.textContent = d.rms > 0.01 ? (pct|0) + '%' : '--';
+              if (ui.lbl) ui.lbl.textContent = d.rms > 0.01 ? ('Livello: ' + (pct|0) + '%') : 'Livello: --';
             }
           } catch(_){}
         };
@@ -5911,6 +6076,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
 
       _pmTimer = setInterval(function() {
+        if (!pmParlaActive()) {
+          if (_pmSource === 'server') pmStopServerWs();
+          var ui = pmBars();
+          if (ui.bar) ui.bar.style.width = '0%';
+          if (ui.lbl) ui.lbl.textContent = 'Livello: --';
+          return;
+        }
         var micEl = document.getElementById('mic');
         var micVal = micEl ? micEl.value : '';
         var isLocal = micVal && micVal.indexOf('local_') === 0;
@@ -5930,13 +6102,34 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }, 60);
     })();
     (function(){
-      var _camStreaming = false, _camPoll = null;
+      var _camStreaming = false, _camPoll = null, _camSessionActive = false;
       function _camEl(id){ return document.getElementById(id); }
+      function _camVisionActive(){
+        var cb = _camEl('clientCamVisionEnable');
+        return !!(cb && cb.checked);
+      }
       function _camStreamUrl(){ return location.origin + '/api/camera/stream?_=' + Date.now(); }
+      function _camResetIdleUI(){
+        _camSetStatus(_camEl('clientCamStatus'), 'Visione disattivata', null);
+        _camSetStatus(_camEl('clientCamYolo'), '--', null);
+        var fps = _camEl('clientCamFps'); if (fps) fps.textContent = '--';
+        var be = _camEl('clientCamBackend'); if (be) be.textContent = '--';
+        var detEl = _camEl('clientCamDets');
+        if (detEl) detEl.textContent = '—';
+        var pickEl = _camEl('clientPickStatus');
+        if (pickEl) pickEl.textContent = 'Auto-pick: — (attiva visione)';
+      }
+      function _camUpdateControls(enabled){
+        ['clientCamBtnStart','clientCamBtnStop','clientCamBtnRefresh','clientPickOnBtn','clientPickOffBtn'].forEach(function(id){
+          var el = _camEl(id);
+          if (el) el.disabled = !enabled;
+        });
+      }
       function _camShow(on){
         var img = _camEl('clientCamStream'), ph = _camEl('clientCamPlaceholder');
         if (!img) return;
         if (on) {
+          if (!_camVisionActive()) return;
           img.onerror = function(){
             _camSetStatus(_camEl('clientCamStatus'), 'Stream non disponibile (camera Jetson?)', false);
             if (ph) { ph.style.display = 'flex'; ph.textContent = 'Stream non disponibile — controlla RealSense / G1_CAMERA_DEVICE'; }
@@ -5953,7 +6146,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           img.onload = null;
           img.style.display = 'none';
           img.removeAttribute('src');
-          if (ph) { ph.style.display = 'flex'; ph.textContent = 'Stream non attivo'; }
+          if (ph) { ph.style.display = 'flex'; ph.textContent = 'Visione disattivata — spunta la casella sopra per collegare la camera'; }
           _camStreaming = false;
         }
       }
@@ -5963,6 +6156,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         el.className = 'val' + (ok === true ? ' ok' : ok === false ? ' err' : '');
       }
       async function _camPollStatus(){
+        if (!_camVisionActive() || !_camSessionActive) return;
         try {
           var r = await fetch(location.origin + '/api/camera/status', { credentials: 'same-origin' });
           var s = await r.json();
@@ -5989,14 +6183,46 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         }
       }
       function _camStartPoll(){
-        if (_camPoll) return;
+        if (_camPoll || !_camVisionActive() || !_camSessionActive) return;
         _camPollStatus();
         _camPoll = setInterval(_camPollStatus, 2000);
       }
       function _camStopPoll(){
         if (_camPoll) { clearInterval(_camPoll); _camPoll = null; }
       }
+      function _camVisionCheckbox(on){
+        var cb = _camEl('clientCamVisionEnable');
+        if (cb) cb.checked = !!on;
+      }
+      async function _camTeardownSession(){
+        var hadSession = _camSessionActive;
+        _camSessionActive = false;
+        _camStopPoll();
+        _camShow(false);
+        if (hadSession) {
+          try { await fetch(location.origin + '/api/camera/stop', { method: 'POST', credentials: 'same-origin' }); } catch (_) {}
+          try {
+            await fetch(location.origin + '/api/pick/enable', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: false }),
+            });
+          } catch (_) {}
+        }
+        _camResetIdleUI();
+      }
+      async function _camOnVisionToggle(){
+        if (_camVisionActive()) {
+          _camUpdateControls(true);
+          await window.g1ClientCameraStart();
+        } else {
+          _camUpdateControls(false);
+          await _camTeardownSession();
+        }
+      }
       async function _camPollPick(){
+        if (!_camVisionActive() || !_camSessionActive) return;
         try {
           var r = await fetch(location.origin + '/api/pick/status', { credentials: 'same-origin' });
           var p = await r.json();
@@ -6009,6 +6235,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         } catch (_) {}
       }
       window.g1ClientPickSet = async function(on){
+        if (!_camVisionActive()) {
+          if (!on) return;
+          _camVisionCheckbox(true);
+          _camUpdateControls(true);
+          await window.g1ClientCameraStart();
+        }
+        if (!_camVisionActive() || !_camSessionActive) {
+          var el0 = _camEl('clientPickStatus');
+          if (el0) el0.textContent = 'Auto-pick: attiva prima la visione';
+          return;
+        }
         try {
           await fetch(location.origin + '/api/pick/enable', {
             method: 'POST',
@@ -6017,13 +6254,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             body: JSON.stringify({ enabled: !!on }),
           });
           _camPollPick();
-          if (on && !_camStreaming) window.g1ClientCameraStart();
         } catch (e) {
           var el = _camEl('clientPickStatus');
           if (el) el.textContent = 'Auto-pick errore: ' + (e.message || e);
         }
       };
       window.g1ClientCameraStart = async function(){
+        if (!_camVisionActive()) return;
+        _camUpdateControls(true);
         try {
           var r = await fetch(location.origin + '/api/camera/start', { method: 'POST', credentials: 'same-origin' });
           var d = await r.json().catch(function(){ return {}; });
@@ -6032,6 +6270,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             _camSetStatus(_camEl('clientCamStatus'), msg.slice(0, 80), false);
             return;
           }
+          _camSessionActive = true;
           _camShow(true);
           _camStartPoll();
         } catch (e) {
@@ -6039,12 +6278,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         }
       };
       window.g1ClientCameraStop = async function(){
-        try { await fetch(location.origin + '/api/camera/stop', { method: 'POST', credentials: 'same-origin' }); } catch (_) {}
-        _camShow(false);
-        _camStopPoll();
-        _camPollStatus();
+        _camVisionCheckbox(false);
+        _camUpdateControls(false);
+        await _camTeardownSession();
       };
       window.g1ClientCameraRefresh = function(){
+        if (!_camVisionActive() || !_camSessionActive) return;
         if (_camStreaming) {
           var img = _camEl('clientCamStream');
           if (img) img.src = _camStreamUrl();
@@ -6052,17 +6291,30 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         _camPollStatus();
       };
       window.g1ClientCameraOnShow = function(){
-        _camPollStatus();
-        if (!_camStreaming) window.g1ClientCameraStart();
+        if (_camVisionActive() && !_camSessionActive) {
+          _camUpdateControls(true);
+          window.g1ClientCameraStart();
+        } else {
+          _camUpdateControls(_camVisionActive());
+          if (!_camVisionActive()) {
+            _camShow(false);
+            _camResetIdleUI();
+          }
+        }
       };
-      window.g1ClientCameraOnHide = function(){
-        if (_camStreaming) window.g1ClientCameraStop();
-        _camStopPoll();
+      window.g1ClientCameraOnHide = async function(){
+        _camVisionCheckbox(false);
+        _camUpdateControls(false);
+        await _camTeardownSession();
       };
+      _camUpdateControls(false);
+      _camResetIdleUI();
       var _camBtnStart = _camEl('clientCamBtnStart');
       var _camBtnStop = _camEl('clientCamBtnStop');
       var _camBtnRefresh = _camEl('clientCamBtnRefresh');
-      if (_camBtnStart) _camBtnStart.onclick = function(){ window.g1ClientCameraStart(); };
+      var _camVisionCb = _camEl('clientCamVisionEnable');
+      if (_camVisionCb) _camVisionCb.onchange = function(){ _camOnVisionToggle(); };
+      if (_camBtnStart) _camBtnStart.onclick = function(){ if (!_camVisionActive()) _camVisionCheckbox(true); window.g1ClientCameraStart(); };
       if (_camBtnStop) _camBtnStop.onclick = function(){ window.g1ClientCameraStop(); };
       if (_camBtnRefresh) _camBtnRefresh.onclick = function(){ window.g1ClientCameraRefresh(); };
     })();

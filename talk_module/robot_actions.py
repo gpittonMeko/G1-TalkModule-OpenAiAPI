@@ -176,6 +176,116 @@ def get_arm_actions_list() -> list[dict]:
     return [{"id": k, **v} for k, v in sorted(G1_ARM_ACTIONS.items()) if k != 99]
 
 
+def fetch_unitree_robot_action_catalog() -> dict:
+    """Elenco azioni dal robot via SDK GetActionList (7107): preset + teach app Unitree."""
+    try:
+        from talk_module.arm_sdk import is_arm_sdk_active
+
+        if is_arm_sdk_active():
+            return {
+                "ok": False,
+                "error": "rt/arm_sdk occupato da teaching/VR — attendi o premi STOP",
+                "custom": [],
+                "preset": [],
+            }
+    except ImportError:
+        pass
+    try:
+        from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
+
+        with _sdk_lock:
+            global _sdk_client
+            _ensure_dds_init()
+            if _sdk_client is None:
+                _sdk_client = G1ArmActionClient()
+                _sdk_client.Init()
+                _sdk_client.SetTimeout(12.0)
+            code, data = _sdk_client.GetActionList()
+        if code != 0:
+            return {"ok": False, "error": f"GetActionList rc={code}", "custom": [], "preset": []}
+
+        preset_raw: list = []
+        custom_raw: list = []
+        if isinstance(data, list):
+            if len(data) >= 1 and isinstance(data[0], list):
+                preset_raw = data[0]
+            if len(data) >= 2 and isinstance(data[1], list):
+                custom_raw = data[1]
+
+        custom_out = []
+        for item in custom_raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            entry = {"name": name, "source": "unitree_app"}
+            if item.get("time") is not None:
+                try:
+                    entry["duration_s"] = round(float(item["time"]), 2)
+                except (TypeError, ValueError):
+                    pass
+            custom_out.append(entry)
+
+        preset_out = []
+        for item in preset_raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            aid = item.get("id")
+            if aid is None and not name:
+                continue
+            preset_out.append({"id": aid, "name": name, "source": "preset"})
+
+        return {"ok": True, "custom": custom_out, "preset": preset_out, "error": ""}
+    except ImportError:
+        return {"ok": False, "error": "unitree_sdk2py non disponibile", "custom": [], "preset": []}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "custom": [], "preset": []}
+
+
+def execute_unitree_custom_teaching(action_name: str, robot_ip: Optional[str] = None) -> tuple[bool, str]:
+    """Riproduce un teach registrato nell'app Unitree (API 7108, action_name)."""
+    _ = robot_ip
+    name = (action_name or "").strip()
+    if not name:
+        return False, "nome teach richiesto"
+    try:
+        from talk_module.arm_sdk import is_arm_sdk_active
+
+        if is_arm_sdk_active():
+            return False, "rt/arm_sdk occupato da teaching/VR — attendi o premi STOP"
+    except ImportError:
+        pass
+    try:
+        from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
+
+        with _sdk_lock:
+            global _sdk_client
+            _ensure_dds_init()
+            if _sdk_client is None:
+                _sdk_client = G1ArmActionClient()
+                _sdk_client.Init()
+                _sdk_client.SetTimeout(15.0)
+            try:
+                _sdk_client._RegistApi(7108, 0)
+            except Exception:
+                pass
+            parameter = json.dumps({"action_name": name})
+            code, _data = _sdk_client._Call(7108, parameter)
+        if code == 0:
+            return True, "ok"
+        err_map = {
+            7400: "rt/armsdk occupato (teaching/VR attivo)",
+            7401: "braccio in hold — prova Rilascia braccia (99)",
+            7404: "FSM non compatibile: sport mode (L1+A) e Modalità gesti",
+        }
+        return False, err_map.get(code, f"errore SDK rc={code}")
+    except ImportError:
+        return False, "unitree_sdk2py non disponibile"
+    except Exception as e:
+        return False, f"SDK error: {e}"
+
 def _fuzzy_contains(text: str, pattern: str, threshold: float = 0.82) -> bool:
     """True se text contiene pattern esattamente, oppure una sotto-sequenza molto simile."""
     if pattern in text:

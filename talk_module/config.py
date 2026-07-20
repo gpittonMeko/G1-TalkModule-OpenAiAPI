@@ -46,12 +46,16 @@ class Settings:
     llm_provider: str = _str(os.getenv("LLM_PROVIDER", "openai")).lower()
     gemini_api_key: str = _str(os.getenv("GEMINI_API_KEY", ""))
     gemini_model: str = _str(os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
+    gemini_thinking_budget: int = _int(os.getenv("GEMINI_THINKING_BUDGET", "0")) or 0
+    llm_fallback_enabled: bool = os.getenv("LLM_FALLBACK_ENABLED", "true").lower() in ("1", "true", "yes")
+    llm_fallback_model: str = _str(os.getenv("LLM_FALLBACK_MODEL", ""))
     llm_model: str = _str(os.getenv("LLM_MODEL", "gpt-5.4-mini"))
     llm_text_model: str = _str(os.getenv("LLM_TEXT_MODEL", "")) or _str(os.getenv("LLM_MODEL", "gpt-5.4-mini"))
     # Limite token risposta (max_completion_tokens / max_tokens a seconda del modello)
     llm_max_completion_tokens: int = _int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "1024")) or 1024
     # Voce: risposte corte = meno latenza LLM + TTS
     llm_voice_max_tokens: int = _int(os.getenv("LLM_VOICE_MAX_TOKENS", "220")) or 220
+    llm_voice_max_completion_tokens: int = llm_voice_max_tokens
 
     # STT: whisper = OpenAI Whisper API (stessa chiave OPENAI_API_KEY). groq/deepgram solo se imposti STT_PROVIDER.
     stt_provider: str = _str(os.getenv("STT_PROVIDER", "whisper")).lower()
@@ -60,6 +64,11 @@ class Settings:
     tts_voice: str = _str(os.getenv("TTS_VOICE", "nova"))
     tts_voice_robot: str = _str(os.getenv("TTS_VOICE_ROBOT", "echo"))  # voce più metallica per traccia robot
     tts_model: str = _str(os.getenv("TTS_MODEL", "gpt-4o-mini-tts"))  # gpt-4o-mini-tts più affidabile per italiano
+    tts_instructions: str = _str(
+        os.getenv("TTS_INSTRUCTIONS"),
+        "Parla in italiano con voce chiara e alta. Pronuncia correttamente ogni parola.",
+    )
+    tts_loudnorm: bool = os.getenv("TTS_LOUDNORM", "0").lower() in ("1", "true", "yes")
     tts_skip_loudnorm: bool = os.getenv("TTS_SKIP_LOUDNORM", "1").lower() in ("1", "true", "yes")
     tts_speed: float = float(os.getenv("TTS_SPEED", "1.05"))
     robot_effect_preset: str = _str(os.getenv("ROBOT_EFFECT_PRESET", "robot_full"))  # telephone|ring_mod|bitcrush|robot_full
