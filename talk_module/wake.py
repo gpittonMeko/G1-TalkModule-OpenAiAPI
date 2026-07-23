@@ -35,7 +35,6 @@ STT_HALLUCINATION_PATTERNS = (
     "silence",
     "foreign",
     "inaudible",
-    "you",
 )
 
 WAKE_STT_PROMPT = (

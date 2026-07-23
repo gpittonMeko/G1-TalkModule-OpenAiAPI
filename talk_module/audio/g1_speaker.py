@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from talk_module.stt.audio_convert import _ffmpeg_candidates
 
@@ -89,7 +89,7 @@ def _trim_leading_spikes(pcm: bytes, max_ms: int = 80, threshold: int = 12000) -
 
 
 def _init_audio_client():
-    """AudioClient G1 (chiamare solo con _sdk_lock acquisito)."""
+    """AudioClient G1 (chiamare solo con _audio_sdk_lock acquisito)."""
     from talk_module.robot_actions import _ensure_dds_init
     from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
 
@@ -100,47 +100,58 @@ def _init_audio_client():
     return client
 
 
-def play_pcm_on_g1(pcm: bytes) -> bool:
+def play_pcm_on_g1(pcm: bytes, *, on_stream_started: Optional[Callable[[], None]] = None) -> bool:
     """Invia PCM alla cassa interna G1 a chunk via DDS AudioClient."""
     if not pcm or len(pcm) < 640:
         return False
     try:
-        from talk_module.robot_actions import _sdk_lock
+        from talk_module.robot_actions import _audio_sdk_lock
     except ImportError:
         return False
 
     duration_sec = len(pcm) / _BYTES_PER_SEC
     try:
-        with _sdk_lock:
+        with _audio_sdk_lock:
             client = _init_audio_client()
-            # Chiudi eventuale stream precedente.
             try:
                 client.PlayStop(_APP_NAME)
             except Exception:
                 pass
-            time.sleep(0.05)
+        time.sleep(0.05)
 
-            stream_id = str(int(time.time() * 1000))
-            offset = 0
-            total = len(pcm)
-            t0 = time.time()
+        stream_id = str(int(time.time() * 1000))
+        offset = 0
+        total = len(pcm)
+        t0 = time.time()
+        stream_started = False
 
-            while offset < total:
-                chunk = pcm[offset : offset + _CHUNK_SIZE]
+        while offset < total:
+            chunk = pcm[offset : offset + _CHUNK_SIZE]
+            with _audio_sdk_lock:
+                client = _init_audio_client()
                 code, _ = client.PlayStream(_APP_NAME, stream_id, chunk)
-                if code != 0:
-                    print(f"[g1_speaker] PlayStream rc={code} offset={offset}", flush=True)
-                    return False
-                offset += len(chunk)
-                # Pacing ~real-time (come esempio SDK: non saturare il buffer).
-                if offset < total:
-                    time.sleep(max(0.5, len(chunk) / _BYTES_PER_SEC))
+            if code != 0:
+                print(f"[g1_speaker] PlayStream rc={code} offset={offset}", flush=True)
+                return False
+            if not stream_started:
+                stream_started = True
+                if on_stream_started:
+                    try:
+                        on_stream_started()
+                    except Exception as e:
+                        print(f"[g1_speaker] on_stream_started: {e}", flush=True)
+            offset += len(chunk)
+            # Pacing ~real-time; lock rilasciato durante sleep così i gesti braccia possono usare DDS.
+            if offset < total:
+                time.sleep(max(0.5, len(chunk) / _BYTES_PER_SEC))
 
-            # Attendi fine riproduzione PRIMA di PlayStop (altrimenti taglia con "EEE"/click).
-            elapsed = time.time() - t0
-            tail = duration_sec - elapsed + 0.35
-            if tail > 0:
-                time.sleep(tail)
+        elapsed = time.time() - t0
+        playout_deadline = t0 + duration_sec + 0.55
+        tail = max(0.45, playout_deadline - time.time())
+        if tail > 0:
+            time.sleep(tail)
+        with _audio_sdk_lock:
+            client = _init_audio_client()
             try:
                 client.PlayStop(_APP_NAME)
             except Exception:

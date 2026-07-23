@@ -4,56 +4,12 @@ LED updates and gestures run in background threads so the HTTP path stays respon
 """
 
 import base64
-import os
 import threading
 import time
 from typing import Optional
 
 from talk_module.config import settings
-
-_speak_gesture_seq = 0
-_speak_gesture_lock = threading.Lock()
-
-
-def _speak_gesture_actions() -> list[str]:
-    """G1_SPEAK_GESTURE: face_wave (default) | nome gesto | off | lista comma-separated."""
-    raw = (os.getenv("G1_SPEAK_GESTURE") or "face_wave").strip()
-    if not raw or raw.lower() in ("0", "false", "no", "off", "none"):
-        return []
-    return [g.strip() for g in raw.split(",") if g.strip()]
-
-
-def start_speak_gesture(response_text: str = "") -> None:
-    """Muove le braccia mentre G1 parla (TTS). Non blocca la pipeline HTTP."""
-    actions = _speak_gesture_actions()
-    if not actions:
-        return
-
-    global _speak_gesture_seq
-    with _speak_gesture_lock:
-        primary = actions[_speak_gesture_seq % len(actions)]
-        _speak_gesture_seq += 1
-
-    txt_len = len((response_text or "").strip())
-
-    def _run() -> None:
-        try:
-            from talk_module.robot_actions import execute_robot_action
-
-            ok, msg = execute_robot_action(primary)
-            print(f"[speak-gesture] {primary!r} ok={ok} msg={msg}", flush=True)
-            if txt_len > 100 and len(actions) > 1:
-                time.sleep(3.5)
-                with _speak_gesture_lock:
-                    secondary = actions[_speak_gesture_seq % len(actions)]
-                    _speak_gesture_seq += 1
-                if secondary != primary:
-                    ok2, msg2 = execute_robot_action(secondary)
-                    print(f"[speak-gesture] follow-up {secondary!r} ok={ok2} msg={msg2}", flush=True)
-        except Exception as e:
-            print(f"[speak-gesture] error: {e}", flush=True)
-
-    threading.Thread(target=_run, daemon=True).start()
+from talk_module.speak_gestures import start_speak_gesture
 
 
 def do_gesture_after_response(response_text: str = "") -> None:
@@ -77,6 +33,68 @@ def _led_stop() -> None:
         led_stop_animation()
     except Exception:
         pass
+
+
+def route_user_prompt(
+    prompt: str,
+    llm,
+    *,
+    voice: bool = False,
+    run_robot_match_fn,
+    text_model: str | None = None,
+    max_tokens: int | None = None,
+) -> tuple[str | None, object | None]:
+    """Knowledge → robot action → quick lookup → LLM. Returns (response, robot_match)."""
+    from talk_module.knowledge_store import check_knowledge, check_knowledge_voice
+    from talk_module.robot_actions import check_robot_action
+
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return None, None
+
+    knowledge_fn = check_knowledge_voice if voice else check_knowledge
+    resp = knowledge_fn(prompt)
+    if resp:
+        print(f"[route] knowledge hit prompt={prompt!r}", flush=True)
+        return resp, None
+
+    robot_match = None
+    try:
+        robot_match = check_robot_action(prompt)
+    except Exception as err:
+        print(f"[robot-check] error: {err}", flush=True)
+    if robot_match:
+        print(
+            f"[route] robot action prompt={prompt!r} arm={robot_match.arm_action!r}",
+            flush=True,
+        )
+        return run_robot_match_fn(robot_match), robot_match
+
+    from talk_module.quick_lookup import NOT_FOUND, is_quick_lookup_question, quick_lookup
+
+    if is_quick_lookup_question(prompt):
+        resp = quick_lookup(prompt)
+        if resp != NOT_FOUND:
+            print(f"[route] quick-lookup hit prompt={prompt!r}", flush=True)
+            return resp, None
+
+    tokens = max_tokens if max_tokens is not None else settings.llm_voice_max_tokens
+    if text_model:
+        resp = llm.chat(prompt, use_history=False, model=text_model, max_tokens=tokens)
+    else:
+        resp = llm.chat(prompt, use_history=False, max_tokens=tokens)
+    if resp and not robot_match:
+        try:
+            post_match = check_robot_action(resp)
+            if post_match and post_match.arm_action:
+                print(
+                    f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}",
+                    flush=True,
+                )
+                run_robot_match_fn(post_match)
+        except Exception:
+            pass
+    return resp, None
 
 
 def set_led_safe(r: int, g: int, b: int) -> None:
@@ -115,38 +133,12 @@ def process_after_wake(
 
             resp = get_hey_g1_ack_response()
         else:
-            from talk_module.robot_actions import check_robot_action
-
-            try:
-                robot_match = check_robot_action(prompt)
-            except Exception as _ra_err:
-                print(f"[robot-check] error: {_ra_err}", flush=True)
-            if robot_match:
-                print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r}", flush=True)
-                resp = run_robot_match_fn(robot_match)
-            else:
-                print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
-                resp = check_knowledge_fn(prompt)
-                if not resp:
-                    from talk_module.quick_lookup import NOT_FOUND, is_quick_lookup_question, quick_lookup
-
-                    if is_quick_lookup_question(prompt):
-                        resp = quick_lookup(prompt)
-                        if resp == NOT_FOUND:
-                            resp = None
-                if not resp:
-                    resp = llm.chat(prompt, use_history=False, max_tokens=settings.llm_voice_max_tokens)
-                if resp and not robot_match:
-                    try:
-                        post_match = check_robot_action(resp)
-                        if post_match and post_match.arm_action:
-                            print(
-                                f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}",
-                                flush=True,
-                            )
-                            run_robot_match_fn(post_match)
-                    except Exception:
-                        pass
+            resp, robot_match = route_user_prompt(
+                prompt,
+                llm,
+                voice=True,
+                run_robot_match_fn=run_robot_match_fn,
+            )
         audio_out = tts.synthesize(resp, format="mp3") if resp else b""
         if audio_out:
             _led_animate("breathe", color=LED_SPEAKING, speed=1.0)

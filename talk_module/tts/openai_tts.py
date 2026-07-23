@@ -83,7 +83,7 @@ class TTSClient:
                 "speed": settings.tts_speed,
             }
             if "gpt-4o-mini-tts" in settings.tts_model:
-                kwargs["instructions"] = "Parla in italiano con voce chiara e alta. Pronuncia correttamente ogni parola."
+                kwargs["instructions"] = settings.tts_instructions
             try:
                 resp = self.client.audio.speech.create(**kwargs)
             except TypeError:

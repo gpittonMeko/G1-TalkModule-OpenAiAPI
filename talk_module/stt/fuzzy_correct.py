@@ -107,18 +107,6 @@ def correct_transcript(
     if not text or not text.strip():
         return text
     txt = text.strip()
-    txt_lower = txt.lower()
-
-    # Whole-phrase match only for very high similarity (0.98) and sufficiently long text
-    word_count = len(txt_lower.split())
-    if word_count >= 3:
-        for phrase in sorted(vocabulary_phrases, key=len, reverse=True):
-            if len(phrase) < 8:
-                continue
-            sim = _similarity(txt_lower, phrase)
-            if sim >= 0.98:
-                print(f"[Fuzzy] Phrase match: '{txt}' -> '{phrase}' (sim={sim:.3f})", flush=True)
-                return phrase
 
     words_in_text = re.findall(r"[a-zA-ZàèéìòùçÀÈÉÌÒÙÇ]+|[^a-zA-ZàèéìòùçÀÈÉÌÒÙÇ]+", txt)
     result_parts: list[str] = []

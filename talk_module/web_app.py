@@ -41,7 +41,15 @@ from talk_module.network_discovery import (
 
 # Config file per scelte utente
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "audio_devices.json"
-KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "config" / "knowledge.json"
+from talk_module.knowledge_store import (
+    check_knowledge,
+    knowledge_path as KNOWLEDGE_PATH,
+    load_knowledge,
+    load_knowledge_groups,
+    reload_knowledge,
+    save_knowledge_entries,
+    save_knowledge_groups,
+)
 SOUNDBOARD_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard.json"
 SOUNDBOARD_LITE_PATH = Path(__file__).resolve().parent.parent / "config" / "soundboard_lite.json"
 RUN_SHEET_PATH = Path(__file__).resolve().parent.parent / "config" / "run_sheet.json"
@@ -104,53 +112,6 @@ CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Sentinel: solo wake word, senza domanda (risposta = settings.hey_g1_ack_text)
 PROMPT_HEY_G1_ACK_ONLY = "__G1_HEY_ACK_ONLY__"
-
-# Knowledge base: pattern -> risposta. Controllo prima dell'LLM per risposte veloci.
-_knowledge_cache: dict[str, str] | None = None
-
-
-def load_knowledge() -> dict[str, str]:
-    """Carica knowledge da config/knowledge.json. Pattern (minuscolo) -> risposta."""
-    global _knowledge_cache
-    if _knowledge_cache is not None:
-        return _knowledge_cache
-    if not KNOWLEDGE_PATH.exists():
-        _knowledge_cache = {}
-        return _knowledge_cache
-    try:
-        data = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8"))
-        _knowledge_cache = {str(k).strip().lower(): str(v).strip() for k, v in (data or {}).items() if k and v}
-        return _knowledge_cache
-    except Exception:
-        _knowledge_cache = {}
-        return _knowledge_cache
-
-
-def reload_knowledge() -> None:
-    """Svuota cache per ricaricare da file (dopo modifica a config/knowledge.json)."""
-    global _knowledge_cache
-    _knowledge_cache = None
-
-
-def check_knowledge(user_input: str) -> str | None:
-    """Se user_input contiene un pattern della knowledge, ritorna la risposta. Altrimenti None."""
-    if not user_input or not user_input.strip():
-        return None
-    try:
-        from talk_module.visitor_context import check_visitor_greeting
-
-        visitor_greeting = check_visitor_greeting(user_input)
-        if visitor_greeting:
-            return visitor_greeting
-    except Exception:
-        pass
-    txt = user_input.strip().lower()
-    # Ordina per lunghezza decrescente: match più specifici prima (es. "che ore sono" prima di "ore")
-    for pattern, response in sorted(load_knowledge().items(), key=lambda x: -len(x[0])):
-        if pattern and pattern in txt:
-            return response
-    return None
-
 
 def _apply_stt_fuzzy_correction(text: str) -> str:
     """Corregge trascrizione STT con fuzzy matching su vocabolario (knowledge + stt_config)."""
@@ -277,8 +238,17 @@ if HAS_FASTAPI:
     )
 
     try:
+        from talk_module.explore_teaching_api import router as explore_teaching_router
+        app.include_router(explore_teaching_router)
+    except Exception as _explore_err:
+        print(f"[web_app] explore_teaching_api router not loaded: {_explore_err}")
+
+    try:
         from talk_module.teaching_api import router as teaching_router
-        app.include_router(teaching_router)
+        if os.getenv("G1_LOCAL_TEACHING", "0").strip().lower() in ("1", "true", "yes", "on"):
+            app.include_router(teaching_router)
+        else:
+            print("[web_app] local teaching API disabled (set G1_LOCAL_TEACHING=1 to enable REC/slot teaching)")
     except Exception as _tea_err:
         print(f"[web_app] teaching_api router not loaded: {_tea_err}")
 
@@ -416,8 +386,14 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.get("/client", response_class=HTMLResponse)
     def client_page():
+        html = (
+            CLIENT_TEMPLATE.replace("__STT_WAKE_SLICE_MS__", str(settings.stt_wake_slice_ms))
+            .replace("__STT_CMD_SLICE_MS__", str(settings.stt_cmd_slice_ms))
+            .replace("__STT_CMD_SILENCE_MS__", str(settings.stt_cmd_silence_ms))
+            .replace("__STT_CMD_MIN_VOICE_MS__", str(settings.stt_cmd_min_voice_ms))
+        )
         return Response(
-            content=CLIENT_TEMPLATE,
+            content=html,
             media_type="text/html; charset=utf-8",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
         )
@@ -643,6 +619,13 @@ self.addEventListener('activate', () => self.clients.claim());
         return {
             "provider": prov,
             "effective": effective,
+            "endpointing": {
+                "cmd_silence_ms": settings.stt_cmd_silence_ms,
+                "cmd_slice_ms": settings.stt_cmd_slice_ms,
+                "wake_slice_ms": settings.stt_wake_slice_ms,
+                "cmd_min_voice_ms": settings.stt_cmd_min_voice_ms,
+                "listen_silence_sec": settings.stt_listen_silence_sec,
+            },
             "alternatives": [
                 {"id": "whisper", "name": "OpenAI Whisper", "env": "STT_PROVIDER=whisper (default)"},
                 {"id": "deepgram", "name": "Deepgram Nova", "env": "STT_PROVIDER=deepgram, DEEPGRAM_API_KEY=..."},
@@ -873,24 +856,30 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.get("/api/knowledge")
     def api_get_knowledge():
-        """Lista pattern -> risposta dalla knowledge base."""
-        return {"path": str(KNOWLEDGE_PATH), "entries": load_knowledge()}
+        """Lista gruppi pattern -> risposta dalla knowledge base."""
+        groups = load_knowledge_groups()
+        return {
+            "path": str(KNOWLEDGE_PATH),
+            "groups": groups,
+            "entries": load_knowledge(),
+        }
 
     @app.post("/api/knowledge/reload")
     def api_reload_knowledge():
         """Ricarica knowledge da file dopo modifica."""
         reload_knowledge()
-        return {"ok": True, "entries": len(load_knowledge())}
+        return {"ok": True, "groups": len(load_knowledge_groups()), "entries": len(load_knowledge())}
 
     @app.post("/api/knowledge/save")
     def api_save_knowledge(data: dict = Body(...)):
-        """Salva knowledge su config/knowledge.json."""
-        entries = data.get("entries") or {}
-        clean = {str(k).strip(): str(v).strip() for k, v in entries.items() if k and str(k).strip() and v is not None}
+        """Salva knowledge su config/knowledge.json (gruppi o formato legacy flat)."""
         try:
-            KNOWLEDGE_PATH.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
-            reload_knowledge()
-            return {"ok": True, "entries": len(clean)}
+            if data.get("groups") is not None:
+                groups = save_knowledge_groups(data.get("groups") or [])
+                return {"ok": True, "groups": len(groups), "entries": len(load_knowledge())}
+            entries = data.get("entries") or {}
+            groups = save_knowledge_entries(entries)
+            return {"ok": True, "groups": len(groups), "entries": len(load_knowledge())}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -911,6 +900,9 @@ self.addEventListener('activate', () => self.clients.claim());
                     "robot_arm": "",
                     "robot_loco": "",
                     "led_effect": "",
+                    "teaching_slot": "",
+                    "audio_delay_ms": 0,
+                    "gesture_delay_ms": 0,
                 }
                 for i in range(n)
             ]
@@ -932,6 +924,7 @@ self.addEventListener('activate', () => self.clients.claim());
                         "robot_arm": "",
                         "robot_loco": "",
                         "led_effect": "",
+                        "teaching_slot": "",
                     }
                 )
             for i in range(len(slots)):
@@ -945,6 +938,9 @@ self.addEventListener('activate', () => self.clients.claim());
                 s.setdefault("robot_arm", "")
                 s.setdefault("robot_loco", "")
                 s.setdefault("led_effect", "")
+                s.setdefault("teaching_slot", "")
+                s.setdefault("audio_delay_ms", 0)
+                s.setdefault("gesture_delay_ms", 0)
             out = slots[:n]
             _soundboard_cache = (mtime_ns, out)
             return out
@@ -961,32 +957,69 @@ self.addEventListener('activate', () => self.clients.claim());
                     "robot_arm": "",
                     "robot_loco": "",
                     "led_effect": "",
+                    "teaching_slot": "",
+                    "audio_delay_ms": 0,
+                    "gesture_delay_ms": 0,
                 }
                 for i in range(n)
             ]
 
+    def _soundboard_delay_ms(value, default: int = 0, max_ms: int = 15000) -> int:
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0, min(v, max_ms))
+
+    def _normalize_soundboard_gesture_fields(robot_arm: str, teaching_slot: str) -> tuple[str, str]:
+        """Client may send explore teachings as explore::name in robot_arm. One gesture type per slot."""
+        arm = str(robot_arm or "").strip()
+        teach = str(teaching_slot or "").strip()
+        if arm.startswith("explore::"):
+            teach = arm[9:].strip() or teach
+            arm = ""
+        if arm and teach:
+            teach = ""
+        elif teach:
+            arm = ""
+        return arm, teach
+
+    def _soundboard_slot_robot_enabled(slot_idx: int, slot: dict) -> bool:
+        """Audio zone (slot 0-49): play sound only. Robot zone (50+): fire configured actions."""
+        if slot_idx < SOUNDBOARD_AUDIO_ZONE_COUNT:
+            return False
+        return bool(
+            str(slot.get("robot_arm") or "").strip()
+            or str(slot.get("robot_loco") or "").strip()
+            or str(slot.get("led_effect") or "").strip()
+            or str(slot.get("teaching_slot") or "").strip()
+        )
+
     def _soundboard_slots_lite(slots: list[dict]) -> list[dict]:
         """Solo metadati per la griglia UI: evita ~20MB JSON su mobile (crash/OOM su /api/soundboard)."""
         lite: list[dict] = []
-        for s in slots:
+        for idx, s in enumerate(slots):
             ac = str(s.get("audio_base64_clean") or "")
+            has_robot_cfg = bool(
+                str(s.get("robot_arm") or "").strip()
+                or str(s.get("robot_loco") or "").strip()
+                or str(s.get("led_effect") or "").strip()
+                or str(s.get("teaching_slot") or "").strip()
+            )
             lite.append(
                 {
                     "icon": s.get("icon"),
                     "text": s.get("text"),
                     "format": s.get("format") or "webm",
                     "format_clean": s.get("format_clean") or "mp3",
-                    "has_robot": bool(
-                        str(s.get("robot_arm") or "").strip()
-                        or str(s.get("robot_loco") or "").strip()
-                        or str(s.get("led_effect") or "").strip()
-                        or str(s.get("teaching_slot") or "").strip()
-                    ),
+                    "has_robot": has_robot_cfg and idx >= SOUNDBOARD_AUDIO_ZONE_COUNT,
                     "has_clean": len(ac) > 50,
                     "robot_arm": str(s.get("robot_arm") or ""),
                     "robot_loco": str(s.get("robot_loco") or ""),
                     "led_effect": str(s.get("led_effect") or ""),
                     "teaching_slot": str(s.get("teaching_slot") or ""),
+                    "audio_delay_ms": _soundboard_delay_ms(s.get("audio_delay_ms")),
+                    "gesture_delay_ms": _soundboard_delay_ms(s.get("gesture_delay_ms")),
                 }
             )
         return lite
@@ -1057,6 +1090,8 @@ self.addEventListener('activate', () => self.clients.claim());
             "robot_loco": str(s.get("robot_loco") or ""),
             "led_effect": str(s.get("led_effect") or ""),
             "teaching_slot": str(s.get("teaching_slot") or ""),
+            "audio_delay_ms": _soundboard_delay_ms(s.get("audio_delay_ms")),
+            "gesture_delay_ms": _soundboard_delay_ms(s.get("gesture_delay_ms")),
         }
 
     @app.get("/api/run-sheet")
@@ -1125,9 +1160,17 @@ self.addEventListener('activate', () => self.clients.claim());
         na = str(data.get("audio_base64") or "").strip()
         slots = _load_soundboard()
         prev = slots[slot] if slot < len(slots) else {}
-        if "audio_base64_clean" in data:
+        clear_audio = data.get("clear_audio") in (True, "true", "1", 1)
+        if clear_audio:
+            clean_b64 = ""
+            clean_fmt = str(data.get("format_clean") or prev.get("format_clean") or "mp3")
+        elif "audio_base64_clean" in data:
             clean_b64 = str(data.get("audio_base64_clean") or "").strip()
             clean_fmt = str(data.get("format_clean", "mp3") or "mp3")
+            if not clean_b64:
+                clean_b64 = str(prev.get("audio_base64_clean") or "").strip()
+                if clean_b64:
+                    clean_fmt = str(prev.get("format_clean") or prev.get("format") or "mp3")
         else:
             clean_b64 = str(prev.get("audio_base64_clean") or "").strip()
             clean_fmt = str(prev.get("format_clean") or "mp3")
@@ -1141,6 +1184,11 @@ self.addEventListener('activate', () => self.clients.claim());
         ts = data.get("teaching_slot")
         if slot < SOUNDBOARD_AUDIO_ZONE_COUNT:
             ra, rl, le, ts = "", "", "", ""
+        else:
+            ra, ts = _normalize_soundboard_gesture_fields(
+                str(ra if ra is not None else (prev.get("robot_arm") or "")),
+                str(ts if ts is not None else (prev.get("teaching_slot") or "")),
+            )
         slots[slot] = {
             "icon": str(data.get("icon", "🎤")).strip()[:20],
             "text": txt,
@@ -1152,11 +1200,28 @@ self.addEventListener('activate', () => self.clients.claim());
             "robot_loco": str(rl if rl is not None else (prev.get("robot_loco") or "")),
             "led_effect": str(le if le is not None else (prev.get("led_effect") or "")),
             "teaching_slot": str(ts if ts is not None else (prev.get("teaching_slot") or "")),
+            "audio_delay_ms": _soundboard_delay_ms(
+                data.get("audio_delay_ms") if data.get("audio_delay_ms") is not None else prev.get("audio_delay_ms", 0)
+            ),
+            "gesture_delay_ms": _soundboard_delay_ms(
+                data.get("gesture_delay_ms") if data.get("gesture_delay_ms") is not None else prev.get("gesture_delay_ms", 0)
+            ),
         }
+        if slot >= SOUNDBOARD_AUDIO_ZONE_COUNT:
+            slots[slot]["robot_arm"], slots[slot]["teaching_slot"] = _normalize_soundboard_gesture_fields(
+                slots[slot]["robot_arm"],
+                slots[slot]["teaching_slot"],
+            )
         try:
             SOUNDBOARD_PATH.write_text(json.dumps({"slots": slots}, indent=2), encoding="utf-8")
             _soundboard_cache = (SOUNDBOARD_PATH.stat().st_mtime_ns, slots[: SOUNDBOARD_SLOT_COUNT])
             _write_soundboard_lite_sidecar(_soundboard_slots_lite(slots[: SOUNDBOARD_SLOT_COUNT]))
+            try:
+                from talk_module.audio.soundboard_pcm_cache import invalidate_slot_pcm
+
+                invalidate_slot_pcm(slot)
+            except Exception:
+                pass
             return {"ok": True}
         except Exception as e:
             _invalidate_soundboard_cache()
@@ -1340,37 +1405,105 @@ self.addEventListener('activate', () => self.clients.claim());
             raise HTTPException(400, "Base64 non valido")
         if len(raw) < 80:
             raise HTTPException(400, "Audio troppo corto")
-        arm = str(s.get("robot_arm") or "").strip()
-        loco = str(s.get("robot_loco") or "").strip()
-        led_fx = str(s.get("led_effect") or "").strip()
-        teach = s.get("teaching_slot")
-        from talk_module.speak_gestures import fire_soundboard_slot_robot
 
-        fire_soundboard_slot_robot(
-            robot_arm=arm,
-            robot_loco=loco,
-            led_effect=led_fx,
-            teaching_slot=teach,
-            tag="soundboard-play-local",
-        )
-        try:
-            wav_bytes = _soundboard_bytes_to_wav_playable(raw, fmt)
-            wav_g1 = wav_bytes
-            wav_bytes = _soundboard_wav_boost(wav_bytes)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(500, f"Decodifica audio: {e!s}")
+        play_t0 = time.time()
+
         from talk_module.audio.player import AudioPlayer
         from talk_module.audio.g1_speaker import play_wav_on_g1
+        from talk_module.audio.soundboard_pcm_cache import warmup_pcm
+        from talk_module.speak_gestures import (
+            begin_soundboard_gesture_schedule,
+            fire_named_led_effect,
+            play_soundboard_audio_scheduled,
+            play_soundboard_slot_synced,
+        )
+
+        robot_enabled = _soundboard_slot_robot_enabled(slot_idx, s)
+        arm, teach = _normalize_soundboard_gesture_fields(
+            str(s.get("robot_arm") or ""),
+            str(s.get("teaching_slot") or ""),
+        )
+        loco = str(s.get("robot_loco") or "").strip()
+        led_fx = str(s.get("led_effect") or "").strip()
+        audio_delay_ms = _soundboard_delay_ms(s.get("audio_delay_ms"))
+        gesture_delay_ms = _soundboard_delay_ms(s.get("gesture_delay_ms"))
+        use_scheduled = audio_delay_ms > 0 or gesture_delay_ms > 0
+        has_motion = bool(arm or loco or teach)
+
+        warmup_pcm(slot_idx, raw, fmt)
 
         backend = "g1_internal"
+        print(
+            f"[soundboard-play-local] slot={slot_idx} arm={arm!r} teach={teach!r} "
+            f"robot_enabled={robot_enabled} audio_delay={audio_delay_ms} gesture_delay={gesture_delay_ms}",
+            flush=True,
+        )
+
+        if robot_enabled and led_fx:
+            fire_named_led_effect(led_fx)
+        if robot_enabled and use_scheduled and has_motion:
+            begin_soundboard_gesture_schedule(
+                play_t0=play_t0,
+                gesture_delay_ms=gesture_delay_ms,
+                robot_arm=arm,
+                robot_loco=loco,
+                teaching_slot=teach,
+                tag="soundboard-play-local",
+            )
+
         with _soundboard_local_play_lock:
-            ok = play_wav_on_g1(wav_g1)
+            ok = False
+            if robot_enabled:
+                if use_scheduled:
+                    ok = play_soundboard_audio_scheduled(
+                        raw,
+                        fmt,
+                        play_t0=play_t0,
+                        audio_delay_ms=audio_delay_ms,
+                        slot_idx=slot_idx,
+                        tag="soundboard-play-local",
+                    )
+                else:
+                    try:
+                        wav_g1 = _soundboard_bytes_to_wav_playable(raw, fmt)
+                    except Exception as e:
+                        raise HTTPException(500, f"Decodifica audio: {e!s}")
+                    ok = play_soundboard_slot_synced(
+                        wav_g1,
+                        robot_arm=arm,
+                        robot_loco=loco,
+                        led_effect="",
+                        teaching_slot=teach,
+                        tag="soundboard-play-local",
+                    )
+            else:
+                if use_scheduled:
+                    ok = play_soundboard_audio_scheduled(
+                        raw,
+                        fmt,
+                        play_t0=play_t0,
+                        audio_delay_ms=audio_delay_ms,
+                        slot_idx=slot_idx,
+                        tag="soundboard-play-local",
+                    )
+                else:
+                    try:
+                        wav_g1 = _soundboard_bytes_to_wav_playable(raw, fmt)
+                        wav_bytes = _soundboard_wav_boost(wav_g1)
+                    except HTTPException:
+                        raise
+                    except Exception as e:
+                        raise HTTPException(500, f"Decodifica audio: {e!s}")
+                    ok = play_wav_on_g1(wav_g1)
             if not ok:
-                p = AudioPlayer(device_id=dev_id)
-                ok = p.play_bytes(wav_bytes, format_hint="wav")
-                backend = "local"
+                try:
+                    wav_fb = _soundboard_wav_boost(_soundboard_bytes_to_wav_playable(raw, fmt))
+                except Exception:
+                    wav_fb = None
+                if wav_fb:
+                    p = AudioPlayer(device_id=dev_id)
+                    ok = p.play_bytes(wav_fb, format_hint="wav")
+                    backend = "local"
             if not ok:
                 raise HTTPException(
                     500,
@@ -1429,28 +1562,28 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.get("/api/robot-unitree-teachings")
     def api_robot_unitree_teachings():
-        """Teach registrati nell'app Unitree sul robot (GetActionList API 7107)."""
-        try:
-            from talk_module.robot_actions import fetch_unitree_robot_action_catalog
+        """Compat: elenco teach Explore app sul robot."""
+        from talk_module.explore_teaching import list_explore_teachings
 
-            return fetch_unitree_robot_action_catalog()
-        except Exception as e:
-            return {"ok": False, "error": str(e), "custom": [], "preset": []}
+        data = list_explore_teachings()
+        return {
+            "ok": data.get("ok", False),
+            "custom": data.get("teachings") or [],
+            "preset": data.get("presets") or [],
+            "error": data.get("error") or "",
+        }
 
     @app.post("/api/robot-unitree-teachings/play")
     def api_robot_unitree_teaching_play(data: dict = Body(...)):
-        """Riproduce un teach dell'app Unitree per nome (API 7108)."""
+        """Compat: riproduce teach Explore per nome."""
+        from talk_module.explore_teaching import play_explore_teaching
+
         name = str(data.get("name") or data.get("action_name") or "").strip()
         robot_ip = data.get("robot_ip") or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
         if not name:
             raise HTTPException(400, "name richiesto")
-        try:
-            from talk_module.robot_actions import execute_unitree_custom_teaching
-
-            ok, msg = execute_unitree_custom_teaching(name, robot_ip=robot_ip)
-            return {"ok": ok, "message": msg, "name": name}
-        except Exception as e:
-            return {"ok": False, "message": str(e), "name": name}
+        result = play_explore_teaching(name, robot_ip=robot_ip)
+        return {"ok": result.get("ok"), "message": result.get("message"), "name": name}
 
     @app.post("/api/robot-action")
     def api_execute_robot_action(data: dict = Body(...)):
@@ -1607,7 +1740,8 @@ self.addEventListener('activate', () => self.clients.claim());
             if wkind == "miss":
                 return {"text": raw_text, "response": "", "audio_base64": "", "message": "", "wake_miss": True, "duration_ms": _ms()}
             if wkind == "ok" and rest and rest.strip():
-                prompt = _apply_stt_fuzzy_correction(rest.strip())
+                # Raw STT for routing (same as /api/text-chat); fuzzy was steering wrong KB entries.
+                prompt = rest.strip()
                 print(f"[Wake] comando inline: {prompt!r}", flush=True)
                 result = _process_after_wake(prompt, raw_text, t0)
                 result["wake_cmd_inline"] = True
@@ -1628,7 +1762,12 @@ self.addEventListener('activate', () => self.clients.claim());
         try:
             _save_sample_audio(audio_bytes)  # Salva ultimo campione per riuso (Test con campione)
             stt, llm, tts, _, _ = get_services()
-            raw_text = stt.transcribe(audio_bytes, format_hint=format_hint, language="it")
+            raw_text = stt.transcribe(
+                audio_bytes,
+                format_hint=format_hint,
+                language="it",
+                prompt=settings.whisper_prompt,
+            )
             if not raw_text or not raw_text.strip():
                 saved = _save_debug_audio(audio_bytes)
                 if saved:
@@ -1658,47 +1797,28 @@ self.addEventListener('activate', () => self.clients.claim());
                     }
                 if wkind == "ack":
                     return _build_wake_ack_response(raw_text, t0)
-                prompt = _apply_stt_fuzzy_correction(rest or "")
+                # Raw STT for routing (same as /api/text-chat); fuzzy was steering wrong KB entries.
+                prompt = (rest or "").strip()
                 text = raw_text
             else:
-                text = _apply_stt_fuzzy_correction(raw_text or "")
-                prompt, msg = _extract_prompt(text or "", skip_wake_word=True, audio_size=len(audio_bytes))
+                text = raw_text or ""
+                prompt, msg = _extract_prompt(text, skip_wake_word=True, audio_size=len(audio_bytes))
                 if msg:
                     return {"text": text or "", "response": "", "audio_base64": "", "message": msg, "duration_ms": int((time.perf_counter() - t0) * 1000)}
             if prompt == PROMPT_HEY_G1_ACK_ONLY:
                 from talk_module.visitor_context import get_hey_g1_ack_response
 
                 resp = get_hey_g1_ack_response()
-            else:
-                from talk_module.robot_actions import check_robot_action
                 robot_match = None
-                try:
-                    robot_match = check_robot_action(prompt)
-                except Exception as _ra_err:
-                    print(f"[robot-check] error: {_ra_err}", flush=True)
-                if robot_match:
-                    print(f"[robot-check] MATCH prompt={prompt!r} arm={robot_match.arm_action!r} loco={robot_match.loco_command!r}", flush=True)
-                    resp = _run_robot_match_actions(robot_match)
-                else:
-                    print(f"[robot-check] no match for prompt={prompt!r}", flush=True)
-                    resp = check_knowledge(prompt)
-                    if not resp:
-                        from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
-                        if is_quick_lookup_question(prompt):
-                            resp = quick_lookup(prompt)
-                            if resp == NOT_FOUND:
-                                resp = None
-                    if not resp:
-                        resp = llm.chat(prompt, use_history=False, max_tokens=settings.llm_voice_max_tokens)
-                    # Post-LLM: if no robot action matched but LLM response suggests one, try to trigger it
-                    if resp and not robot_match:
-                        try:
-                            post_match = check_robot_action(resp)
-                            if post_match and post_match.arm_action:
-                                print(f"[robot-post-llm] LLM triggered action: arm={post_match.arm_action!r}", flush=True)
-                                _run_robot_match_actions(post_match)
-                        except Exception:
-                            pass
+            else:
+                from talk_module.processing import route_user_prompt
+
+                resp, robot_match = route_user_prompt(
+                    prompt,
+                    llm,
+                    voice=True,
+                    run_robot_match_fn=_run_robot_match_actions,
+                )
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             if audio_out and not robot_match:
                 from talk_module.speak_gestures import start_talk_gesture
@@ -1746,30 +1866,16 @@ self.addEventListener('activate', () => self.clients.claim());
             if not prompt or not prompt.strip():
                 return {"text": "", "response": "", "audio_base64": "", "message": "Scrivi qualcosa.", "duration_ms": 0}
             stt, llm, tts, _, _ = get_services()
-            robot_match = None
-            try:
-                from talk_module.robot_actions import check_robot_action
+            from talk_module.processing import route_user_prompt
 
-                robot_match = check_robot_action(prompt.strip())
-            except Exception:
-                pass
-            if robot_match:
-                resp = _run_robot_match_actions(robot_match)
-            else:
-                resp = check_knowledge(prompt)
-                if not resp:
-                    from talk_module.quick_lookup import is_quick_lookup_question, quick_lookup, NOT_FOUND
-                    if is_quick_lookup_question(prompt.strip()):
-                        resp = quick_lookup(prompt.strip())
-                        if resp == NOT_FOUND:
-                            resp = None  # fallback a LLM
-                if not resp:
-                    resp = llm.chat(
-                        prompt.strip(),
-                        use_history=False,
-                        model=settings.llm_text_model,
-                        max_tokens=384,
-                    )
+            resp, robot_match = route_user_prompt(
+                prompt.strip(),
+                llm,
+                voice=False,
+                run_robot_match_fn=_run_robot_match_actions,
+                text_model=settings.llm_text_model,
+                max_tokens=384,
+            )
             audio_out = tts.synthesize(resp, format="mp3") if resp else b""
             if audio_out and not robot_match:
                 from talk_module.speak_gestures import start_talk_gesture
@@ -1778,6 +1884,9 @@ self.addEventListener('activate', () => self.clients.claim());
                 "text": prompt.strip(),
                 "response": resp or "",
                 "audio_base64": base64.b64encode(audio_out).decode() if audio_out else "",
+                "robot_matched": bool(robot_match),
+                "robot_action": (robot_match.arm_action or "") if robot_match else "",
+                "robot_loco": (robot_match.loco_command or "") if robot_match else "",
                 "duration_ms": int((time.perf_counter() - t0) * 1000),
             }
         except Exception as e:
@@ -1785,42 +1894,10 @@ self.addEventListener('activate', () => self.clients.claim());
 
     @app.post("/api/text-chat")
     def api_text_chat(body: dict = Body(...)):
-        """Testo → routing azioni robot (config/robot_actions.json) oppure LLM+TTS."""
+        """Testo → routing knowledge (config/knowledge.json) → azioni robot → LLM+TTS."""
         text = str(body.get("text") or "").strip()
         if not text:
             raise HTTPException(400, "Testo vuoto")
-        t0 = time.perf_counter()
-        robot_match = None
-        try:
-            from talk_module.robot_actions import check_robot_action
-
-            robot_match = check_robot_action(text)
-        except Exception as e:
-            print(f"[text-chat] robot-check error: {e}", flush=True)
-        if robot_match:
-            print(
-                f"[text-chat] ROUTE text={text!r} arm={robot_match.arm_action!r} loco={robot_match.loco_command!r}",
-                flush=True,
-            )
-            resp = _run_robot_match_actions(robot_match)
-            audio_b64 = ""
-            try:
-                if not settings.validate():
-                    _, _, tts, _, _ = get_services()
-                    audio_out = tts.synthesize(resp, format="mp3")
-                    if audio_out:
-                        audio_b64 = base64.b64encode(audio_out).decode()
-            except Exception as te:
-                print(f"[text-chat] TTS opzionale saltato: {te}", flush=True)
-            return {
-                "text": text,
-                "response": resp or "",
-                "audio_base64": audio_b64,
-                "robot_matched": True,
-                "robot_action": robot_match.arm_action or "",
-                "robot_loco": robot_match.loco_command or "",
-                "duration_ms": int((time.perf_counter() - t0) * 1000),
-            }
         errs = settings.validate()
         if errs:
             raise HTTPException(400, "; ".join(errs))
@@ -1944,7 +2021,7 @@ self.addEventListener('activate', () => self.clients.claim());
                 print(f"[Listen] Record loop started, device={recorder.device_id}, rate={recorder.sample_rate}", flush=True)
                 chunk_count = 0
                 for audio_bytes in recorder.record_until_silence(
-                    silence_seconds=5,
+                    silence_seconds=settings.stt_listen_silence_sec,
                     chunk_duration=0.5,
                     silence_threshold=0.0035,
                     max_duration=60.0,
@@ -2745,6 +2822,16 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       padding: 5px 10px; border-radius: 6px; border: 1px solid rgba(20,184,166,0.4);
       background: rgba(20,184,166,0.15); color: #5eead4; font-size: 10px; font-weight: 700; cursor: pointer;
     }
+    .explore-teach-steps { margin: 0 0 14px; padding: 12px 14px; border-radius: 10px; background: rgba(20,184,166,0.06); border: 1px solid rgba(20,184,166,0.18); font-size: 12px; color: #a1a1aa; line-height: 1.5; }
+    .explore-teach-steps strong { color: #5eead4; }
+    .explore-teach-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .explore-teach-bar button { padding: 8px 14px; background: rgba(20,184,166,0.15); color: #14b8a6; border: 1px solid rgba(20,184,166,0.35); border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 600; }
+    .explore-teach-bar button.secondary { background: rgba(255,255,255,0.06); color: #d4d4d8; border-color: rgba(255,255,255,0.12); }
+    #exploreTeachList { display: flex; flex-direction: column; gap: 8px; max-height: min(52vh, 420px); overflow-y: auto; }
+    .explore-teach-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+    .explore-teach-item .et-name { flex: 1; font-size: 13px; color: #e4e4e7; word-break: break-word; }
+    .explore-teach-item .et-dur { font-size: 11px; color: #71717a; font-family: monospace; min-width: 40px; text-align: right; }
+    .explore-teach-item button { padding: 8px 14px; background: #14b8a6; color: #0c0e14; border: none; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700; }
     #robotControlFrame { flex: 1; width: 100%; min-height: 360px; border: 0; border-radius: 12px; background: #0f1115; }
     .client-camera-wrap { position: relative; background: #0f1115; border-radius: 12px; overflow: hidden; aspect-ratio: 4/3; max-height: min(52vh, 420px); border: 1px solid rgba(255,255,255,0.08); margin-bottom: 12px; }
     .client-camera-wrap img { width: 100%; height: 100%; object-fit: contain; display: none; background: #000; }
@@ -3081,7 +3168,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (sec === 'robot') {
           var rf = document.getElementById('robotControlFrame');
           if (rf && (!rf.src || rf.src === 'about:blank')) { rf.src = location.origin + '/robot-control'; }
-          if (typeof window.g1LoadUnitreeTeachings === 'function') window.g1LoadUnitreeTeachings();
+        }
+        if (sec === 'teaching' && typeof window.g1LoadExploreTeachings === 'function') {
+          window.g1LoadExploreTeachings();
         }
         setTimeout(function(){
           if ((sec === 'soundboard' || sec === 'parla') && navigator.mediaDevices) {
@@ -3103,7 +3192,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       function g1ApplyClientHash(){
         var h = (location.hash||'').replace(/^#/, '').trim();
         if (!h) return;
-        var allowed = {soundboard:1,parla:1,occhi:1,log:1,knowledge:1,devices:1,robot:1,info:1};
+        var allowed = {soundboard:1,parla:1,occhi:1,log:1,knowledge:1,teaching:1,devices:1,robot:1,info:1};
         if (allowed[h] && typeof window.g1ActivateClientSection === 'function') {
           window.g1ActivateClientSection(h);
         }
@@ -3169,6 +3258,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <div id="soundboardGridAudio" class="soundboard-grid"></div>
     <div class="sb-divider" aria-hidden="true">Audio + robot</div>
     <p class="sb-zone-head sb-zone-robot">Con movimento robot</p>
+    <p class="hint" style="margin:-6px 0 10px;font-size:11px;color:#71717a;">Slot 51+: audio + gesto predefinito o movimento addestrato (app Explore).</p>
     <div id="soundboardGridRobot" class="soundboard-grid"></div>
   </div>
   <div id="sbModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:15000;padding:8px;flex-direction:column;align-items:center;justify-content:flex-start;overflow-y:auto;-webkit-overflow-scrolling:touch;">
@@ -3192,7 +3282,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <div id="sbModalRobotBlock">
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;">
         <select id="sbModalArm" style="flex:1;min-width:100px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;">
-          <option value="">Gesto: nessuno</option>
+          <option value="">Movimento: nessuno</option>
+          <optgroup label="Gesti predefiniti">
           <option value="face_wave">Saluto</option>
           <option value="shake_hand">Stretta mano</option>
           <option value="hands_up">Mani in alto</option>
@@ -3207,6 +3298,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           <option value="right_hand_up">Mano dx su</option>
           <option value="x_ray">Braccia incr.</option>
           <option value="high_wave">Saluto alto</option>
+          </optgroup>
         </select>
         <select id="sbModalLoco" style="flex:1;min-width:100px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;">
           <option value="">Loco: nessuna</option>
@@ -3236,8 +3328,20 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           <option value="solid_white">&#11036; Bianco</option>
         </select>
         <div id="sbModalLedPreview" style="width:22px;height:22px;border-radius:50%;border:2px solid #3f3f46;background:#27272a;flex-shrink:0;"></div>
-        <input type="number" id="sbModalTeaching" min="" max="99" value="" placeholder="Teach" style="width:60px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;text-align:center;" title="Teaching slot (numero)" />
+        <input type="number" id="sbModalTeaching" min="" max="99" value="" placeholder="Teach" style="display:none;" />
+        <select id="sbModalExploreTeaching" style="display:none;" aria-hidden="true" tabindex="-1">
+          <option value="">— Movimento Explore —</option>
+        </select>
       </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center;">
+        <label style="font-size:11px;color:#9ca3af;flex:1;min-width:140px;">Ritardo audio (ms)
+          <input type="number" id="sbModalAudioDelay" min="0" max="15000" step="50" value="0" style="display:block;width:100%;margin-top:4px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;" />
+        </label>
+        <label style="font-size:11px;color:#9ca3af;flex:1;min-width:140px;">Ritardo gesto (ms)
+          <input type="number" id="sbModalGestureDelay" min="0" max="15000" step="50" value="0" style="display:block;width:100%;margin-top:4px;padding:6px;background:#27272a;border:1px solid #3f3f46;border-radius:6px;color:#e4e4e7;font-size:11px;" />
+        </label>
+      </div>
+      <p class="hint" style="margin:0 0 6px;font-size:10px;color:#71717a;">Con 0/0 il gesto parte con l'audio. Con ritardi: entrambi da Play, indipendenti (es. audio 500, gesto 200 → gesto a 200 ms, audio a 500 ms).</p>
       </div>
       <div style="display:flex;gap:6px;margin-top:8px;">
         <button type="button" id="sbModalSave" style="flex:1;padding:10px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva</button>
@@ -3371,14 +3475,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     <section id="section-knowledge" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Knowledge</h2>
   <details id="knowledgeWrap" class="step" open style="margin-bottom:12px;border:1px solid rgba(255,255,255,0.06);">
-    <summary style="cursor:pointer;color:#a1a1aa;">Pattern -&gt; risposta (<span id="knowledgeCount">caricamento…</span>)</summary>
-    <div id="knowledgeList" style="margin-top:8px;"></div>
-    <div style="margin-top:8px;">
-      <input type="text" id="knowledgePattern" placeholder="Pattern" style="width:45%;padding:8px;margin-right:4px;" />
-      <input type="text" id="knowledgeResponse" placeholder="Risposta" style="width:45%;padding:8px;margin-right:4px;" />
-      <button type="button" id="knowledgeAdd" style="padding:8px 12px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-size:12px;">Aggiungi</button>
+    <summary style="cursor:pointer;color:#a1a1aa;">Gruppi pattern (<span id="knowledgeCount">caricamento…</span>)</summary>
+    <p style="margin:8px 0 0;font-size:12px;color:#71717a;">Ogni gruppo può essere attivato o disattivato. Solo i gruppi attivi vengono usati per le risposte rapide.</p>
+    <div id="knowledgeGroups" style="margin-top:8px;"></div>
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button type="button" id="knowledgeAddGroup" style="padding:8px 12px;background:rgba(20,184,166,0.15);color:#14b8a6;border:1px solid rgba(20,184,166,0.35);border-radius:8px;cursor:pointer;font-size:12px;">Nuovo gruppo</button>
+      <button type="button" id="knowledgeSave" style="padding:8px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border:1px solid rgba(255,255,255,0.2);border-radius:8px;cursor:pointer;font-size:12px;">Salva su server</button>
     </div>
-    <button type="button" id="knowledgeSave" style="margin-top:8px;padding:8px 16px;background:rgba(255,255,255,0.1);color:#e8eaed;border:1px solid rgba(255,255,255,0.2);border-radius:8px;cursor:pointer;font-size:12px;">Salva su server</button>
   </details>
     </section>
     <section id="section-devices" class="section">
@@ -3446,26 +3549,30 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div class="hint" id="clientPickStatus" style="margin-top:8px;font-size:11px;color:#71717a;">Auto-pick: —</div>
     </section>
+    <section id="section-teaching" class="section">
+      <h2 style="font-size:1.2rem;margin:0 0 12px;">Teaching Explore</h2>
+      <div class="explore-teach-steps">
+        <strong>1.</strong> Registra sul telefono: app <strong>Unitree Explore</strong> → Function → Demo → Teaching → Create → salva con un nome.<br>
+        <strong>2.</strong> Sul telecomando: <strong>L1+A</strong> (sport mode). Poi <strong>Prepara robot</strong> qui sotto.<br>
+        <strong>3.</strong> <strong>Aggiorna elenco</strong> e premi <strong>Play</strong> sul movimento.
+      </div>
+      <div class="explore-teach-bar">
+        <button type="button" id="exploreTeachRefresh" onclick="window.g1LoadExploreTeachings && window.g1LoadExploreTeachings()">Aggiorna elenco</button>
+        <button type="button" class="secondary" onclick="window.g1PrepareExploreTeaching && window.g1PrepareExploreTeaching()">Prepara robot</button>
+        <button type="button" class="secondary" onclick="window.g1StopExploreTeaching && window.g1StopExploreTeaching()">Rilascia braccia</button>
+      </div>
+      <p id="exploreTeachFsm" class="hint" style="margin:0 0 8px;font-size:11px;color:#71717a;">Stato robot: —</p>
+      <p id="exploreTeachErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;"></p>
+      <div id="exploreTeachList"><p class="hint" style="margin:0;font-size:12px;color:#52525b;">Caricamento…</p></div>
+    </section>
     <section id="section-robot" class="section">
       <h2 style="font-size:1.2rem;margin:0 0 8px;">Robot G1</h2>
-      <div class="robot-panel-tabs">
-        <button type="button" class="robot-panel-tab active" data-robot-panel="control" onclick="return window.g1RobotPanelTab && window.g1RobotPanelTab('control')">Controllo</button>
-        <button type="button" class="robot-panel-tab" data-robot-panel="unitree-teach" onclick="return window.g1RobotPanelTab && window.g1RobotPanelTab('unitree-teach')">Teach app Unitree</button>
-      </div>
       <div id="robotPanelControl">
         <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
           <a href="/vr-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.4);color:#c4b5fd;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#x1F576; VR Control (Quest 3)</a>
           <a href="/robot-control" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:10px 18px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);color:#a5b4fc;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;">&#127918; Robot Control (fullscreen)</a>
         </div>
         <iframe id="robotControlFrame" title="Robot control" src="about:blank"></iframe>
-      </div>
-      <div id="robotPanelUnitreeTeach" style="display:none;">
-        <div class="unitree-teach-bar">
-          <p class="hint">Teach registrati nell'app Unitree sul robot (non quelli REC di questa dashboard).</p>
-          <button type="button" id="unitreeTeachRefresh" onclick="window.g1LoadUnitreeTeachings && window.g1LoadUnitreeTeachings()">Aggiorna</button>
-        </div>
-        <p id="unitreeTeachErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;"></p>
-        <div id="unitreeTeachList"><p class="hint" style="margin:0;font-size:11px;color:#52525b;">Caricamento…</p></div>
       </div>
     </section>
   </main>
@@ -3485,6 +3592,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <a href="#occhi" data-section="occhi" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('occhi')"><span class="icon">&#128065;</span> Occhi robot</a>
       <a href="#log" data-section="log" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('log')"><span class="icon">&#128196;</span> Log Jetson</a>
       <a href="#knowledge" data-section="knowledge" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('knowledge')"><span class="icon">&#128214;</span> Knowledge</a>
+      <a href="#teaching" data-section="teaching" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('teaching')"><span class="icon">&#129302;</span> Teaching</a>
       <a href="#devices" data-section="devices" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('devices')"><span class="icon">&#128268;</span> Dispositivi</a>
       <a href="#robot" data-section="robot" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('robot')"><span class="icon">&#127918;</span> Robot (G1)</a>
       <a href="#info" data-section="info" onclick="return window.g1ActivateClientSection && window.g1ActivateClientSection('info')"><span class="icon">&#8505;</span> Info</a>
@@ -3812,9 +3920,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (m) { m.style.display = 'block'; m.textContent = 'Microfono non disponibile: consenti l\\'accesso (Dispositivi) e riprova.'; }
       });
     }
-    const WAKE_SLICE_MS = 4500;
-    const CMD_SLICE_MS  = 12000;
-    const CMD_SILENCE_MS = 1500;
+    const WAKE_SLICE_MS = __STT_WAKE_SLICE_MS__;
+    const CMD_SLICE_MS  = __STT_CMD_SLICE_MS__;
+    const CMD_SILENCE_MS = __STT_CMD_SILENCE_MS__;
+    const CMD_MIN_VOICE_MS = __STT_CMD_MIN_VOICE_MS__;
     const CMD_TIMEOUT_MS = 45000;
     let _wakeSliceScheduled = false;
     let scheduleNextWakeSliceIfListening = function(){};
@@ -3865,12 +3974,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     function setSoundboardBrowserGain(v){
       try { localStorage.setItem('g1_soundboard_gain', String(v)); } catch(_){}
     }
-    function playSoundboardBrowser(b64, fmt){
+    function playSoundboardBrowser(b64, fmt, onStart){
       sbStopSoundboardPlayback();
       if (!b64 || String(b64).length < 50) return;
       var mime = sbMimeForFmt(fmt);
       var gain = getSoundboardBrowserGain();
       var sinkId = resolveBrowserPlaybackSinkIdLikeSoundboard();
+      function fireOnStart(){
+        if (typeof onStart === 'function') {
+          try { onStart(); } catch(_) {}
+        }
+      }
       var bin = atob(String(b64));
       var buf = new Uint8Array(bin.length);
       for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
@@ -3881,6 +3995,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (!Ctx) {
         var a0 = new Audio('data:'+mime+';base64,'+b64);
         sbBrowserAudioEl = a0;
+        a0.addEventListener('playing', function onPlay(){ a0.removeEventListener('playing', onPlay); fireOnStart(); });
         applySinkThenPlay(a0, sinkId).catch(function(){});
         a0.onended = function(){ sbBrowserAudioEl = null; };
         return;
@@ -3902,21 +4017,25 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           sbBrowserSource = null;
           if (sbBrowserCtx === ctx) { try { ctx.close().catch(function(){}); } catch(_){} sbBrowserCtx = null; }
         };
+        fireOnStart();
         src.start(0);
       }, function(){
         sbBrowserCtx = null;
         var a1 = new Audio('data:'+mime+';base64,'+b64);
         sbBrowserAudioEl = a1;
+        a1.addEventListener('playing', function onPlay(){ a1.removeEventListener('playing', onPlay); fireOnStart(); });
         applySinkThenPlay(a1, sinkId).catch(function(){});
         a1.onended = function(){ sbBrowserAudioEl = null; };
       });
     }
-    function sbFireSlotRobotIfConfigured(sd) {
+    function sbFireSlotRobotIfConfigured(sd, slotIndex) {
+      if (typeof slotIndex === 'number' && slotIndex < SB_ROBOT_START) return;
       if (!sd) return;
       var arm = (sd.robot_arm && String(sd.robot_arm).trim()) || '';
       var loco = (sd.robot_loco && String(sd.robot_loco).trim()) || '';
       var led = (sd.led_effect && String(sd.led_effect).trim()) || '';
       var teach = (sd.teaching_slot != null && String(sd.teaching_slot).trim()) || '';
+      if (arm && teach) teach = '';
       if (!arm && !loco && !teach && !led) return;
       var ip = '192.168.123.161';
       try {
@@ -3927,7 +4046,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         fetch('/api/led', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ effect: led }) }).catch(function(){});
       }
       if (teach) {
-        fetch('/api/teaching/replay_slot/' + teach, { method: 'POST' }).catch(function(){});
+        fetch('/api/explore-teachings/play', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ name: teach }) }).catch(function(){});
       }
       if (arm) {
         fetch('/api/robot-action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ action_id: arm, robot_ip: ip }) }).catch(function(){});
@@ -4323,7 +4442,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     function onWakeResponseDone(){
       setTimeout(function(){
-        disableWakeListenAfterResponse();
+        resumeWakeListenAfterResponse();
       }, WAKE_POST_TTS_PAUSE_MS);
     }
     let wakeResponseTimeout = null;
@@ -4587,7 +4706,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             if (s > wakeSlicePeak) wakeSlicePeak = s;
             const th = getWakeVoiceThreshold();
             if (s >= th) { voiceDurationMs += 50; lastVoiceTs = Date.now(); }
-            if (isCmd && voiceDurationMs >= 500 && lastVoiceTs > 0 && (Date.now() - lastVoiceTs >= CMD_SILENCE_MS)) {
+            if (isCmd && voiceDurationMs >= CMD_MIN_VOICE_MS && lastVoiceTs > 0 && (Date.now() - lastVoiceTs >= CMD_SILENCE_MS)) {
               stopMr();
             }
           }, 50);
@@ -4713,6 +4832,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               clearWakePipelineLock();
               if (wakeCommandMode) {
                 if (btn) btn.disabled = false;
+                scheduleNextWakeSliceIfListening();
                 return;
               }
               wakeDiscardCurrentSlice = true;
@@ -4728,7 +4848,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
                 var ackHasTts = lastPlayOn === 'browser' && r.audio_base64 && String(r.audio_base64).length > 50;
                 if (ackHasTts) {
                   enqueueTtsPlayback(r.audio_base64, function(){
-                    disableWakeListenAfterResponse();
+                    resumeWakeListenAfterResponse();
                   });
                   if (btn) btn.disabled = false;
                   return;
@@ -4737,7 +4857,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
                 wakeLog('WAKE! Ti ascolto\u2026', '#22c55e');
                 playWakeChime();
               }
-              disableWakeListenAfterResponse();
+              resumeWakeListenAfterResponse();
               if (btn) btn.disabled = false;
               return;
             }
@@ -4771,8 +4891,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               onWakeResponseDone();
             }
           } else {
-            wakeAudioInFlight = false;
-            if (wakeResponseTimeout) { clearTimeout(wakeResponseTimeout); wakeResponseTimeout = null; }
+            clearWakePipelineLock();
+            var wt = document.getElementById('wakeListenToggle');
+            if (wt && wt.checked) resumeWakeListenAfterResponse();
           }
         } finally {
           if (resumeWakeListen) {
@@ -5207,34 +5328,137 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
     }
 
-    let knowledgeEntries = {};
-    function renderKnowledge(){
-      const el = document.getElementById('knowledgeList');
-      const cnt = document.getElementById('knowledgeCount');
-      var n = Object.keys(knowledgeEntries || {}).length;
-      if (cnt) cnt.textContent = n ? (n + ' voci sul server') : 'vuoto sul server';
-      if (!el) return;
-      el.innerHTML = Object.entries(knowledgeEntries).map(([k,v])=>'<div style="display:flex;align-items:center;gap:6px;margin:4px 0;font-size:12px;"><span style="color:#9ca3af;min-width:120px;">'+k.replace(/\u003c/g,'&lt;').replace(/&/g,'&amp;')+'</span><span style="color:#e8eaed;">'+(v.substring(0,40)+(v.length>40?'...':'')).replace(/\u003c/g,'&lt;').replace(/&/g,'&amp;')+'</span><button type="button" data-key="'+encodeURIComponent(k)+'" class="knowledgeDel" style="margin-left:auto;padding:2px 8px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:4px;cursor:pointer;font-size:11px;">Elimina</button></div>').join('') || '<span style="color:#71717a;">(vuoto)</span>';
-      el.querySelectorAll('.knowledgeDel').forEach(btn=>{ btn.onclick=()=>{ delete knowledgeEntries[decodeURIComponent(btn.dataset.key||'')]; renderKnowledge(); }; });
+    let knowledgeGroups = [];
+    function knowledgeEsc(s) {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
     }
-    fetch('/api/knowledge').then(r=>r.json()).then(d=>{ knowledgeEntries = d.entries || {}; renderKnowledge(); }).catch(function(){ var c=document.getElementById('knowledgeCount'); if(c)c.textContent='errore caricamento'; });
-    var knowledgeAddEl = document.getElementById('knowledgeAdd');
-    if (knowledgeAddEl) knowledgeAddEl.onclick = function(){
-      const p = (document.getElementById('knowledgePattern').value||'').trim();
-      const r = (document.getElementById('knowledgeResponse').value||'').trim();
-      if (p && r) { knowledgeEntries[p] = r; document.getElementById('knowledgePattern').value=''; document.getElementById('knowledgeResponse').value=''; renderKnowledge(); }
+    function knowledgeGroupCounts() {
+      var total = 0, active = 0;
+      (knowledgeGroups || []).forEach(function(g) {
+        var n = Object.keys(g.entries || {}).length;
+        total += n;
+        if (g.enabled !== false) active += n;
+      });
+      return { total: total, active: active };
+    }
+    function renderKnowledge() {
+      var el = document.getElementById('knowledgeGroups');
+      var cnt = document.getElementById('knowledgeCount');
+      var counts = knowledgeGroupCounts();
+      if (cnt) cnt.textContent = counts.total ? (counts.active + ' attivi / ' + counts.total + ' totali') : 'vuoto';
+      if (!el) return;
+      if (!knowledgeGroups.length) {
+        el.innerHTML = '<span style="color:#71717a;">(nessun gruppo)</span>';
+        return;
+      }
+      el.innerHTML = knowledgeGroups.map(function(g, gi) {
+        var enabled = g.enabled !== false;
+        var entries = g.entries || {};
+        var rows = Object.entries(entries).map(function(pair) {
+          var k = pair[0], v = pair[1];
+          return '<div style="display:flex;align-items:center;gap:6px;margin:4px 0;font-size:12px;opacity:' + (enabled ? '1' : '0.55') + ';">' +
+            '<span style="color:#9ca3af;min-width:120px;">' + knowledgeEsc(k) + '</span>' +
+            '<span style="color:#e8eaed;flex:1;">' + knowledgeEsc(v.length > 40 ? v.substring(0, 40) + '...' : v) + '</span>' +
+            '<button type="button" class="knowledgeDel" data-gi="' + gi + '" data-key="' + encodeURIComponent(k) + '" style="padding:2px 8px;background:rgba(239,68,68,0.3);color:#fca5a5;border:none;border-radius:4px;cursor:pointer;font-size:11px;">Elimina</button></div>';
+        }).join('') || '<div style="color:#71717a;font-size:12px;">(nessun pattern)</div>';
+        return '<div class="knowledge-group" style="margin:10px 0;padding:10px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;' + (enabled ? '' : 'opacity:0.75;') + '">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
+          '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#e8eaed;flex:1;">' +
+          '<input type="checkbox" class="knowledgeGroupToggle" data-gi="' + gi + '" ' + (enabled ? 'checked' : '') + ' style="accent-color:#14b8a6;" />' +
+          '<input type="text" class="knowledgeGroupName" data-gi="' + gi + '" value="' + knowledgeEsc(g.name || g.id || '') + '" style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:#27272a;color:#fff;font-size:12px;" />' +
+          '</label>' +
+          '<button type="button" class="knowledgeGroupDel" data-gi="' + gi + '" style="padding:4px 10px;background:rgba(239,68,68,0.2);color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:11px;">Elimina gruppo</button>' +
+          '</div>' + rows +
+          '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">' +
+          '<input type="text" class="knowledgePattern" data-gi="' + gi + '" placeholder="Pattern" style="flex:1;min-width:100px;padding:6px;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:#27272a;color:#fff;font-size:12px;" />' +
+          '<input type="text" class="knowledgeResponse" data-gi="' + gi + '" placeholder="Risposta" style="flex:2;min-width:140px;padding:6px;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:#27272a;color:#fff;font-size:12px;" />' +
+          '<button type="button" class="knowledgeAdd" data-gi="' + gi + '" style="padding:6px 10px;background:#14b8a6;color:#0c0e14;border:none;border-radius:6px;cursor:pointer;font-size:11px;">Aggiungi</button>' +
+          '</div></div>';
+      }).join('');
+      el.querySelectorAll('.knowledgeGroupToggle').forEach(function(cb) {
+        cb.onchange = function() {
+          var gi = +cb.dataset.gi;
+          if (knowledgeGroups[gi]) knowledgeGroups[gi].enabled = !!cb.checked;
+          renderKnowledge();
+        };
+      });
+      el.querySelectorAll('.knowledgeGroupName').forEach(function(inp) {
+        inp.oninput = function() {
+          var gi = +inp.dataset.gi;
+          if (knowledgeGroups[gi]) knowledgeGroups[gi].name = inp.value;
+        };
+      });
+      el.querySelectorAll('.knowledgeGroupDel').forEach(function(btn) {
+        btn.onclick = function() {
+          var gi = +btn.dataset.gi;
+          if (!confirm('Eliminare questo gruppo?')) return;
+          knowledgeGroups.splice(gi, 1);
+          renderKnowledge();
+        };
+      });
+      el.querySelectorAll('.knowledgeDel').forEach(function(btn) {
+        btn.onclick = function() {
+          var gi = +btn.dataset.gi;
+          var key = decodeURIComponent(btn.dataset.key || '');
+          if (knowledgeGroups[gi] && knowledgeGroups[gi].entries) delete knowledgeGroups[gi].entries[key];
+          renderKnowledge();
+        };
+      });
+      el.querySelectorAll('.knowledgeAdd').forEach(function(btn) {
+        btn.onclick = function() {
+          var gi = +btn.dataset.gi;
+          var wrap = btn.parentElement;
+          var p = ((wrap.querySelector('.knowledgePattern') || {}).value || '').trim();
+          var r = ((wrap.querySelector('.knowledgeResponse') || {}).value || '').trim();
+          if (!p || !r) return;
+          if (!knowledgeGroups[gi].entries) knowledgeGroups[gi].entries = {};
+          knowledgeGroups[gi].entries[p] = r;
+          renderKnowledge();
+        };
+      });
+    }
+    fetch('/api/knowledge').then(function(r) { return r.json(); }).then(function(d) {
+      knowledgeGroups = (d.groups || []).map(function(g) {
+        return {
+          id: g.id || '',
+          name: g.name || g.id || 'Gruppo',
+          enabled: g.enabled !== false,
+          entries: Object.assign({}, g.entries || {})
+        };
+      });
+      if (!knowledgeGroups.length && d.entries) {
+        knowledgeGroups = [{ id: 'general', name: 'Generale', enabled: true, entries: Object.assign({}, d.entries) }];
+      }
+      renderKnowledge();
+    }).catch(function() {
+      var c = document.getElementById('knowledgeCount');
+      if (c) c.textContent = 'errore caricamento';
+    });
+    var knowledgeAddGroupEl = document.getElementById('knowledgeAddGroup');
+    if (knowledgeAddGroupEl) knowledgeAddGroupEl.onclick = function() {
+      var n = knowledgeGroups.length + 1;
+      knowledgeGroups.push({ id: 'group_' + Date.now(), name: 'Gruppo ' + n, enabled: true, entries: {} });
+      renderKnowledge();
     };
     var knowledgeSaveEl = document.getElementById('knowledgeSave');
-    if (knowledgeSaveEl) knowledgeSaveEl.onclick = function(){
-      fetch('/api/knowledge/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({entries:knowledgeEntries})})
-        .then(r=>r.json()).then(d=>{ if(d.ok) document.getElementById('knowledgeSave').textContent='Salvato!'; else alert(d.error||'Errore'); })
-        .catch(e=>alert('Errore: '+e.message));
+    if (knowledgeSaveEl) knowledgeSaveEl.onclick = function() {
+      fetch('/api/knowledge/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groups: knowledgeGroups }) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (d.ok) {
+            knowledgeSaveEl.textContent = 'Salvato!';
+            setTimeout(function() { knowledgeSaveEl.textContent = 'Salva su server'; }, 2000);
+          } else {
+            alert(d.error || 'Errore');
+          }
+        })
+        .catch(function(e) { alert('Errore: ' + e.message); });
     };
 
     let soundboardSlots = [];
     let sbTextMax = 280;
     let sbEditIdx = -1, sbEditAudio = null, sbEditFmt = '', sbEditAudioRaw = null;
-    let sbEditAudioClean = null, sbEditFmtClean = 'mp3';
+    let sbEditAudioClean = null, sbEditFmtClean = 'mp3', sbEditAudioCleared = false;
     function sbMimeForFmt(fmt){
       const f = (fmt||'webm').toLowerCase();
       if(f==='mp3') return 'audio/mpeg';
@@ -5270,8 +5494,24 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       function playFromData(sd){
         if(!sd.audio_base64_clean || sd.audio_base64_clean.length<=50) return;
         const b64 = sd.audio_base64_clean, fmt = sd.format_clean||'mp3';
-        sbFireSlotRobotIfConfigured(sd);
-        playSoundboardBrowser(b64, fmt);
+        var audioDelay = parseInt(sd.audio_delay_ms, 10) || 0;
+        var gestureDelay = parseInt(sd.gesture_delay_ms, 10) || 0;
+        if (audioDelay < 0) audioDelay = 0;
+        if (gestureDelay < 0) gestureDelay = 0;
+        if (audioDelay > 15000) audioDelay = 15000;
+        if (gestureDelay > 15000) gestureDelay = 15000;
+        if (audioDelay === 0 && gestureDelay === 0) {
+          playSoundboardBrowser(b64, fmt, function(){
+            sbFireSlotRobotIfConfigured(sd, slotIndex);
+          });
+        } else {
+          setTimeout(function(){
+            playSoundboardBrowser(b64, fmt);
+          }, Math.max(0, audioDelay));
+          setTimeout(function(){
+            sbFireSlotRobotIfConfigured(sd, slotIndex);
+          }, Math.max(0, gestureDelay));
+        }
       }
       if (s.audio_base64_clean && s.audio_base64_clean.length>50) {
         var arm0 = (s.robot_arm && String(s.robot_arm).trim()) || '';
@@ -5287,7 +5527,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
               robot_arm: (full && full.robot_arm) ? String(full.robot_arm) : '',
               robot_loco: (full && full.robot_loco) ? String(full.robot_loco) : '',
               led_effect: (full && full.led_effect) ? String(full.led_effect) : '',
-              teaching_slot: (full && full.teaching_slot) ? String(full.teaching_slot) : ''
+              teaching_slot: (full && full.teaching_slot) ? String(full.teaching_slot) : '',
+              audio_delay_ms: (full && full.audio_delay_ms != null) ? full.audio_delay_ms : 0,
+              gesture_delay_ms: (full && full.gesture_delay_ms != null) ? full.gesture_delay_ms : 0
             });
             playFromData(merged);
           }).catch(function(){ playFromData(s); });
@@ -5312,11 +5554,94 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     const SB_AUDIO_COUNT = 50;
     const SB_ROBOT_START = 50;
+    const SB_EXPLORE_GESTURE_PREFIX = 'explore::';
+    var _sbArmGestureRefreshGen = 0;
+    var _sbArmGestureRefreshPromise = null;
+    function sbRemoveExploreGestureGroups(sel){
+      if (!sel) return;
+      sel.querySelectorAll('optgroup').forEach(function(og){
+        if (og.id === 'sbExploreGesturesGroup' || og.label === 'Addestrati (Explore)') og.remove();
+      });
+    }
+    function sbRefreshArmGestureOptions(){
+      var sel = document.getElementById('sbModalArm');
+      if (!sel) return Promise.resolve();
+      if (_sbArmGestureRefreshPromise) return _sbArmGestureRefreshPromise;
+      sbRemoveExploreGestureGroups(sel);
+      var gen = ++_sbArmGestureRefreshGen;
+      _sbArmGestureRefreshPromise = fetch('/api/explore-teachings')
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if (gen !== _sbArmGestureRefreshGen) return;
+          sbRemoveExploreGestureGroups(sel);
+          var items = (d && d.ok && d.teachings) ? d.teachings : [];
+          if (!items.length) return;
+          var og = document.createElement('optgroup');
+          og.id = 'sbExploreGesturesGroup';
+          og.label = 'Addestrati (Explore)';
+          items.forEach(function(t){
+            var nm = String(t.name || '').trim();
+            if (!nm) return;
+            var opt = document.createElement('option');
+            opt.value = SB_EXPLORE_GESTURE_PREFIX + nm;
+            opt.textContent = nm;
+            og.appendChild(opt);
+          });
+          sel.appendChild(og);
+        })
+        .catch(function(){})
+        .finally(function(){
+          if (gen === _sbArmGestureRefreshGen) _sbArmGestureRefreshPromise = null;
+        });
+      return _sbArmGestureRefreshPromise;
+    }
+    function sbGetModalGesture(){
+      var v = (document.getElementById('sbModalArm')||{}).value || '';
+      if (v.indexOf(SB_EXPLORE_GESTURE_PREFIX) === 0) {
+        return { robot_arm: '', teaching_slot: v.slice(SB_EXPLORE_GESTURE_PREFIX.length) };
+      }
+      return { robot_arm: v, teaching_slot: '' };
+    }
+    function sbGestureFieldsForSave(){
+      var g = sbGetModalGesture();
+      return {
+        robot_arm: g.robot_arm || '',
+        teaching_slot: g.teaching_slot || ''
+      };
+    }
+    function sbParseDelayMs(el){
+      var v = parseInt((el && el.value) || '0', 10);
+      if (!isFinite(v) || v < 0) return 0;
+      return Math.min(v, 15000);
+    }
+    function sbSetModalGesture(s){
+      var sel = document.getElementById('sbModalArm');
+      if (!sel) return;
+      var teach = (s && s.teaching_slot != null) ? String(s.teaching_slot).trim() : '';
+      var arm = (s && s.robot_arm != null) ? String(s.robot_arm).trim() : '';
+      var want = teach ? (SB_EXPLORE_GESTURE_PREFIX + teach) : (arm || '');
+      var hasOpt = Array.prototype.some.call(sel.options, function(o){ return o.value === want; });
+      if (want && !hasOpt && teach) {
+        var og = sel.querySelector('#sbExploreGesturesGroup') || sel.querySelector('optgroup[label="Addestrati (Explore)"]');
+        if (!og) {
+          og = document.createElement('optgroup');
+          og.id = 'sbExploreGesturesGroup';
+          og.label = 'Addestrati (Explore)';
+          sel.appendChild(og);
+        }
+        var opt = document.createElement('option');
+        opt.value = want;
+        opt.textContent = teach;
+        og.appendChild(opt);
+      }
+      sel.value = want;
+    }
     function sbSlotHasAudio(s){
       return (typeof s.has_clean === 'boolean') ? s.has_clean : !!(s.audio_base64_clean && s.audio_base64_clean.length > 50);
     }
     function sbBuildSlotHtml(s, i, zone){
       const hasAudio = sbSlotHasAudio(s);
+      const hasRobot = zone === 'robot' && !!(s.has_robot || (s.teaching_slot && String(s.teaching_slot).trim()) || (s.robot_arm && String(s.robot_arm).trim()));
       let cls = 'sb-slot';
       let badgeColor = '#71717a';
       if (zone === 'robot') {
@@ -5325,7 +5650,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (hasAudio) { cls += ' sb-slot-filled-teal'; badgeColor = '#14b8a6'; }
       }
       let badgeTitle = 'Vuoto', badgeHtml = '&#8212;';
-      if (hasAudio){ badgeTitle = 'Audio'; badgeHtml = '&#9654;'; }
+      if (hasAudio && hasRobot) { badgeTitle = 'Audio + movimento'; badgeHtml = '&#9654;&#129302;'; }
+      else if (hasAudio){ badgeTitle = 'Audio'; badgeHtml = '&#9654;'; }
+      else if (hasRobot) { badgeTitle = 'Movimento robot'; badgeHtml = '&#129302;'; }
       const badge = hasAudio
         ? '<span style="position:absolute;top:4px;right:4px;font-size:9px;font-weight:700;color:'+badgeColor+';" title="'+badgeTitle+'">'+badgeHtml+'</span>'
         : '<span style="position:absolute;top:4px;right:4px;font-size:10px;color:#71717a;" title="Vuoto">&#8212;</span>';
@@ -5385,6 +5712,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (hint2) { hint2.style.display = 'none'; hint2.textContent = ''; }
       }
       if (typeof d.text_max_len === 'number' && d.text_max_len > 0) { sbTextMax = d.text_max_len; const mx = document.getElementById('sbModalCharMax'); if(mx) mx.textContent = sbTextMax; }
+      sbRefreshArmGestureOptions();
       renderSoundboard();
       const sbpd = document.getElementById('sbPlayDest');
       if (sbpd && !sbpd._sbVisBound) { sbpd._sbVisBound = true; sbpd.addEventListener('change', updateSbBrowserRowVisibility); }
@@ -5435,56 +5763,113 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         } else if (typeof window.g1ClientLogOnHide === 'function') {
           window.g1ClientLogOnHide();
         }
+        if (sec === 'teaching' && typeof window.g1LoadExploreTeachings === 'function') {
+          setTimeout(window.g1LoadExploreTeachings, 0);
+        }
         return false;
       };
     })();
-    window.g1RobotPanelTab = function(panel){
-      var ctl = document.getElementById('robotPanelControl');
-      var teach = document.getElementById('robotPanelUnitreeTeach');
-      var tabs = document.querySelectorAll('.robot-panel-tab');
-      for (var i = 0; i < tabs.length; i++) {
-        tabs[i].classList.toggle('active', tabs[i].getAttribute('data-robot-panel') === panel);
-      }
-      if (ctl) ctl.style.display = (panel === 'control') ? '' : 'none';
-      if (teach) teach.style.display = (panel === 'unitree-teach') ? 'flex' : 'none';
-      if (panel === 'unitree-teach' && typeof window.g1LoadUnitreeTeachings === 'function') window.g1LoadUnitreeTeachings();
-    };
-    window.g1PlayUnitreeTeaching = function(name){
+    window.g1PlayExploreTeaching = function(name){
       if (!name) return;
-      fetch('/api/robot-unitree-teachings/play', {
+      fetch('/api/explore-teachings/play', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: name })
       }).then(function(r){ return r.json(); }).then(function(d){
-        if (!d.ok) alert('Teach: ' + (d.message || 'errore'));
-      }).catch(function(e){ alert('Teach: ' + (e.message || String(e))); });
+        if (!d.ok) alert('Teaching: ' + (d.message || 'errore'));
+        if (typeof window.g1RefreshExploreTeachFsm === 'function') window.g1RefreshExploreTeachFsm();
+      }).catch(function(e){ alert('Teaching: ' + (e.message || String(e))); });
     };
-    window.g1LoadUnitreeTeachings = function(){
-      var list = document.getElementById('unitreeTeachList');
-      var err = document.getElementById('unitreeTeachErr');
+    window.g1PrepareExploreTeaching = function(){
+      fetch('/api/robot-loco', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'arm_ready' })
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (!d.ok) alert('Prepara robot: ' + (d.message || 'errore'));
+        if (typeof window.g1RefreshExploreTeachFsm === 'function') window.g1RefreshExploreTeachFsm();
+      }).catch(function(e){ alert('Prepara robot: ' + (e.message || String(e))); });
+    };
+    window.g1RefreshExploreTeachFsm = function(){
+      var el = document.getElementById('exploreTeachFsm');
+      if (!el) return;
+      fetch('/api/explore-teachings/status').then(function(r){ return r.json(); }).then(function(d){
+        var sport = (d && d.sport) ? d.sport : {};
+        var label = sport.sport_label || sport.sport_status || '—';
+        var detail = sport.detail || '';
+        var arm = d.arm_sdk_active ? ' · arm_sdk OCCUPATO (ferma VR/REC)' : '';
+        var count = (d.teaching_count != null) ? (' · ' + d.teaching_count + ' teach') : '';
+        el.textContent = 'Stato robot: ' + label + count + arm + (detail ? (' — ' + detail) : '');
+        el.style.color = d.arm_sdk_active ? '#f87171' : '#71717a';
+      }).catch(function(){ el.textContent = 'Stato robot: non disponibile'; });
+    };
+    window.g1StopExploreTeaching = function(){
+      fetch('/api/explore-teachings/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){ if (!d.ok) alert('Stop: ' + (d.message || 'errore')); })
+        .catch(function(e){ alert('Stop: ' + (e.message || String(e))); });
+    };
+    window.g1PopulateExploreTeachingSelect = function(selectEl, selectedName){
+      if (!selectEl) return Promise.resolve();
+      return fetch('/api/explore-teachings')
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          var items = (d && d.ok && d.teachings) ? d.teachings : ((d && d.custom) ? d.custom : []);
+          var html = '<option value="">— Movimento Explore —</option>';
+          items.forEach(function(t){
+            var nm = String(t.name || '');
+            var esc = nm.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+            html += '<option value="' + esc + '">' + esc + '</option>';
+          });
+          selectEl.innerHTML = html;
+          if (selectedName) selectEl.value = selectedName;
+        })
+        .catch(function(){});
+    };
+    (function(){
+      function bindExploreTeachListClicks(){
+        var list = document.getElementById('exploreTeachList');
+        if (!list || list._explorePlayBound) return;
+        list._explorePlayBound = true;
+        list.addEventListener('click', function(ev){
+          var btn = ev.target && ev.target.closest ? ev.target.closest('button[data-explore-play]') : null;
+          if (!btn || !list.contains(btn)) return;
+          ev.preventDefault();
+          var teachName = btn.getAttribute('data-explore-play') || '';
+          if (typeof window.g1PlayExploreTeaching === 'function') window.g1PlayExploreTeaching(teachName);
+        });
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindExploreTeachListClicks);
+      else bindExploreTeachListClicks();
+    })();
+    window.g1LoadExploreTeachings = function(){
+      var list = document.getElementById('exploreTeachList');
+      var err = document.getElementById('exploreTeachErr');
       if (!list) return;
-      list.innerHTML = '<p class="hint" style="margin:0;font-size:11px;color:#52525b;">Caricamento…</p>';
+      if (typeof window.g1RefreshExploreTeachFsm === 'function') window.g1RefreshExploreTeachFsm();
+      list.innerHTML = '<p class="hint" style="margin:0;font-size:12px;color:#52525b;">Caricamento…</p>';
       if (err) { err.style.display = 'none'; err.textContent = ''; }
-      fetch('/api/robot-unitree-teachings')
+      fetch('/api/explore-teachings')
         .then(function(r){ return r.json(); })
         .then(function(d){
           if (!d.ok) {
             if (err) { err.style.display = 'block'; err.textContent = d.error || 'Elenco non disponibile'; }
-            list.innerHTML = '<p class="hint" style="margin:0;font-size:11px;color:#52525b;">—</p>';
+            list.innerHTML = '<p class="hint" style="margin:0;font-size:12px;color:#52525b;">—</p>';
             return;
           }
-          var items = d.custom || [];
+          var items = d.teachings || [];
+          window.g1PopulateExploreTeachingSelect(document.getElementById('sbModalExploreTeaching'));
           if (!items.length) {
-            list.innerHTML = '<p class="hint" style="margin:0;font-size:11px;color:#52525b;">Nessun teach nell&#39;app Unitree sul robot.</p>';
+            list.innerHTML = '<p class="hint" style="margin:0;font-size:12px;color:#52525b;">Nessun movimento nell&#39;app Explore sul robot. Registra prima dal telefono, poi Aggiorna.</p>';
             return;
           }
           list.innerHTML = items.map(function(t){
             var dur = (t.duration_s != null) ? (t.duration_s + 's') : '—';
             var nm = String(t.name || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-            var jsName = JSON.stringify(String(t.name || ''));
-            return '<div class="unitree-teach-item"><span class="ut-name">' + nm + '</span>'
-              + '<span class="ut-dur">' + dur + '</span>'
-              + '<button type="button" onclick="window.g1PlayUnitreeTeaching(' + jsName + ')">PLAY</button></div>';
+            var attrName = String(t.name || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/'/g,'&#39;');
+            return '<div class="explore-teach-item"><span class="et-name">' + nm + '</span>'
+              + '<span class="et-dur">' + dur + '</span>'
+              + '<button type="button" data-explore-play="' + attrName + '">Play</button></div>';
           }).join('');
         })
         .catch(function(e){
@@ -5492,6 +5877,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           list.innerHTML = '';
         });
     };
+    window.g1PlayUnitreeTeaching = window.g1PlayExploreTeaching;
+    window.g1LoadUnitreeTeachings = window.g1LoadExploreTeachings;
     function updateSbModalStatus(){
       const st = document.getElementById('sbModalAudioStatus');
       if(!st) return;
@@ -5506,27 +5893,39 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('sbModalText').value = s.text || 'Comando '+(idx+1);
       document.getElementById('sbModalText').setAttribute('maxlength', String(sbTextMax));
       sbEditAudioRaw = null;
+      sbEditAudioCleared = false;
       function applyFull(full){
         sbEditAudio = null; sbEditFmt = '';
         sbEditAudioClean = full.audio_base64_clean || full.audio_base64 || null;
         sbEditFmtClean = full.format_clean || full.format || 'mp3';
+        sbEditAudioCleared = false;
         updateSbModalStatus();
         updateSbCharCount();
       }
       var armSel = document.getElementById('sbModalArm');
       var locoSel = document.getElementById('sbModalLoco');
       var ledSel = document.getElementById('sbModalLed');
-      var teachSel = document.getElementById('sbModalTeaching');
       var robotBlock = document.getElementById('sbModalRobotBlock');
       var isRobotZone = idx >= SB_ROBOT_START;
       if (robotBlock) robotBlock.style.display = isRobotZone ? '' : 'none';
-      if (armSel) armSel.value = isRobotZone ? (s.robot_arm || '') : '';
-      if (locoSel) locoSel.value = isRobotZone ? (s.robot_loco || '') : '';
-      if (ledSel) { ledSel.value = isRobotZone ? (s.led_effect || '') : ''; sbUpdateLedPreview(); }
-      if (teachSel) teachSel.value = isRobotZone ? (s.teaching_slot || '') : '';
+      function applyRobotFields(slotData){
+        if (!isRobotZone) return;
+        sbSetModalGesture(slotData || {});
+        if (locoSel) locoSel.value = (slotData && slotData.robot_loco) ? slotData.robot_loco : '';
+        if (ledSel) { ledSel.value = (slotData && slotData.led_effect) ? slotData.led_effect : ''; sbUpdateLedPreview(); }
+        var adEl = document.getElementById('sbModalAudioDelay');
+        var gdEl = document.getElementById('sbModalGestureDelay');
+        if (adEl) adEl.value = String((slotData && slotData.audio_delay_ms != null) ? slotData.audio_delay_ms : 0);
+        if (gdEl) gdEl.value = String((slotData && slotData.gesture_delay_ms != null) ? slotData.gesture_delay_ms : 0);
+      }
+      function loadRobotFields(slotData){
+        if (!isRobotZone) return Promise.resolve();
+        return sbRefreshArmGestureOptions().then(function(){ applyRobotFields(slotData); });
+      }
       document.getElementById('sbModal').style.display = 'flex';
       if (s.audio_base64_clean && s.audio_base64_clean.length>50) {
         applyFull(s);
+        loadRobotFields(s);
         return;
       }
       var st = document.getElementById('sbModalAudioStatus');
@@ -5534,12 +5933,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       sbEditAudio = null; sbEditFmt = 'webm'; sbEditAudioClean = null; sbEditFmtClean = 'mp3';
       fetch('/api/soundboard-slot/'+idx).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(function(full){
         applyFull(full);
-        if (isRobotZone) {
-          if (armSel) armSel.value = full.robot_arm || '';
-          if (locoSel) locoSel.value = full.robot_loco || '';
-          if (ledSel) { ledSel.value = full.led_effect || ''; sbUpdateLedPreview(); }
-          if (teachSel) teachSel.value = full.teaching_slot || '';
-        }
+        return loadRobotFields(full);
       }).catch(function(e){
         if (st) st.innerHTML = 'Errore: '+(e.message||String(e));
       });
@@ -5562,7 +5956,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     if (_sbLedSel) _sbLedSel.onchange = sbUpdateLedPreview;
     const sbModalTextEl = document.getElementById('sbModalText');
     if (sbModalTextEl) { sbModalTextEl.oninput = updateSbCharCount; }
-    function closeSbModal(){ document.getElementById('sbModal').style.display = 'none'; sbEditIdx = -1; sbEditAudio = null; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; }
+    function closeSbModal(){ document.getElementById('sbModal').style.display = 'none'; sbEditIdx = -1; sbEditAudio = null; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; sbEditAudioCleared = false; }
     var sbModalCancelEl = document.getElementById('sbModalCancel');
     if (sbModalCancelEl) sbModalCancelEl.onclick = closeSbModal;
     var sbModalSaveEl = document.getElementById('sbModalSave');
@@ -5571,13 +5965,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       const icon = (document.getElementById('sbModalIcon').value || '🎤').trim().substring(0,20);
       const text = (document.getElementById('sbModalText').value || 'Comando '+(sbEditIdx+1)).trim().substring(0, sbTextMax);
       let robot_arm = '', robot_loco = '', led_effect = '', teaching_slot = '';
+      let audio_delay_ms = 0, gesture_delay_ms = 0;
       if (sbEditIdx >= SB_ROBOT_START) {
-        robot_arm = (document.getElementById('sbModalArm')||{}).value || '';
+        var gesture = sbGestureFieldsForSave();
+        robot_arm = gesture.robot_arm;
+        teaching_slot = gesture.teaching_slot;
         robot_loco = (document.getElementById('sbModalLoco')||{}).value || '';
         led_effect = (document.getElementById('sbModalLed')||{}).value || '';
-        teaching_slot = (document.getElementById('sbModalTeaching')||{}).value || '';
+        audio_delay_ms = sbParseDelayMs(document.getElementById('sbModalAudioDelay'));
+        gesture_delay_ms = sbParseDelayMs(document.getElementById('sbModalGestureDelay'));
       }
-      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: '', format: sbEditFmtClean||'mp3', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', robot_arm, robot_loco, led_effect, teaching_slot})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
+      fetch('/api/soundboard', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:sbEditIdx, icon, text, audio_base64: '', format: sbEditFmtClean||'mp3', audio_base64_clean: sbEditAudioClean||'', format_clean: sbEditFmtClean||'mp3', clear_audio: !!sbEditAudioCleared, robot_arm, robot_loco, led_effect, teaching_slot, audio_delay_ms, gesture_delay_ms})}).then(r=>r.json()).then(()=>{ sbLoadLiteSlots(); });
       closeSbModal();
     };
     var sbModalSynthEl = document.getElementById('sbModalSynth');
@@ -5593,7 +5991,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (d.ok) {
           sbEditAudio = null; sbEditFmt = '';
           sbEditAudioClean = d.audio_base64_clean || d.audio_base64 || null; sbEditFmtClean = d.format_clean || d.format || 'wav';
-          sbEditAudioRaw = null; updateSbModalStatus();
+          sbEditAudioRaw = null; sbEditAudioCleared = false; updateSbModalStatus();
         }
         else alert(d.error || 'Errore TTS');
       } catch(e) { alert('Errore: '+e.message); }
@@ -5617,7 +6015,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('sbModalAudioStatus').innerHTML = 'Registrazione pronta';
             sbEditAudio = null; sbEditFmt = '';
             sbEditAudioClean = b64; sbEditFmtClean = 'webm';
-            sbEditAudioRaw = null;
+            sbEditAudioRaw = null; sbEditAudioCleared = false;
             updateSbModalStatus();
             document.getElementById('sbModalRecord').disabled = false;
           };
@@ -5637,12 +6035,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('sbModalAudioStatus').innerHTML = 'File caricato';
       sbEditAudio = b64; sbEditFmt = ext || 'mp3';
       sbEditAudioClean = b64; sbEditFmtClean = ext || 'mp3';
-      sbEditAudioRaw = null;
+      sbEditAudioRaw = null; sbEditAudioCleared = false;
       updateSbModalStatus();
       e.target.value = '';
     };
     var sbModalClearEl = document.getElementById('sbModalClear');
-    if (sbModalClearEl) sbModalClearEl.onclick = function(){ sbEditAudio = null; sbEditFmt = ''; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; sbEditAudioRaw = null; updateSbModalStatus(); };
+    if (sbModalClearEl) sbModalClearEl.onclick = function(){ sbEditAudio = null; sbEditFmt = ''; sbEditAudioClean = null; sbEditFmtClean = 'mp3'; sbEditAudioRaw = null; sbEditAudioCleared = true; updateSbModalStatus(); };
     var sbModalTtsEl = document.getElementById('sbModalTts');
     if (sbModalTtsEl) sbModalTtsEl.onclick = async function(){
       if (!sbEditAudioClean || sbEditAudioClean.length < 100) { alert('Serve prima un audio (registra o importa)'); return; }
@@ -5656,6 +6054,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           sbEditAudio = null; sbEditFmt = '';
           sbEditAudioClean = d.audio_base64;
           sbEditFmtClean = 'mp3';
+          sbEditAudioCleared = false;
           updateSbModalStatus();
         } else alert(d.error || 'Errore');
       } catch(e) { alert('Errore: '+e.message); }

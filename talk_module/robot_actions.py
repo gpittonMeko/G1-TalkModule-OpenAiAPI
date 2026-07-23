@@ -9,6 +9,7 @@ usano ChannelFactory.Instance().Init(...) — vedi _ensure_dds_init().
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -75,7 +76,10 @@ _loco_client = None
 _audio_client = None
 _dds_inited = False
 _bound_loco_service: Optional[str] = None
-_sdk_lock = threading.Lock()
+_dds_init_lock = threading.Lock()
+_arm_sdk_lock = threading.Lock()
+_audio_sdk_lock = threading.Lock()
+_sdk_lock = _arm_sdk_lock  # compat: braccia/loco
 
 
 def _dds_interface_for_init() -> str:
@@ -119,17 +123,20 @@ def _ensure_dds_init() -> None:
     global _dds_inited
     if _dds_inited:
         return
-    iface = _dds_interface_for_init()
-    print(f"[G1 DDS] ChannelFactoryInitialize(0, {iface!r})", flush=True)
-    try:
-        from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    with _dds_init_lock:
+        if _dds_inited:
+            return
+        iface = _dds_interface_for_init()
+        print(f"[G1 DDS] ChannelFactoryInitialize(0, {iface!r})", flush=True)
+        try:
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
-        ChannelFactoryInitialize(0, iface)
-    except ImportError:
-        from unitree_sdk2py.core.channel import ChannelFactory
+            ChannelFactoryInitialize(0, iface)
+        except ImportError:
+            from unitree_sdk2py.core.channel import ChannelFactory
 
-        ChannelFactory.Instance().Init(0, iface)
-    _dds_inited = True
+            ChannelFactory.Instance().Init(0, iface)
+        _dds_inited = True
 
 
 def _ensure_loco_client_locked():
@@ -176,6 +183,106 @@ def get_arm_actions_list() -> list[dict]:
     return [{"id": k, **v} for k, v in sorted(G1_ARM_ACTIONS.items()) if k != 99]
 
 
+_ARM_ACTION_API_IDS = (7106, 7107, 7108, 7113)
+_CUSTOM_TEACHING_ERR = {
+    7400: "rt/arm_sdk occupato (teaching/VR attivo — premi Rilascia braccia o STOP VR)",
+    7401: "braccio in hold — premi Rilascia braccia",
+    7404: "FSM non compatibile: telecomando L1+A (sport mode), poi Modalità gesti",
+}
+
+
+def _register_arm_action_apis(client) -> None:
+    for api_id in _ARM_ACTION_API_IDS:
+        try:
+            client._RegistApi(api_id, 0)
+        except Exception:
+            pass
+
+
+def _ensure_g1_arm_action_client(timeout: float = 12.0):
+    """Singleton G1ArmActionClient con API 7106–7113 registrate."""
+    global _sdk_client
+    from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
+
+    with _sdk_lock:
+        _ensure_dds_init()
+        if _sdk_client is None:
+            _sdk_client = G1ArmActionClient()
+            _sdk_client.Init()
+        _sdk_client.SetTimeout(timeout)
+        _register_arm_action_apis(_sdk_client)
+    return _sdk_client
+
+
+def _parse_get_action_list_payload(data) -> tuple[list, list]:
+    """Normalizza la risposta GetActionList (7107) in (preset, custom)."""
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            return [], []
+    if isinstance(data, dict):
+        preset = data.get("preset") or data.get("preset_actions") or data.get("presets") or []
+        custom = data.get("custom") or data.get("custom_actions") or data.get("teachings") or []
+        if not preset and not custom:
+            for key in ("data", "actions", "action_list"):
+                inner = data.get(key)
+                if inner is not None:
+                    return _parse_get_action_list_payload(inner)
+        return list(preset or []), list(custom or [])
+    if isinstance(data, list):
+        if len(data) >= 2 and isinstance(data[0], list) and isinstance(data[1], list):
+            return data[0], data[1]
+        if data and all(isinstance(item, dict) for item in data):
+            preset_rows = [item for item in data if item.get("id") is not None and not item.get("time")]
+            custom_rows = [item for item in data if item.get("name") and item not in preset_rows]
+            if custom_rows or not preset_rows:
+                return preset_rows, custom_rows if custom_rows else data
+    return [], []
+
+
+def _custom_teaching_err(code: int) -> str:
+    return _CUSTOM_TEACHING_ERR.get(code, f"errore SDK rc={code}")
+
+
+def _do_custom_teaching_sdk(action_name: str) -> int:
+    """API 7108 ExecuteCustomAction — ritorna rc SDK (0 = ok)."""
+    name = (action_name or "").strip()
+    if not name:
+        return -1
+    client = _ensure_g1_arm_action_client(timeout=15.0)
+    with _sdk_lock:
+        parameter = json.dumps({"action_name": name}, ensure_ascii=False)
+        code, _data = client._Call(7108, parameter)
+    return int(code)
+
+
+def stop_unitree_custom_teaching(robot_ip: Optional[str] = None) -> tuple[bool, str]:
+    """Ferma teach custom (API 7113) e rilascia hold braccia (99)."""
+    _ = robot_ip
+    try:
+        from talk_module.arm_sdk import is_arm_sdk_active
+
+        if is_arm_sdk_active():
+            return False, "rt/arm_sdk occupato da teaching/VR — attendi o premi STOP"
+    except ImportError:
+        pass
+    try:
+        client = _ensure_g1_arm_action_client(timeout=10.0)
+        with _sdk_lock:
+            code, _data = client._Call(7113, "{}")
+        if code == 0:
+            return True, "ok — teach fermato (7113)"
+        ok99, msg99 = _do_arm_action_sdk(99, robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161"))
+        if ok99:
+            return True, "ok — braccia rilasciate (99)"
+        return False, _custom_teaching_err(code) + f"; release 99: {msg99}"
+    except ImportError:
+        return _do_arm_action_sdk(99, robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161"))
+    except Exception as e:
+        return False, f"SDK error: {e}"
+
+
 def fetch_unitree_robot_action_catalog() -> dict:
     """Elenco azioni dal robot via SDK GetActionList (7107): preset + teach app Unitree."""
     try:
@@ -191,26 +298,13 @@ def fetch_unitree_robot_action_catalog() -> dict:
     except ImportError:
         pass
     try:
-        from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
-
+        client = _ensure_g1_arm_action_client(timeout=12.0)
         with _sdk_lock:
-            global _sdk_client
-            _ensure_dds_init()
-            if _sdk_client is None:
-                _sdk_client = G1ArmActionClient()
-                _sdk_client.Init()
-                _sdk_client.SetTimeout(12.0)
-            code, data = _sdk_client.GetActionList()
+            code, data = client.GetActionList()
         if code != 0:
             return {"ok": False, "error": f"GetActionList rc={code}", "custom": [], "preset": []}
 
-        preset_raw: list = []
-        custom_raw: list = []
-        if isinstance(data, list):
-            if len(data) >= 1 and isinstance(data[0], list):
-                preset_raw = data[0]
-            if len(data) >= 2 and isinstance(data[1], list):
-                custom_raw = data[1]
+        preset_raw, custom_raw = _parse_get_action_list_payload(data)
 
         custom_out = []
         for item in custom_raw:
@@ -246,7 +340,7 @@ def fetch_unitree_robot_action_catalog() -> dict:
 
 def execute_unitree_custom_teaching(action_name: str, robot_ip: Optional[str] = None) -> tuple[bool, str]:
     """Riproduce un teach registrato nell'app Unitree (API 7108, action_name)."""
-    _ = robot_ip
+    ip = robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
     name = (action_name or "").strip()
     if not name:
         return False, "nome teach richiesto"
@@ -257,38 +351,54 @@ def execute_unitree_custom_teaching(action_name: str, robot_ip: Optional[str] = 
             return False, "rt/arm_sdk occupato da teaching/VR — attendi o premi STOP"
     except ImportError:
         pass
-    try:
-        from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
 
-        with _sdk_lock:
-            global _sdk_client
-            _ensure_dds_init()
-            if _sdk_client is None:
-                _sdk_client = G1ArmActionClient()
-                _sdk_client.Init()
-                _sdk_client.SetTimeout(15.0)
-            try:
-                _sdk_client._RegistApi(7108, 0)
-            except Exception:
-                pass
-            parameter = json.dumps({"action_name": name})
-            code, _data = _sdk_client._Call(7108, parameter)
+    def _attempt() -> tuple[bool, str]:
+        fsm_ok, fsm_msg = _ensure_arm_action_fsm()
+        print(f"[G1 teach] FSM check: {fsm_msg}", flush=True)
+        if not fsm_ok:
+            return False, fsm_msg
+        stop_unitree_custom_teaching(ip)
+        time.sleep(0.25)
+        code = _do_custom_teaching_sdk(name)
         if code == 0:
             return True, "ok"
-        err_map = {
-            7400: "rt/armsdk occupato (teaching/VR attivo)",
-            7401: "braccio in hold — prova Rilascia braccia (99)",
-            7404: "FSM non compatibile: sport mode (L1+A) e Modalità gesti",
-        }
-        return False, err_map.get(code, f"errore SDK rc={code}")
+        if code == 7401:
+            _do_arm_action_sdk(99, ip)
+            time.sleep(0.35)
+            code = _do_custom_teaching_sdk(name)
+            if code == 0:
+                return True, "ok"
+        return False, _custom_teaching_err(code)
+
+    try:
+        ok, msg = _attempt()
+        if (
+            not ok
+            and Path("/sys/class/net/usb0").exists()
+            and "channel factory" in (msg or "").lower()
+            and (os.getenv("UNITREE_DDS_INTERFACE") or "").strip().lower() != "usb0"
+        ):
+            print("[G1 DDS] retry explore teaching with UNITREE_DDS_INTERFACE=usb0", flush=True)
+            os.environ["UNITREE_DDS_INTERFACE"] = "usb0"
+            _reset_dds_state()
+            ok, msg = _attempt()
+        return ok, msg
     except ImportError:
         return False, "unitree_sdk2py non disponibile"
     except Exception as e:
         return False, f"SDK error: {e}"
 
+def _phrase_in_text(text: str, pattern: str) -> bool:
+    """Whole-phrase match with word boundaries (avoids 'mani su' inside 'mani sulla')."""
+    pat = re.escape((pattern or "").strip().lower())
+    if not pat:
+        return False
+    return bool(re.search(rf"(?<!\w){pat}(?!\w)", (text or "").strip().lower()))
+
+
 def _fuzzy_contains(text: str, pattern: str, threshold: float = 0.82) -> bool:
     """True se text contiene pattern esattamente, oppure una sotto-sequenza molto simile."""
-    if pattern in text:
+    if _phrase_in_text(text, pattern):
         return True
     pwords = pattern.split()
     if len(pwords) < 2:
@@ -296,11 +406,16 @@ def _fuzzy_contains(text: str, pattern: str, threshold: float = 0.82) -> bool:
     from difflib import SequenceMatcher
     plen = len(pattern)
     margin = max(3, plen // 4)
-    for start in range(0, max(1, len(text) - plen + margin + 1)):
-        end = min(len(text), start + plen + margin)
-        window = text[start:end]
+    text_l = (text or "").strip().lower()
+    for start in range(0, max(1, len(text_l) - plen + margin + 1)):
+        end = min(len(text_l), start + plen + margin)
+        window = text_l[start:end]
         if SequenceMatcher(None, window, pattern).ratio() >= threshold:
-            return True
+            left_ok = start == 0 or not text_l[start - 1].isalnum()
+            match_end = start + len(window.rstrip())
+            right_ok = match_end >= len(text_l) or not text_l[match_end].isalnum()
+            if left_ok and right_ok:
+                return True
     return False
 
 
@@ -605,7 +720,8 @@ def _ensure_arm_action_fsm() -> tuple[bool, str]:
     with _sdk_lock:
         fsm_before = fsm_id
         rc = lc.SetFsmId(target)
-        time.sleep(settle)
+    time.sleep(settle)
+    with _sdk_lock:
         fsm_id, fsm_mode = _read_loco_fsm(lc)
 
     ok, msg = _arm_fsm_ready(fsm_id, rc)
@@ -721,13 +837,14 @@ def _do_arm_action_sdk(action_id: int, robot_ip: str) -> tuple[bool, str]:
     try:
         from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient
 
-        with _sdk_lock:
+        with _arm_sdk_lock:
             _ensure_dds_init()
             if _sdk_client is None:
                 _sdk_client = G1ArmActionClient()
                 _sdk_client.Init()
                 _sdk_client.SetTimeout(10.0)
-            ret = _sdk_client.ExecuteAction(action_id)
+            client = _sdk_client
+        ret = client.ExecuteAction(action_id)
         if ret == 0:
             return True, "ok"
         err_map = {
@@ -765,7 +882,7 @@ def set_led_color(r: int, g: int, b: int) -> tuple[bool, str]:
     global _audio_client
     try:
         from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
-        with _sdk_lock:
+        with _audio_sdk_lock:
             _ensure_dds_init()
             if _audio_client is None:
                 _audio_client = AudioClient()

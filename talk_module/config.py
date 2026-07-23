@@ -61,12 +61,12 @@ class Settings:
     stt_provider: str = _str(os.getenv("STT_PROVIDER", "whisper")).lower()
     deepgram_api_key: str = _str(os.getenv("DEEPGRAM_API_KEY", ""))
     groq_api_key: str = _str(os.getenv("GROQ_API_KEY", ""))
-    tts_voice: str = _str(os.getenv("TTS_VOICE", "nova"))
+    tts_voice: str = _str(os.getenv("TTS_VOICE", "onyx"))
     tts_voice_robot: str = _str(os.getenv("TTS_VOICE_ROBOT", "echo"))  # voce più metallica per traccia robot
     tts_model: str = _str(os.getenv("TTS_MODEL", "gpt-4o-mini-tts"))  # gpt-4o-mini-tts più affidabile per italiano
     tts_instructions: str = _str(
         os.getenv("TTS_INSTRUCTIONS"),
-        "Parla in italiano con voce chiara e alta. Pronuncia correttamente ogni parola.",
+        "Parla in italiano con voce maschile naturale, chiara e alta. Pronuncia correttamente ogni parola.",
     )
     tts_loudnorm: bool = os.getenv("TTS_LOUDNORM", "0").lower() in ("1", "true", "yes")
     tts_skip_loudnorm: bool = os.getenv("TTS_SKIP_LOUDNORM", "1").lower() in ("1", "true", "yes")
@@ -75,10 +75,16 @@ class Settings:
     tts_language: str = _str(os.getenv("TTS_LANGUAGE", "it"))
     whisper_prompt: str = _str(
         os.getenv("WHISPER_PROMPT"),
-        "Trascrivi in italiano. NON tradurre in inglese. L'utente parla italiano. "
-        "Esempi: hey g1, mi dai il cinque, buonasera, fai un passo avanti, grazie. "
-        "Trascrivi fedelmente le parole pronunciate in italiano.",
+        "Trascrizione fedele in italiano. NON tradurre in inglese. NON inventare sottotitoli o frasi inglesi. "
+        "L'utente parla italiano con un robot G1. Esempi: hey g1, ehi g1, buonasera, che ore sono, "
+        "spiega, grazie, fai un passo avanti. Scrivi solo ciò che viene detto, in italiano.",
     )
+    # Endpointing ascolto continuo browser (ms) e Jetson /ws/listen (secondi)
+    stt_cmd_silence_ms: int = _int(os.getenv("STT_CMD_SILENCE_MS", "2800")) or 2800
+    stt_cmd_slice_ms: int = _int(os.getenv("STT_CMD_SLICE_MS", "20000")) or 20000
+    stt_wake_slice_ms: int = _int(os.getenv("STT_WAKE_SLICE_MS", "6000")) or 6000
+    stt_cmd_min_voice_ms: int = _int(os.getenv("STT_CMD_MIN_VOICE_MS", "400")) or 400
+    stt_listen_silence_sec: float = float(os.getenv("STT_LISTEN_SILENCE_SEC", "2.8"))
     # STT fuzzy: threshold e min_word_length in config/stt_config.json (opzionale override via .env)
     stt_fuzzy_threshold: float = float(os.getenv("STT_FUZZY_THRESHOLD", "0.85"))
     stt_min_word_length: int = _int(os.getenv("STT_MIN_WORD_LENGTH", "3")) or 3
