@@ -168,9 +168,55 @@ def list_audio_devices() -> list[dict]:
     return result
 
 
+def _list_alsa_hardware(capture: bool) -> list[dict]:
+    """Fallback Linux quando PortAudio non è installato ma ALSA vede l'hardware."""
+    if sys.platform != "linux":
+        return []
+    text, _ = _run_text(["arecord" if capture else "aplay", "-l"])
+    result: list[dict] = []
+    seen: set[int] = set()
+    for line in text.splitlines():
+        match = re.search(
+            r"card\s+(\d+):\s*([^\[]+)\[([^\]]+)\],\s*device\s+\d+:\s*([^\[]+)",
+            line,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        card = int(match.group(1))
+        if card in seen:
+            continue
+        seen.add(card)
+        short_name = match.group(2).strip()
+        long_name = match.group(3).strip()
+        device_name = match.group(4).strip()
+        name = f"{long_name} — {device_name}" if device_name else long_name
+        dtype = _device_type(f"{short_name} {name}", capture, not capture)
+        result.append(
+            {
+                "index": card,
+                "name": name,
+                "input_channels": 1 if capture else 0,
+                "output_channels": 0 if capture else 1,
+                "sample_rate": 48000,
+                "hostapi": -1,
+                "is_default_input": False,
+                "is_default_output": False,
+                "device_type": dtype,
+                "is_physical_mic": capture,
+                "is_physical_speaker": not capture,
+                "backend": "alsa",
+            }
+        )
+    return result
+
+
 def list_microphones(physical_only: bool = True) -> list[dict]:
     """Lista microfoni: integrati, USB, bluetooth, jack."""
-    devs = [d for d in list_audio_devices() if d.get("input_channels", 0) > 0]
+    try:
+        devs = [d for d in list_audio_devices() if d.get("input_channels", 0) > 0]
+    except (ImportError, OSError):
+        devs = _list_alsa_hardware(capture=True)
     if physical_only:
         physical = [d for d in devs if d.get("is_physical_mic", True)]
         if physical:
@@ -183,7 +229,10 @@ def list_microphones(physical_only: bool = True) -> list[dict]:
 
 def list_speakers(physical_only: bool = True) -> list[dict]:
     """Lista altoparlanti: integrati, USB, bluetooth, cuffie."""
-    devs = [d for d in list_audio_devices() if d.get("output_channels", 0) > 0]
+    try:
+        devs = [d for d in list_audio_devices() if d.get("output_channels", 0) > 0]
+    except (ImportError, OSError):
+        devs = _list_alsa_hardware(capture=False)
     if physical_only:
         physical = [d for d in devs if d.get("is_physical_speaker", True)]
         if physical:
@@ -385,6 +434,52 @@ def _set_pulse_default_source_usb() -> bool:
     except Exception:
         pass
     return False
+
+
+def ensure_pulse_usb_microphone_source() -> Optional[str]:
+    """Rende disponibile e predefinita la sorgente USB/DJI, ricreando il profilo se necessario."""
+    if sys.platform != "linux":
+        return None
+
+    def find_source() -> Optional[str]:
+        out, _ = _run_text(["pactl", "list", "short", "sources"])
+        fallback = None
+        for line in out.splitlines():
+            lowered = line.lower()
+            if "monitor" in lowered:
+                continue
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            if "dji" in lowered or "wireless_mic" in lowered:
+                return fields[1]
+            if "usb" in lowered and fallback is None:
+                fallback = fields[1]
+        return fallback
+
+    source = find_source()
+    if not source:
+        cards, _ = _run_text(["pactl", "list", "short", "cards"])
+        card_name = None
+        for line in cards.splitlines():
+            lowered = line.lower()
+            if "dji" in lowered or "wireless_mic" in lowered:
+                fields = line.split()
+                if len(fields) >= 2:
+                    card_name = fields[1]
+                    break
+        if card_name:
+            _run_text(["pactl", "set-card-profile", card_name, "off"])
+            time.sleep(0.35)
+            _run_text(["pactl", "set-card-profile", card_name, "input:analog-stereo"])
+            time.sleep(0.5)
+            source = find_source()
+
+    if source:
+        _run_text(["pactl", "set-default-source", source])
+        _run_text(["pactl", "set-source-mute", source, "0"])
+        _run_text(["pactl", "set-source-volume", source, "100%"])
+    return source
 
 
 def resolve_configured_microphone_index(mic_cfg: Optional[dict]) -> Optional[int]:

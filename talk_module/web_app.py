@@ -2182,7 +2182,21 @@ self.addEventListener('activate', () => self.clients.claim());
             await ws.close()
             return
         try:
-            await proxy_grok_voice(ws)
+            local_mic = ws.query_params.get("input") == "jetson"
+            try:
+                input_gain = float(ws.query_params.get("gain") or "1")
+            except ValueError:
+                input_gain = 1.0
+            try:
+                threshold = int(ws.query_params.get("threshold") or "20")
+            except ValueError:
+                threshold = 20
+            await proxy_grok_voice(
+                ws,
+                local_mic=local_mic,
+                input_gain=input_gain,
+                threshold=threshold,
+            )
         except WebSocketDisconnect:
             pass
 
@@ -2224,6 +2238,54 @@ self.addEventListener('activate', () => self.clients.claim());
                         db = max(-60.0, 20 * np.log10(rms + 1e-10))
                         level_queue.put({"type": "level", "rms": round(rms, 5),
                                          "peak": round(peak, 5), "db": round(db, 1)})
+            except OSError as portaudio_error:
+                # Jetson minimale: ALSA/PulseAudio funziona anche se libportaudio non è installata.
+                from array import array
+                import math
+
+                process = None
+                try:
+                    from talk_module.audio.device_utils import ensure_pulse_usb_microphone_source
+
+                    source_name = ensure_pulse_usb_microphone_source()
+                    if not source_name:
+                        raise RuntimeError("Sorgente PulseAudio DJI non disponibile")
+                    process = subprocess.Popen(
+                        [
+                            "arecord", "-q", "-D", "pulse", "-t", "raw",
+                            "-f", "S16_LE", "-r", "24000", "-c", "1",
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    level_queue.put(
+                        {"type": "info", "name": mic.get("name") or "DJI Mic (USB Jetson)",
+                         "rate": 24000, "device": mic.get("device_id", 0)}
+                    )
+                    while not level_stop.is_set():
+                        raw = process.stdout.read(3840)
+                        if not raw:
+                            err = process.stderr.read().decode("utf-8", errors="replace").strip()
+                            raise RuntimeError(err or str(portaudio_error))
+                        usable = len(raw) - (len(raw) % 2)
+                        samples = array("h")
+                        samples.frombytes(raw[:usable])
+                        if not samples:
+                            continue
+                        peak = max(abs(sample) for sample in samples) / 32768.0
+                        rms = math.sqrt(
+                            sum(float(sample) * float(sample) for sample in samples) / len(samples)
+                        ) / 32768.0
+                        db = max(-60.0, 20 * math.log10(rms + 1e-10))
+                        level_queue.put(
+                            {"type": "level", "rms": round(rms, 5),
+                             "peak": round(peak, 5), "db": round(db, 1)}
+                        )
+                except Exception as fallback_error:
+                    level_queue.put({"error": str(fallback_error)})
+                finally:
+                    if process and process.poll() is None:
+                        process.terminate()
             except Exception as e:
                 level_queue.put({"error": str(e)})
 
@@ -3918,34 +3980,47 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           }
         });
       }
+      var grokLastLevelTs = 0;
       async function grokStartMic(){
+        var micSel = grokEl('mic');
+        var micValue = micSel ? String(micSel.value || '') : '';
+        if (micValue.indexOf('local_') === 0) {
+          grokSetStatus('Microfono DJI sulla Jetson — attendo sessione…');
+          return;
+        }
+        if (micValue.indexOf('net_') === 0) {
+          window.g1GrokVoiceStop();
+          grokSetStatus('Seleziona il DJI Jetson oppure un microfono Browser');
+          return;
+        }
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           window.g1GrokVoiceStop();
           grokSetStatus('Microfono browser non disponibile');
           return;
         }
-        var micSel = grokEl('mic');
-        var micValue = micSel ? String(micSel.value || '') : '';
-        if (micValue.indexOf('local_') === 0 || micValue.indexOf('net_') === 0) {
-          window.g1GrokVoiceStop();
-          grokSetStatus('Grok realtime richiede un microfono Browser in Audio Talk');
-          return;
-        }
         var devId = micValue.indexOf('webmic_') === 0 ? decodeURIComponent(micValue.slice(7)) : '';
-        var constraints = typeof buildAudioCaptureConstraints === 'function'
-          ? buildAudioCaptureConstraints(devId)
-          : { audio: devId ? { deviceId: { exact: devId } } : true };
+        grokSetStatus('Apertura microfono…');
         try {
-          grokMicStream = await navigator.mediaDevices.getUserMedia(constraints);
+          if (typeof getUserMediaWithFallback === 'function') {
+            grokMicStream = await getUserMediaWithFallback(devId || null);
+          } else {
+            grokMicStream = await navigator.mediaDevices.getUserMedia(
+              typeof buildAudioCaptureConstraints === 'function'
+                ? buildAudioCaptureConstraints(devId)
+                : { audio: devId ? { deviceId: { exact: devId } } : true }
+            );
+          }
         } catch (e) {
           window.g1GrokVoiceStop();
-          grokSetStatus('Permesso microfono negato');
+          grokSetStatus((e && e.message) ? e.message : 'Permesso microfono negato');
           return;
         }
         grokCaptureCtx = new (window.AudioContext || window.webkitAudioContext)();
         if (grokCaptureCtx.state === 'suspended') await grokCaptureCtx.resume();
         var source = grokCaptureCtx.createMediaStreamSource(grokMicStream);
-        grokCaptureNode = grokCaptureCtx.createScriptProcessor(4096, 1, 1);
+        grokCaptureNode = grokCaptureCtx.createScriptProcessor(8192, 1, 1);
+        var grokSilentOut = grokCaptureCtx.createGain();
+        grokSilentOut.gain.value = 0;
         grokCaptureNode.onaudioprocess = function(ev){
           if (!grokActive || !grokSessionReady || !grokWs || grokWs.readyState !== 1) return;
           var input = ev.inputBuffer.getChannelData(0);
@@ -3953,7 +4028,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           var peak = 0;
           for (var p = 0; p < input.length; p++) peak = Math.max(peak, Math.abs(input[p]));
           var peak255 = Math.min(255, Math.round(peak * 255 * inputGain));
-          if (typeof window.g1UpdateTalkMicLevel === 'function') window.g1UpdateTalkMicLevel(peak255);
+          var now = Date.now();
+          if (now - grokLastLevelTs >= 120 && typeof window.g1UpdateTalkMicLevel === 'function') {
+            grokLastLevelTs = now;
+            window.g1UpdateTalkMicLevel(peak255);
+          }
           var threshold = typeof getWakeVoiceThreshold === 'function' ? getWakeVoiceThreshold() : 20;
           var adjusted = new Float32Array(input.length);
           if (peak255 >= threshold) {
@@ -3964,7 +4043,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           grokSend({ type: 'input_audio_buffer.append', audio: arrayBufferToBase64(buf) });
         };
         source.connect(grokCaptureNode);
-        grokCaptureNode.connect(grokCaptureCtx.destination);
+        grokCaptureNode.connect(grokSilentOut);
+        grokSilentOut.connect(grokCaptureCtx.destination);
         grokSetStatus('In ascolto — parla con Grok');
       }
       function grokHandleEvent(ev){
@@ -3972,6 +4052,16 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (ev.type === 'proxy.ready') {
           grokSessionReady = false;
           grokConfigureSession();
+          return;
+        }
+        if (ev.type === 'proxy.mic_info') {
+          grokSetStatus('In ascolto dal ' + (ev.name || 'microfono Jetson'));
+          return;
+        }
+        if (ev.type === 'proxy.mic_level') {
+          if (typeof window.g1UpdateTalkMicLevel === 'function') {
+            window.g1UpdateTalkMicLevel(ev.peak255 || 0);
+          }
           return;
         }
         if (ev.type === 'session.updated' || ev.type === 'session.created') {
@@ -4014,7 +4104,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         grokUserText = '';
         grokAssistantText = '';
         grokUpdateTranscript();
-        grokWs = new WebSocket(wsGrokVoiceUrl);
+        var micEl = grokEl('mic');
+        var micValue = micEl ? String(micEl.value || '') : '';
+        var grokUrl = wsGrokVoiceUrl;
+        if (micValue.indexOf('local_') === 0) {
+          var gain = typeof getParlaMonitorGain === 'function' ? getParlaMonitorGain() : 1;
+          var threshold = typeof getWakeVoiceThreshold === 'function' ? getWakeVoiceThreshold() : 20;
+          grokUrl += '?input=jetson&gain=' + encodeURIComponent(gain) + '&threshold=' + encodeURIComponent(threshold);
+        }
+        grokWs = new WebSocket(grokUrl);
         grokWs.onopen = function(){ grokSetStatus('Connesso — configurazione sessione…'); };
         grokWs.onmessage = function(msg){
           try { grokHandleEvent(JSON.parse(msg.data)); } catch (_) {}
@@ -4201,6 +4299,32 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       } catch (_) {}
       return 1;
     }
+    function applyLocalMicDefaultsIfUnset(micValue) {
+      if (!micValue || String(micValue).indexOf('local_') !== 0) return;
+      try {
+        var migrated = localStorage.getItem('g1_dji_levels_v1') === '1';
+        var oldThreshold = localStorage.getItem('g1_wake_voice_threshold');
+        var oldGain = localStorage.getItem('g1_mic_monitor_gain');
+        if (oldThreshold == null || (!migrated && oldThreshold === '20')) {
+          localStorage.setItem('g1_wake_voice_threshold', '5');
+        }
+        if (oldGain == null || (!migrated && (oldGain === '1' || oldGain === '1.0'))) {
+          localStorage.setItem('g1_mic_monitor_gain', '2');
+        }
+        localStorage.setItem('g1_dji_levels_v1', '1');
+      } catch (_) {}
+      var threshold = getWakeVoiceThreshold();
+      var gain = getParlaMonitorGain();
+      var thSlider = document.getElementById('micWakeThresholdSlider');
+      var thDisplay = document.getElementById('wakeThDisplay');
+      var gainSlider = document.getElementById('micMonitorGainSlider');
+      var gainDisplay = document.getElementById('micGainDisplay');
+      if (thSlider) thSlider.value = String(threshold);
+      if (thDisplay) thDisplay.textContent = String(threshold);
+      if (gainSlider) gainSlider.value = String(gain);
+      if (gainDisplay) gainDisplay.textContent = gain.toFixed(1);
+      updateParlaThresholdLine();
+    }
     function stopParlaMicPreview() {
       if (parlaPreviewTimer) { clearInterval(parlaPreviewTimer); parlaPreviewTimer = null; }
       if (parlaPreviewCtx) {
@@ -4278,12 +4402,23 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     function startParlaMicPreviewIfEligible() {
       var sec = document.getElementById('section-parla');
       if (!sec || !sec.classList.contains('active')) return;
+      if (_talkAgentMode === 'grok' || _talkAgentMode === 'legacy') {
+        stopParlaMicPreview();
+        return;
+      }
       stopParlaMicPreview();
       var micEl = document.getElementById('mic');
       var micVal = micEl ? micEl.value : '';
       var wrap = document.getElementById('parlaPreviewMeterWrap');
       var msg = document.getElementById('parlaPreviewDisabledMsg');
       var isBrowserMic = micVal && micVal.indexOf('webmic_') === 0;
+      var isLocalMic = micVal && micVal.indexOf('local_') === 0;
+      if (isLocalMic) {
+        if (wrap) wrap.style.display = '';
+        if (msg) msg.style.display = 'none';
+        updateParlaThresholdLine();
+        return;
+      }
       if (!isBrowserMic) {
         if (wrap) wrap.style.display = 'none';
         if (msg) {
@@ -4295,7 +4430,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (wrap) wrap.style.display = '';
       if (msg) msg.style.display = 'none';
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-      navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micForBrowserCapture())).then(function(stream){
+      var previewOpen = (typeof getUserMediaWithFallback === 'function')
+        ? getUserMediaWithFallback(micForBrowserCapture())
+        : navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micForBrowserCapture()));
+      previewOpen.then(function(stream){
         parlaPreviewStream = stream;
         var Ctx = window.AudioContext || window.webkitAudioContext;
         parlaPreviewCtx = new Ctx();
@@ -4318,9 +4456,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           var gain = getParlaMonitorGain();
           window.g1UpdateTalkMicLevel(Math.min(255, peak * gain));
         }, 55);
-      }).catch(function(){
+      }).catch(function(err){
         var m = document.getElementById('parlaPreviewDisabledMsg');
-        if (m) { m.style.display = 'block'; m.textContent = 'Microfono non disponibile: consenti l\\'accesso (Dispositivi) e riprova.'; }
+        if (m) {
+          m.style.display = 'block';
+          m.textContent = (err && err.message) ? err.message : 'Microfono non disponibile: consenti l\\'accesso (Dispositivi) e riprova.';
+        }
       });
     }
     const WAKE_SLICE_MS = __STT_WAKE_SLICE_MS__;
@@ -4608,6 +4749,44 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         }
       } catch(_){}
       return { audio: a };
+    }
+    /** Vincoli leggeri per USB/wireless (es. DJI Mic): evita hang del browser con processing aggressivo. */
+    function buildAudioCaptureConstraintsMinimal(deviceIdExact) {
+      const a = {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 1,
+      };
+      if (deviceIdExact && String(deviceIdExact).length > 5) {
+        a.deviceId = { ideal: deviceIdExact };
+      }
+      return { audio: a };
+    }
+    async function getUserMediaWithFallback(deviceId, timeoutMs) {
+      timeoutMs = timeoutMs || 9000;
+      function withTimeout(promise) {
+        return Promise.race([
+          promise,
+          new Promise(function(_, reject) {
+            setTimeout(function(){ reject(new Error('Microfono: timeout apertura (' + Math.round(timeoutMs / 1000) + 's)')); }, timeoutMs);
+          })
+        ]);
+      }
+      var attempts = [
+        buildAudioCaptureConstraints(deviceId),
+        buildAudioCaptureConstraintsMinimal(deviceId),
+        { audio: deviceId ? { deviceId: { ideal: deviceId }, channelCount: 1 } : { channelCount: 1 } }
+      ];
+      var lastErr = null;
+      for (var i = 0; i < attempts.length; i++) {
+        try {
+          return await withTimeout(navigator.mediaDevices.getUserMedia(attempts[i]));
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error('Microfono non disponibile');
     }
     /** Soglia uguale al controllo su /ws (audio troppo corto) e a sendAudio. */
     const WS_AUDIO_MIN_BYTES = 2000;
@@ -5065,7 +5244,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       try {
         stopParlaMicPreview();
-        wakeRawStream = await navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micForBrowserCapture()));
+        if (typeof getUserMediaWithFallback === 'function') {
+          wakeRawStream = await getUserMediaWithFallback(micForBrowserCapture());
+        } else {
+          wakeRawStream = await navigator.mediaDevices.getUserMedia(buildAudioCaptureConstraints(micForBrowserCapture()));
+        }
         startWakeSpeechEnhancer();
       } catch(e) {
         const st = document.getElementById('wakeListenStatus');
@@ -5456,7 +5639,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         var v = micSel.options[i].value;
         if (v && v.indexOf('webmic_') === 0 && v.length > 7) {
           var txt = (micSel.options[i].textContent || '').toLowerCase();
-          if (txt.indexOf('realsense') >= 0) { pick = i; break; }
+          if (txt.indexOf('dji') >= 0) { pick = i; break; }
+          if (txt.indexOf('realsense') >= 0 && pick < 0) pick = i;
           if (pick < 0) pick = i;
         }
       }
@@ -5514,18 +5698,21 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (seq !== _loadDevicesSeq) return false;
       micSel.innerHTML = micHtml;
       micSel.onchange = function(){
+        applyLocalMicDefaultsIfUnset(micSel.value);
         updateActiveMicIndicator();
         autoSaveMicConfigFromUi();
+        stopParlaMicPreview();
         if (_talkAgentMode === 'grok') {
           window.g1GrokVoiceStop(true);
           var gt = document.getElementById('grokVoiceToggle');
           if (gt) gt.checked = true;
-          setTimeout(function(){ window.g1GrokVoiceStart(); }, 120);
+          setTimeout(function(){ window.g1GrokVoiceStart(); }, 200);
         } else if (_talkAgentMode === 'legacy') {
           stopWakeRecorder();
-          setTimeout(function(){ startWakeRecorder(); }, 120);
+          setTimeout(function(){ startWakeRecorder(); }, 200);
+        } else {
+          setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 120);
         }
-        setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 80);
       };
 
       const ss = (serverData.speakers || []).filter(function(s){
@@ -5585,10 +5772,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
 
     function finishMicDeviceUi(micSel, spkSel, statusEl, mics, spks, serverData, seq){
-      preferBrowserMicOnClient();
       updateActiveMicIndicator();
-      autoSaveMicConfigFromUi();
-      if (typeof startParlaMicPreviewIfEligible === 'function') setTimeout(startParlaMicPreviewIfEligible, 120);
       const nJet = ((serverData.microphones || []).filter(function(m){ return m && String(m.value||'').indexOf('local_') === 0; }).length)
         + ((serverData.speakers || []).filter(function(s){ return s && String(s.value||'').indexOf('local_') === 0; }).length);
         if (statusEl) {
@@ -5603,27 +5787,41 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         }
       fetch('/api/config').then(function(r){ return r.json(); }).then(function(cfg){
         if (seq !== _loadDevicesSeq || !cfg || !micSel) return;
+        var restoredMic = false;
         if (cfg.microphone && cfg.microphone.value) {
           var mv = cfg.microphone.value;
           if (cfg.microphone.type === 'network' && mv && mv !== 'web_wait' && mv.indexOf('local_') !== 0 && mv.indexOf('net_') !== 0) {
-            var found = false;
             for (var i = 0; i < micSel.options.length; i++) {
               var o = micSel.options[i];
-              if (o.value.indexOf('webmic_') === 0 && decodeURIComponent(o.value.slice(7)) === mv) { micSel.selectedIndex = i; found = true; break; }
+              if (o.value.indexOf('webmic_') === 0 && decodeURIComponent(o.value.slice(7)) === mv) {
+                micSel.selectedIndex = i;
+                restoredMic = true;
+                break;
+              }
             }
-            if (!found) { try { micSel.value = 'webmic_'+encodeURIComponent(mv); } catch(_){} }
-          } else if (mv) { try { micSel.value = mv; } catch(_){} }
+          } else if (mv) {
+            try {
+              micSel.value = mv;
+              restoredMic = micSel.value === mv;
+            } catch(_){}
+          }
         }
         if (cfg.speaker && cfg.speaker.value) {
           try { spkSel.value = cfg.speaker.value; } catch(_){}
         }
-        var savedBrowserMic = cfg.microphone && cfg.microphone.type === 'network' && cfg.microphone.value && cfg.microphone.value !== 'web_wait' && String(cfg.microphone.value).indexOf('local_') !== 0;
-        var curMic = micSel.value || '';
-        if (curMic.indexOf('local_') === 0 || !savedBrowserMic) preferBrowserMicOnClient();
+        if (!restoredMic && (!cfg.microphone || !cfg.microphone.value || cfg.microphone.value === 'web_wait')) {
+          preferBrowserMicOnClient();
+        }
+        applyLocalMicDefaultsIfUnset(micSel.value);
         var vsp = spkSel.value;
         lastSinkId = (vsp && vsp.indexOf('browser_') === 0 && vsp !== 'browser_default') ? vsp.replace(/^browser_/, '') : null;
         syncSbOutputFromSpeaker();
         updateActiveMicIndicator();
+        if (statusEl) {
+          var selected = micSel.options[micSel.selectedIndex];
+          statusEl.textContent = 'Microfono attivo: ' + ((selected && selected.textContent) ? selected.textContent.trim() : '—');
+        }
+        if (typeof startParlaMicPreviewIfEligible === 'function') setTimeout(startParlaMicPreviewIfEligible, 120);
       }).catch(function(){ updateActiveMicIndicator(); });
     }
 
@@ -6884,6 +7082,11 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             if (d.type === 'level') {
               var ui = pmBars();
               var pct = Math.max(0, Math.min(100, ((d.db + 60) / 60) * 100));
+              var gain = typeof getParlaMonitorGain === 'function' ? getParlaMonitorGain() : 1;
+              var peak255 = Math.min(255, Math.round((Number(d.peak) || 0) * 255 * gain));
+              if (typeof window.g1UpdateTalkMicLevel === 'function') {
+                window.g1UpdateTalkMicLevel(peak255);
+              }
               if (ui.bar) {
                 ui.bar.style.width = pct.toFixed(1) + '%';
                 ui.bar.style.background = d.peak > 0.5 ? '#ef4444' : d.rms > 0.02 ? '#22c55e' : d.rms > 0.005 ? '#eab308' : '#52525b';
