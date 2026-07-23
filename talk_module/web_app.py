@@ -3168,6 +3168,86 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     }
     .client-tab .ct-ic { font-size: 18px; line-height: 1; }
     .client-tab.active { color: #2dd4bf; background: rgba(20,184,166,0.15); border: 1px solid rgba(20,184,166,0.35); }
+    .talk-page-title { margin: 0; font-size: 1.3rem; color: #f4f4f5; }
+    .talk-page-subtitle { margin: 5px 0 14px; color: #71717a; font-size: 12px; line-height: 1.45; }
+    .talk-global-settings {
+      margin: 0 0 14px;
+      border: 1px solid rgba(59,130,246,0.25);
+      border-radius: 12px;
+      background: rgba(59,130,246,0.055);
+      overflow: hidden;
+    }
+    .talk-global-settings > summary {
+      padding: 12px 14px;
+      cursor: pointer;
+      color: #93c5fd;
+      font-size: 13px;
+      font-weight: 700;
+      user-select: none;
+    }
+    .talk-global-settings > summary span { color: #71717a; font-size: 10px; font-weight: 400; margin-left: 6px; }
+    .talk-global-settings-body { padding: 0 12px 12px; }
+    .talk-active-device {
+      padding: 7px 10px;
+      border-radius: 7px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255,255,255,0.035);
+      margin-bottom: 8px;
+    }
+    .talk-active-device #activeMicDot { width: 8px; height: 8px; border-radius: 50%; background: #71717a; flex-shrink: 0; }
+    .talk-active-device #activeMicLabel { color: #9ca3af; }
+    .talk-device-grid { margin: 0 0 10px !important; padding: 10px !important; }
+    .talk-device-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .talk-device-row label, .talk-output-mode label { display: block; margin-bottom: 5px; font-size: 11px; color: #9ca3af; }
+    .talk-device-row select { width: 100%; min-width: 0; }
+    .talk-sensitivity { padding: 10px; border-radius: 9px; background: rgba(255,255,255,0.025); }
+    .talk-level-track { position: relative; height: 20px; background: #1e1e2e; border-radius: 8px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08); }
+    #parlaPreviewThresholdLine { position: absolute; top: 0; bottom: 0; width: 3px; background: #f97316; z-index: 3; opacity: .9; left: 4%; box-shadow: 0 0 4px #f97316; }
+    #parlaPreviewBarFill { position: relative; height: 100%; width: 0; background: linear-gradient(90deg,#22c55e,#84cc16,#eab308); border-radius: 8px; transition: width .06s linear; z-index: 1; }
+    .talk-level-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; gap: 6px; flex-wrap: wrap; }
+    #parlaPreviewStatus { font-size: 11px; color: #a1a1aa; font-family: monospace; }
+    #parlaPreviewGate { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px; background: #27272a; color: #71717a; }
+    .talk-slider-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-top: 12px; }
+    .talk-slider-grid label { color: #9ca3af; font-size: 11px; }
+    .talk-slider-grid strong { color: #e4e4e7; float: right; }
+    .talk-slider-grid input { display: block; width: 100%; margin-top: 6px; accent-color: #60a5fa; }
+    .talk-output-mode { margin-top: 10px; padding: 9px 10px; border-radius: 8px; background: rgba(255,255,255,0.025); }
+    .talk-agent-stack { display: flex; flex-direction: column; gap: 10px; }
+    .talk-agent-card {
+      border-radius: 13px;
+      border: 1px solid rgba(255,255,255,0.1);
+      overflow: hidden;
+      transition: border-color .18s, background .18s;
+    }
+    .talk-agent-grok { background: rgba(139,92,246,.07); border-color: rgba(139,92,246,.25); }
+    .talk-agent-legacy { background: rgba(20,184,166,.055); border-color: rgba(20,184,166,.2); }
+    .talk-agent-card.is-active.talk-agent-grok { border-color: rgba(167,139,250,.7); background: rgba(139,92,246,.12); }
+    .talk-agent-card.is-active.talk-agent-legacy { border-color: rgba(45,212,191,.65); background: rgba(20,184,166,.1); }
+    .talk-agent-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; }
+    .talk-agent-head h3 { margin: 0; font-size: 15px; color: #e4e4e7; }
+    .talk-agent-grok .talk-agent-head h3 { color: #c4b5fd; }
+    .talk-agent-legacy .talk-agent-head h3 { color: #5eead4; }
+    .talk-agent-head p { margin: 3px 0 0; font-size: 10px; color: #71717a; }
+    .talk-agent-toggle { display: flex; align-items: center; gap: 7px; cursor: pointer; flex-shrink: 0; }
+    .talk-agent-toggle span { font-size: 10px; color: #9ca3af; font-weight: 700; }
+    .talk-agent-toggle input { width: 22px; height: 22px; margin: 0; accent-color: #a78bfa; }
+    .talk-agent-legacy .talk-agent-toggle input { accent-color: #14b8a6; }
+    .talk-agent-body { padding: 0 14px 14px; max-height: 1200px; opacity: 1; overflow: hidden; transition: max-height .22s ease, opacity .16s ease, padding .22s ease; }
+    .talk-agent-card.is-collapsed .talk-agent-body { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; }
+    .talk-agent-status { margin: 0 0 8px; color: #a1a1aa; font-size: 12px; }
+    .talk-transcript { margin: 0; min-height: 3em; padding: 10px; border-radius: 8px; background: rgba(0,0,0,.16); color: #d4d4d8; font-size: 12px; line-height: 1.45; }
+    .talk-text-question { margin-top: 12px; }
+    .talk-text-question h4 { margin: 0 0 7px; color: #d4d4d8; font-size: 12px; }
+    .talk-text-question > div { display: flex; gap: 7px; flex-wrap: wrap; }
+    .talk-text-question input { flex: 1; min-width: 170px; padding: 9px 11px; background: #27272a; border: 1px solid #3f3f46; border-radius: 8px; color: #e4e4e7; }
+    .talk-text-question button { padding: 9px 16px; border: none; border-radius: 8px; background: #14b8a6; color: #0c0e14; font-weight: 700; cursor: pointer; }
+    @media (max-width: 640px) {
+      .talk-device-row, .talk-slider-grid { grid-template-columns: 1fr; }
+      .talk-global-settings > summary span { display: block; margin: 3px 0 0; }
+    }
     @media (max-width: 480px) {
       .header .hamburger { display: flex !important; }
     }
@@ -3381,91 +3461,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section id="section-parla" class="section">
 
-  <!-- GROK VOICE AGENT -->
-  <div id="grokVoicePanel" style="margin-bottom:20px;padding:16px;border-radius:12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
-      <h2 style="font-size:1.15rem;margin:0;color:#c4b5fd;">Grok Voice Agent</h2>
-      <label for="grokVoiceToggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">
-        <span style="font-size:12px;color:#9ca3af;" id="grokVoiceToggleLabel">OFF</span>
-        <input type="checkbox" id="grokVoiceToggle" style="width:22px;height:22px;margin:0;accent-color:#a78bfa;" />
-      </label>
-    </div>
-    <p id="grokVoiceStatus" style="margin:0 0 6px;font-size:13px;color:#71717a;">Disattivato</p>
-    <p id="grokVoiceTranscript" class="hint" style="margin:0;font-size:12px;color:#a1a1aa;min-height:2.2em;line-height:1.4;"></p>
-    <p id="grokVoiceConfigHint" class="hint" style="display:none;margin:8px 0 0;font-size:11px;color:#f59e0b;">Configura XAI_API_KEY e XAI_AGENT_ID nel file .env sul server.</p>
-  </div>
+  <h2 class="talk-page-title">Talk</h2>
+  <p class="talk-page-subtitle">Scegli un agente. Puoi tenerli entrambi spenti; attivandone uno l'altro viene fermato e ridotto.</p>
 
-  <!-- 1. ASCOLTO CONTINUO (Wake Word) -->
-  <div style="margin-bottom:20px;padding:16px;border-radius:12px;background:rgba(20,184,166,0.06);border:1px solid rgba(20,184,166,0.2);">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-      <h2 style="font-size:1.15rem;margin:0;color:#2dd4bf;">Ascolto continuo</h2>
-      <label for="wakeListenToggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">
-        <span style="font-size:12px;color:#9ca3af;" id="wakeToggleLabel">OFF</span>
-        <input type="checkbox" id="wakeListenToggle" class="wake-checkbox" style="width:22px;height:22px;margin:0;accent-color:#14b8a6;" />
-      </label>
-    </div>
-    <p id="wakeListenStatus" style="margin:0 0 6px;font-size:13px;color:#71717a;">Disattivato</p>
-    <div id="wakeDebugLog" style="max-height:60px;overflow-y:auto;font-size:10px;font-family:monospace;color:#52525b;line-height:1.4;margin:0 0 8px;padding:4px 8px;background:rgba(0,0,0,0.2);border-radius:6px;display:none;"></div>
-    <div id="recStatus" style="min-height:30px;">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
-        <div style="flex:1;height:16px;background:#1e1e2e;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);">
-          <div id="levelBar" style="width:0%;height:100%;background:#22c55e;transition:width 0.06s;border-radius:8px;"></div>
-        </div>
-        <span id="levelLabel" style="font-size:12px;color:#71717a;font-family:monospace;min-width:140px;">Livello: --</span>
-      </div>
-      <p class="hint" id="recDebug" style="font-size:11px;color:#71717a;min-height:16px;margin:0;"></p>
-    </div>
-    <div id="activeMicIndicator" style="margin:8px 0 0;padding:6px 10px;border-radius:6px;font-size:12px;display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.03);">
-      <span id="activeMicDot" style="width:8px;height:8px;border-radius:50%;background:#71717a;flex-shrink:0;"></span>
-      <span id="activeMicLabel" style="color:#9ca3af;">Microfono: attivazione…</span>
-    </div>
-    <details id="parlaMicPreviewPanel" style="margin:12px 0 0;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2);">
-      <summary style="padding:10px 12px;cursor:pointer;font-size:12px;color:#93c5fd;font-weight:600;user-select:none;">Microfono e sensibilit&agrave;</summary>
-      <div style="padding:0 12px 12px;">
-      <div id="parlaPreviewDisabledMsg" style="display:none;font-size:11px;color:#f59e0b;margin-bottom:8px;">Seleziona un microfono Browser.</div>
-      <div id="parlaPreviewMeterWrap" style="position:relative;">
-        <div style="position:relative;height:20px;background:#1e1e2e;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
-          <div id="parlaPreviewThresholdLine" style="position:absolute;top:0;bottom:0;width:3px;background:#f97316;z-index:3;opacity:0.9;left:4%;box-shadow:0 0 4px #f97316;"></div>
-          <div id="parlaPreviewBarFill" style="position:relative;height:100%;width:0%;background:linear-gradient(90deg,#22c55e,#84cc16,#eab308);border-radius:8px;transition:width 0.06s linear;z-index:1;"></div>
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;flex-wrap:wrap;gap:6px;">
-          <span id="parlaPreviewStatus" style="font-size:11px;color:#a1a1aa;font-family:monospace;">Picco: — · soglia: —</span>
-          <span id="parlaPreviewGate" style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:#27272a;color:#71717a;">—</span>
-        </div>
-      </div>
-      <div style="margin-top:12px;">
-        <label for="micWakeThresholdSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Soglia voce: <strong id="wakeThDisplay">14</strong></label>
-        <input type="range" id="micWakeThresholdSlider" min="1" max="80" value="14" style="width:100%;max-width:340px;accent-color:#3b82f6;" />
-      </div>
-      <div style="margin-top:10px;">
-        <label for="micMonitorGainSlider" style="font-size:11px;color:#9ca3af;display:block;margin-bottom:4px;">Guadagno barra: <strong id="micGainDisplay">1.0</strong>×</label>
-        <input type="range" id="micMonitorGainSlider" min="0.4" max="4" step="0.1" value="1" style="width:100%;max-width:340px;accent-color:#64748b;" />
-      </div>
-      </div>
-    </details>
-  </div>
-
-  <!-- VOLUME CASSA -->
-  <div style="margin-bottom:14px;padding:10px 14px;border-radius:10px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.18);display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-    <label for="parlaGainSlider" style="font-size:12px;color:#86efac;font-weight:600;white-space:nowrap;">Volume cassa</label>
-    <input type="range" id="parlaGainSlider" min="0.5" max="10.0" step="0.1" style="flex:1;min-width:100px;accent-color:#22c55e;" />
-    <span id="parlaGainLabel" style="font-size:12px;color:#a1a1aa;font-family:monospace;min-width:36px;">2.5x</span>
-  </div>
-
-  <!-- RISULTATO (condiviso) -->
-  <div class="result" id="result"></div>
-
-  <!-- 3. SCRIVI -->
-  <div style="margin-top:16px;margin-bottom:16px;">
-    <h2 style="font-size:1.15rem;margin:0 0 8px;color:#e4e4e7;">Scrivi una domanda</h2>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <input type="text" id="textInput" placeholder="Es: Che ore sono?" style="flex:1;min-width:180px;padding:10px 14px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:14px;" />
-      <button type="button" id="btnText" style="padding:12px 22px;background:#14b8a6;color:#0c0e14;border:none;border-radius:10px;cursor:pointer;font-weight:600;">Invia</button>
-    </div>
-    <p class="hint" id="textStatus" style="margin-top:6px;min-height:16px;"></p>
-  </div>
-
-  <!-- CONFIG -->
+  <!-- AUDIO GLOBALE: condiviso da Grok e Talk classico -->
   <div id="secureContextWarn" class="step" style="display:none;border-color:rgba(251,191,36,0.4);background:rgba(251,191,36,0.08);padding:14px;">
     <p style="margin:0 0 10px;font-size:13px;color:#fcd34d;"><strong>Serve HTTPS per il microfono browser.</strong></p>
     <p style="margin:0 0 10px;font-size:13px;"><a id="secureHttpsLink" href="#" style="color:#5eead4;font-weight:600;">Apri versione HTTPS</a></p>
@@ -3475,29 +3474,90 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       <div id="secureWarnDesktop" style="display:none;"><p style="margin:0;">Tunnel SSH poi localhost:8081/client</p></div>
     </details>
   </div>
-  <div id="devicesWrap" class="step" style="margin-bottom:10px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;">
+  <details id="talkAudioSettings" class="talk-global-settings" open>
+    <summary>Audio Talk <span>microfono, altoparlante, soglia e guadagno</span></summary>
+    <div class="talk-global-settings-body">
+  <div id="activeMicIndicator" class="talk-active-device">
+    <span id="activeMicDot"></span>
+    <span id="activeMicLabel">Microfono: attivazione…</span>
+  </div>
+  <div id="devicesWrap" class="step talk-device-grid">
     <p id="deviceStatus" style="font-size:11px;margin:0 0 10px;color:#52525b;">Microfono: attivazione…</p>
-    <label style="display:block;margin-bottom:6px;font-size:12px;color:#9ca3af;">Microfono</label>
-    <select id="mic"><option value="">Caricamento...</option></select>
-    <label style="display:block;margin-top:12px;margin-bottom:6px;font-size:12px;color:#9ca3af;">Altoparlante / cassa</label>
-    <select id="speaker"><option value="">Caricamento...</option></select>
+    <div class="talk-device-row">
+      <div><label for="mic">Microfono</label><select id="mic"><option value="">Caricamento...</option></select></div>
+      <div><label for="speaker">Altoparlante / cassa</label><select id="speaker"><option value="">Caricamento...</option></select></div>
+    </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;">
       <button type="button" id="devicesRefresh" style="padding:8px 14px;background:rgba(255,255,255,0.08);color:#e8eaed;border:1px solid rgba(255,255,255,0.12);border-radius:8px;cursor:pointer;font-size:13px;">Aggiorna</button>
       <button type="button" id="devicesSave" style="padding:8px 14px;background:#14b8a6;color:#0c0e14;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">Salva</button>
       <span id="devicesSaveStatus" class="hint" style="margin:0;"></span>
     </div>
   </div>
-  <details style="margin-bottom:10px;">
-    <summary style="cursor:pointer;font-size:12px;color:#71717a;">Uscita audio (TTS)</summary>
-    <div id="ttsOutputWrap" class="step" style="margin-top:8px;margin-bottom:0;padding:10px 12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.2);">
-      <label style="display:block;margin-bottom:4px;color:#a1a1aa;font-size:12px;">Risposta vocale</label>
+  <div class="talk-sensitivity">
+    <div id="parlaPreviewDisabledMsg" style="display:none;font-size:11px;color:#f59e0b;margin-bottom:8px;">Seleziona un microfono Browser.</div>
+    <div id="parlaPreviewMeterWrap">
+      <div class="talk-level-track">
+        <div id="parlaPreviewThresholdLine"></div>
+        <div id="parlaPreviewBarFill"></div>
+      </div>
+      <div class="talk-level-meta">
+        <span id="parlaPreviewStatus">Picco: — · soglia: —</span>
+        <span id="parlaPreviewGate">—</span>
+      </div>
+    </div>
+    <div class="talk-slider-grid">
+      <label for="micWakeThresholdSlider">Soglia voce <strong id="wakeThDisplay">20</strong><input type="range" id="micWakeThresholdSlider" min="1" max="80" value="20" /></label>
+      <label for="micMonitorGainSlider">Guadagno microfono <strong id="micGainDisplay">1.0</strong>×<input type="range" id="micMonitorGainSlider" min="0.4" max="4" step="0.1" value="1" /></label>
+      <label for="parlaGainSlider">Volume risposta <strong id="parlaGainLabel">2.5x</strong><input type="range" id="parlaGainSlider" min="0.5" max="10.0" step="0.1" /></label>
+    </div>
+  </div>
+  <div id="ttsOutputWrap" class="talk-output-mode">
+      <label for="ttsPlayDest">Destinazione risposta Talk classico</label>
       <select id="ttsPlayDest" style="padding:8px 12px;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e4e4e7;font-size:13px;width:100%;max-width:300px;">
         <option value="browser" selected>Browser (telefono/PC)</option>
         <option value="server">Cassa robot (Jetson)</option>
       </select>
       <p id="ttsServerHint" class="hint" style="display:none;margin:4px 0 0;font-size:10px;color:#52525b;"></p>
+  </div>
     </div>
   </details>
+
+  <div class="talk-agent-stack">
+  <!-- GROK VOICE AGENT -->
+  <div id="grokVoicePanel" class="talk-agent-card talk-agent-grok is-collapsed">
+    <div class="talk-agent-head">
+      <div><h3>Grok Voice Agent</h3><p>Conversazione realtime diretta con xAI</p></div>
+      <label for="grokVoiceToggle" class="talk-agent-toggle"><span id="grokVoiceToggleLabel">OFF</span><input type="checkbox" id="grokVoiceToggle" /></label>
+    </div>
+    <div id="grokVoiceBody" class="talk-agent-body">
+      <p id="grokVoiceStatus" class="talk-agent-status">Disattivato</p>
+      <p id="grokVoiceTranscript" class="talk-transcript"></p>
+      <p id="grokVoiceConfigHint" class="hint" style="display:none;margin:8px 0 0;font-size:11px;color:#f59e0b;">Configura XAI_API_KEY e XAI_AGENT_ID nel file .env sul server.</p>
+    </div>
+  </div>
+
+  <!-- TALK CLASSICO -->
+  <div id="legacyTalkPanel" class="talk-agent-card talk-agent-legacy is-collapsed">
+    <div class="talk-agent-head">
+      <div><h3>Talk classico</h3><p>Hey G1, knowledge, azioni robot e TTS</p></div>
+      <label for="wakeListenToggle" class="talk-agent-toggle"><span id="wakeToggleLabel">OFF</span><input type="checkbox" id="wakeListenToggle" class="wake-checkbox" /></label>
+    </div>
+    <div id="legacyTalkBody" class="talk-agent-body">
+      <p id="wakeListenStatus" class="talk-agent-status">Disattivato</p>
+      <div id="wakeDebugLog" style="max-height:60px;overflow-y:auto;font-size:10px;font-family:monospace;color:#52525b;line-height:1.4;margin:0 0 8px;padding:4px 8px;background:rgba(0,0,0,0.2);border-radius:6px;display:none;"></div>
+      <div id="recStatus" style="min-height:30px;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+          <div style="flex:1;height:16px;background:#1e1e2e;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);"><div id="levelBar" style="width:0%;height:100%;background:#22c55e;transition:width 0.06s;border-radius:8px;"></div></div>
+          <span id="levelLabel" style="font-size:12px;color:#71717a;font-family:monospace;min-width:140px;">Livello: --</span>
+        </div>
+        <p class="hint" id="recDebug" style="font-size:11px;color:#71717a;min-height:16px;margin:0;"></p>
+      </div>
+      <div class="result" id="result"></div>
+      <div class="talk-text-question">
+        <h4>Scrivi una domanda</h4>
+        <div><input type="text" id="textInput" placeholder="Es: Che ore sono?" /><button type="button" id="btnText">Invia</button></div>
+        <p class="hint" id="textStatus"></p>
+      </div>
   <details style="margin-top:8px;">
     <summary style="cursor:pointer;font-size:12px;color:#52525b;">Test & debug</summary>
     <div style="margin-top:8px;">
@@ -3514,6 +3574,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     </div>
   </details>
   <div id="micMonitorWrap" style="display:none;"></div>
+    </div>
+  </div>
+  </div>
     </section>
     <section id="section-knowledge" class="section">
   <h2 style="font-size:1.2rem;margin:0 0 16px;">Knowledge</h2>
@@ -3720,6 +3783,37 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
     const wsParlaUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/parla';
     const wsGrokVoiceUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/grok-voice';
+    var _talkAgentMode = 'none';
+    function applyTalkAgentLayout(mode){
+      _talkAgentMode = mode || 'none';
+      var grok = document.getElementById('grokVoicePanel');
+      var legacy = document.getElementById('legacyTalkPanel');
+      if (grok) {
+        grok.classList.toggle('is-active', _talkAgentMode === 'grok');
+        grok.classList.toggle('is-collapsed', _talkAgentMode !== 'grok');
+      }
+      if (legacy) {
+        legacy.classList.toggle('is-active', _talkAgentMode === 'legacy');
+        legacy.classList.toggle('is-collapsed', _talkAgentMode !== 'legacy');
+      }
+    }
+    window.g1SetTalkAgentMode = function(mode){
+      mode = (mode === 'grok' || mode === 'legacy') ? mode : 'none';
+      if (mode === 'grok') {
+        var wt = document.getElementById('wakeListenToggle');
+        if (wt && wt.checked) {
+          wt.checked = false;
+          if (typeof stopWakeRecorder === 'function') stopWakeRecorder();
+          if (typeof resetWakeCommandMode === 'function') resetWakeCommandMode();
+        }
+        var wl = document.getElementById('wakeToggleLabel');
+        if (wl) wl.textContent = 'OFF';
+      } else if (mode === 'legacy' && typeof window.g1GrokVoiceStop === 'function') {
+        window.g1GrokVoiceStop(true);
+      }
+      applyTalkAgentLayout(mode);
+    };
+    applyTalkAgentLayout('none');
     (function(){
       var grokWs = null, grokMicStream = null, grokCaptureCtx = null, grokCaptureNode = null;
       var grokPlaybackCtx = null, grokNextPlayTime = 0, grokActive = false, grokSessionReady = false;
@@ -3760,7 +3854,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           var int16 = new Int16Array(bytes.buffer);
           var float32 = new Float32Array(int16.length);
           for (var j = 0; j < int16.length; j++) float32[j] = int16[j] / 32768;
-          if (!grokPlaybackCtx) grokPlaybackCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: GROK_SAMPLE_RATE });
+          if (!grokPlaybackCtx) {
+            grokPlaybackCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: GROK_SAMPLE_RATE });
+            var spk = grokEl('speaker');
+            var sink = spk && spk.value && spk.value.indexOf('browser_') === 0 ? spk.value.replace(/^browser_/, '') : '';
+            if (sink && sink !== 'default' && typeof grokPlaybackCtx.setSinkId === 'function') {
+              grokPlaybackCtx.setSinkId(sink).catch(function(){});
+            }
+          }
           if (grokPlaybackCtx.state === 'suspended') grokPlaybackCtx.resume();
           var buffer = grokPlaybackCtx.createBuffer(1, float32.length, GROK_SAMPLE_RATE);
           buffer.copyToChannel(float32, 0);
@@ -3783,7 +3884,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       function grokStopWs(){
         if (grokWs) { try { grokWs.close(); } catch(_){} grokWs = null; }
       }
-      window.g1GrokVoiceStop = function(){
+      window.g1GrokVoiceStop = function(keepLayout){
         var wasActive = grokActive;
         grokActive = false;
         grokSessionReady = false;
@@ -3800,6 +3901,10 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         if (tl) tl.textContent = 'OFF';
         if (wasActive) grokSetStatus('Disattivato');
         grokUpdateTranscript();
+        if (!keepLayout) {
+          if (_talkAgentMode === 'grok') applyTalkAgentLayout('none');
+          setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 180);
+        }
       };
       function grokConfigureSession(){
         grokSend({
@@ -3815,21 +3920,26 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       async function grokStartMic(){
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          grokSetStatus('Microfono browser non disponibile');
           window.g1GrokVoiceStop();
+          grokSetStatus('Microfono browser non disponibile');
           return;
         }
         var micSel = grokEl('mic');
-        var constraints = { audio: true };
-        if (micSel && micSel.value && micSel.value.indexOf('browser_') === 0) {
-          var devId = micSel.value.replace('browser_', '');
-          if (devId) constraints = { audio: { deviceId: { exact: devId } } };
+        var micValue = micSel ? String(micSel.value || '') : '';
+        if (micValue.indexOf('local_') === 0 || micValue.indexOf('net_') === 0) {
+          window.g1GrokVoiceStop();
+          grokSetStatus('Grok realtime richiede un microfono Browser in Audio Talk');
+          return;
         }
+        var devId = micValue.indexOf('webmic_') === 0 ? decodeURIComponent(micValue.slice(7)) : '';
+        var constraints = typeof buildAudioCaptureConstraints === 'function'
+          ? buildAudioCaptureConstraints(devId)
+          : { audio: devId ? { deviceId: { exact: devId } } : true };
         try {
           grokMicStream = await navigator.mediaDevices.getUserMedia(constraints);
         } catch (e) {
-          grokSetStatus('Permesso microfono negato');
           window.g1GrokVoiceStop();
+          grokSetStatus('Permesso microfono negato');
           return;
         }
         grokCaptureCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -3839,7 +3949,17 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         grokCaptureNode.onaudioprocess = function(ev){
           if (!grokActive || !grokSessionReady || !grokWs || grokWs.readyState !== 1) return;
           var input = ev.inputBuffer.getChannelData(0);
-          var pcm = grokDownsample(input, grokCaptureCtx.sampleRate, GROK_SAMPLE_RATE);
+          var inputGain = typeof getParlaMonitorGain === 'function' ? getParlaMonitorGain() : 1;
+          var peak = 0;
+          for (var p = 0; p < input.length; p++) peak = Math.max(peak, Math.abs(input[p]));
+          var peak255 = Math.min(255, Math.round(peak * 255 * inputGain));
+          if (typeof window.g1UpdateTalkMicLevel === 'function') window.g1UpdateTalkMicLevel(peak255);
+          var threshold = typeof getWakeVoiceThreshold === 'function' ? getWakeVoiceThreshold() : 20;
+          var adjusted = new Float32Array(input.length);
+          if (peak255 >= threshold) {
+            for (var a = 0; a < input.length; a++) adjusted[a] = Math.max(-1, Math.min(1, input[a] * inputGain));
+          }
+          var pcm = grokDownsample(adjusted, grokCaptureCtx.sampleRate, GROK_SAMPLE_RATE);
           var buf = grokFloatToPcm16(pcm);
           grokSend({ type: 'input_audio_buffer.append', audio: arrayBufferToBase64(buf) });
         };
@@ -3884,6 +4004,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       }
       window.g1GrokVoiceStart = async function(){
         if (grokActive) return;
+        window.g1SetTalkAgentMode('grok');
+        if (typeof stopParlaMicPreview === 'function') stopParlaMicPreview();
         if (typeof stopWakeRecorder === 'function') stopWakeRecorder();
         var wt = grokEl('wakeListenToggle');
         if (wt) { wt.checked = false; wt.disabled = true; }
@@ -3934,8 +4056,12 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         grokToggle.onchange = function(){
           var lbl = grokEl('grokVoiceToggleLabel');
           if (lbl) lbl.textContent = grokToggle.checked ? 'ON' : 'OFF';
-          if (grokToggle.checked) window.g1GrokVoiceStart();
-          else window.g1GrokVoiceStop();
+          if (grokToggle.checked) {
+            window.g1SetTalkAgentMode('grok');
+            window.g1GrokVoiceStart();
+          } else {
+            window.g1GrokVoiceStop();
+          }
         };
       }
       grokRefreshPanel();
@@ -4050,7 +4176,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     let wakeCommandMode = false, wakeCommandIdleTimer = null;
     let wakeAudioInFlight = false, wakeQueuedBlob = null;
     let listenServerWakeLatched = false;
-    let wakeLevelCtx = null, wakeAnalyser = null, wakeLevelSampleInterval = null;
+    let wakeLevelCtx = null, wakeAnalyser = null, wakeInputGainNode = null, wakeLevelSampleInterval = null;
     let wakeSlicePeak = 0;
     /** Default soglia voce (0-255 FFT); override con slider e localStorage g1_wake_voice_threshold. */
     const WAKE_VOICE_THRESHOLD_DEFAULT = 20;
@@ -4094,6 +4220,29 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       var pct = Math.max(0, Math.min(100, (th / 255) * 100));
       line.style.left = 'calc(' + pct + '% - 1px)';
     }
+    window.g1UpdateTalkMicLevel = function(peak){
+      peak = Math.max(0, Math.min(255, Number(peak) || 0));
+      var th = getWakeVoiceThreshold();
+      var gain = getParlaMonitorGain();
+      var barW = Math.min(100, peak * (100 / 255));
+      var fill = document.getElementById('parlaPreviewBarFill');
+      var st = document.getElementById('parlaPreviewStatus');
+      var gate = document.getElementById('parlaPreviewGate');
+      if (fill) fill.style.width = barW.toFixed(1) + '%';
+      if (st) st.textContent = 'Picco: ' + Math.round(peak) + ' / 255 · soglia: ' + th + ' · gain: ' + gain.toFixed(1) + '×';
+      if (gate) {
+        if (peak >= th) {
+          gate.textContent = 'VOCE';
+          gate.style.background = 'rgba(34,197,94,0.25)';
+          gate.style.color = '#4ade80';
+        } else {
+          gate.textContent = 'Silenzio';
+          gate.style.background = '#27272a';
+          gate.style.color = '#71717a';
+        }
+      }
+      updateParlaThresholdLine();
+    };
     (function initParlaMicControls(){
       var wTh = document.getElementById('micWakeThresholdSlider');
       var wDisp = document.getElementById('wakeThDisplay');
@@ -4121,6 +4270,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           g = Math.max(0.4, Math.min(4, g));
           try { localStorage.setItem('g1_mic_monitor_gain', String(g)); } catch (_) {}
           if (gDisp) gDisp.textContent = g.toFixed(1);
+          if (wakeInputGainNode) wakeInputGainNode.gain.value = g;
         });
       }
       updateParlaThresholdLine();
@@ -4165,19 +4315,8 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           parlaPreviewAnalyser.getByteFrequencyData(buf);
           var peak = 0;
           for (var i = 0; i < buf.length; i++) if (buf[i] > peak) peak = buf[i];
-          var th = getWakeVoiceThreshold();
           var gain = getParlaMonitorGain();
-          var barW = Math.min(100, peak * gain * (100 / 255));
-          var fill = document.getElementById('parlaPreviewBarFill');
-          var st = document.getElementById('parlaPreviewStatus');
-          var gate = document.getElementById('parlaPreviewGate');
-          if (fill) fill.style.width = barW.toFixed(1) + '%';
-          if (st) st.textContent = 'Picco: ' + peak + ' / 255 · soglia invio: ' + th;
-          if (gate) {
-            if (peak >= th) { gate.textContent = 'SOPRA SOGLIA'; gate.style.background = 'rgba(34,197,94,0.25)'; gate.style.color = '#4ade80'; }
-            else { gate.textContent = 'Sotto soglia'; gate.style.background = '#27272a'; gate.style.color = '#71717a'; }
-          }
-          updateParlaThresholdLine();
+          window.g1UpdateTalkMicLevel(Math.min(255, peak * gain));
         }, 55);
       }).catch(function(){
         var m = document.getElementById('parlaPreviewDisabledMsg');
@@ -4656,6 +4795,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       if (wakeLevelSampleInterval) { clearInterval(wakeLevelSampleInterval); wakeLevelSampleInterval = null; }
       if (wakeLevelCtx) { try { wakeLevelCtx.close(); } catch(_){} wakeLevelCtx = null; }
       wakeAnalyser = null;
+      wakeInputGainNode = null;
       wakeSlicePeak = 0;
     }
     /** High-pass (taglia rimbombo/gravi) + compressore leggero → voce più stabile nel brusio; stream processato per MediaRecorder. */
@@ -4679,11 +4819,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         wakeAnalyser = wakeLevelCtx.createAnalyser();
         wakeAnalyser.fftSize = 512;
         wakeAnalyser.smoothingTimeConstant = 0.35;
+        const micGain = wakeLevelCtx.createGain();
+        micGain.gain.value = getParlaMonitorGain();
+        wakeInputGainNode = micGain;
         const dest = wakeLevelCtx.createMediaStreamDestination();
         src.connect(hp);
         hp.connect(comp);
-        comp.connect(wakeAnalyser);
-        comp.connect(dest);
+        comp.connect(micGain);
+        micGain.connect(wakeAnalyser);
+        micGain.connect(dest);
         wakeStream = dest.stream;
         wakeLevelCtx.resume && wakeLevelCtx.resume();
       } catch(_) {
@@ -4968,6 +5112,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             let s = 0;
             for (let i = 0; i < buf.length; i++) if (buf[i] > s) s = buf[i];
             if (s > wakeSlicePeak) wakeSlicePeak = s;
+            if (typeof window.g1UpdateTalkMicLevel === 'function') window.g1UpdateTalkMicLevel(s);
             const th = getWakeVoiceThreshold();
             if (s >= th) { voiceDurationMs += 50; lastVoiceTs = Date.now(); }
             if (isCmd && voiceDurationMs >= CMD_MIN_VOICE_MS && lastVoiceTs > 0 && (Date.now() - lastVoiceTs >= CMD_SILENCE_MS)) {
@@ -5008,13 +5153,14 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     if (wakeListenToggleEl) {
       wakeListenToggleEl.onchange = function(){
         if (wakeListenToggleEl.checked) {
-          if (typeof window.g1GrokVoiceStop === 'function') window.g1GrokVoiceStop();
+          window.g1SetTalkAgentMode('legacy');
           const st = document.getElementById('wakeListenStatus');
           if (st) st.textContent = 'Avvio ascolto…';
           startWakeRecorder();
         } else {
           stopWakeRecorder();
           resetWakeCommandMode();
+          if (_talkAgentMode === 'legacy') applyTalkAgentLayout('none');
           const st = document.getElementById('wakeListenStatus');
           if (st) st.textContent = 'Disattivato';
           setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 300);
@@ -5370,6 +5516,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
       micSel.onchange = function(){
         updateActiveMicIndicator();
         autoSaveMicConfigFromUi();
+        if (_talkAgentMode === 'grok') {
+          window.g1GrokVoiceStop(true);
+          var gt = document.getElementById('grokVoiceToggle');
+          if (gt) gt.checked = true;
+          setTimeout(function(){ window.g1GrokVoiceStart(); }, 120);
+        } else if (_talkAgentMode === 'legacy') {
+          stopWakeRecorder();
+          setTimeout(function(){ startWakeRecorder(); }, 120);
+        }
         setTimeout(function(){ if (typeof startParlaMicPreviewIfEligible === 'function') startParlaMicPreviewIfEligible(); }, 80);
       };
 
@@ -5403,6 +5558,13 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         lastSinkId = (v && v.indexOf('browser_') === 0 && v !== 'browser_default') ? v.replace(/^browser_/, '') : null;
         syncSbOutputFromSpeaker();
         updateActiveMicIndicator();
+        autoSaveMicConfigFromUi();
+        if (_talkAgentMode === 'grok') {
+          window.g1GrokVoiceStop(true);
+          var gt = document.getElementById('grokVoiceToggle');
+          if (gt) gt.checked = true;
+          setTimeout(function(){ window.g1GrokVoiceStart(); }, 120);
+        }
       };
       const sbOut = document.getElementById('sbOutput');
       if (sbOut) {
