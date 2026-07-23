@@ -2160,6 +2160,32 @@ self.addEventListener('activate', () => self.clients.claim());
         finally:
             ptt_stop.set()
 
+    @app.get("/api/grok-voice/status")
+    def api_grok_voice_status():
+        from talk_module.grok_voice import grok_voice_configured
+
+        return {
+            "ok": True,
+            "configured": grok_voice_configured(),
+            "agent_id": settings.xai_agent_id or "",
+        }
+
+    @app.websocket("/ws/grok-voice")
+    async def websocket_grok_voice(ws: WebSocket):
+        from talk_module.grok_voice import grok_voice_configured, proxy_grok_voice
+
+        await ws.accept()
+        if not grok_voice_configured():
+            await ws.send_text(
+                json.dumps({"type": "error", "error": "Grok voice non configurato (XAI_API_KEY in .env)"})
+            )
+            await ws.close()
+            return
+        try:
+            await proxy_grok_voice(ws)
+        except WebSocketDisconnect:
+            pass
+
     @app.websocket("/ws/mic-level")
     async def websocket_mic_level(ws: WebSocket):
         """Stream real-time mic audio levels to the browser for visual monitoring."""
@@ -3184,6 +3210,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
           } else if (typeof stopParlaMicPreview === 'function') {
             stopParlaMicPreview();
           }
+          if (sec !== 'parla' && typeof window.g1GrokVoiceStop === 'function') {
+            window.g1GrokVoiceStop();
+          }
         }, 0);
         return false;
       };
@@ -3351,6 +3380,20 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
   </div>
     </section>
     <section id="section-parla" class="section">
+
+  <!-- GROK VOICE AGENT -->
+  <div id="grokVoicePanel" style="margin-bottom:20px;padding:16px;border-radius:12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
+      <h2 style="font-size:1.15rem;margin:0;color:#c4b5fd;">Grok Voice Agent</h2>
+      <label for="grokVoiceToggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">
+        <span style="font-size:12px;color:#9ca3af;" id="grokVoiceToggleLabel">OFF</span>
+        <input type="checkbox" id="grokVoiceToggle" style="width:22px;height:22px;margin:0;accent-color:#a78bfa;" />
+      </label>
+    </div>
+    <p id="grokVoiceStatus" style="margin:0 0 6px;font-size:13px;color:#71717a;">Disattivato</p>
+    <p id="grokVoiceTranscript" class="hint" style="margin:0;font-size:12px;color:#a1a1aa;min-height:2.2em;line-height:1.4;"></p>
+    <p id="grokVoiceConfigHint" class="hint" style="display:none;margin:8px 0 0;font-size:11px;color:#f59e0b;">Configura XAI_API_KEY e XAI_AGENT_ID nel file .env sul server.</p>
+  </div>
 
   <!-- 1. ASCOLTO CONTINUO (Wake Word) -->
   <div style="margin-bottom:20px;padding:16px;border-radius:12px;background:rgba(20,184,166,0.06);border:1px solid rgba(20,184,166,0.2);">
@@ -3676,6 +3719,227 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
 
     const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
     const wsParlaUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/parla';
+    const wsGrokVoiceUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/grok-voice';
+    (function(){
+      var grokWs = null, grokMicStream = null, grokCaptureCtx = null, grokCaptureNode = null;
+      var grokPlaybackCtx = null, grokNextPlayTime = 0, grokActive = false, grokSessionReady = false;
+      var GROK_SAMPLE_RATE = 24000;
+      function grokEl(id){ return document.getElementById(id); }
+      function grokSetStatus(t){ var el = grokEl('grokVoiceStatus'); if (el) el.textContent = t; }
+      var grokUserText = '', grokAssistantText = '';
+      function grokUpdateTranscript(){
+        var el = grokEl('grokVoiceTranscript');
+        if (!el) return;
+        var parts = [];
+        if (grokUserText) parts.push('Tu: ' + grokUserText);
+        if (grokAssistantText) parts.push('Grok: ' + grokAssistantText);
+        el.textContent = parts.join(' · ');
+      }
+      function grokDownsample(buffer, fromRate, toRate){
+        if (fromRate === toRate) return buffer;
+        var ratio = fromRate / toRate;
+        var newLen = Math.round(buffer.length / ratio);
+        var out = new Float32Array(newLen);
+        for (var i = 0; i < newLen; i++) out[i] = buffer[Math.floor(i * ratio)] || 0;
+        return out;
+      }
+      function grokFloatToPcm16(float32){
+        var buf = new ArrayBuffer(float32.length * 2);
+        var view = new DataView(buf);
+        for (var i = 0; i < float32.length; i++){
+          var s = Math.max(-1, Math.min(1, float32[i]));
+          view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        }
+        return buf;
+      }
+      function grokPlayPcmDelta(b64){
+        try {
+          var raw = atob(b64);
+          var bytes = new Uint8Array(raw.length);
+          for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+          var int16 = new Int16Array(bytes.buffer);
+          var float32 = new Float32Array(int16.length);
+          for (var j = 0; j < int16.length; j++) float32[j] = int16[j] / 32768;
+          if (!grokPlaybackCtx) grokPlaybackCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: GROK_SAMPLE_RATE });
+          if (grokPlaybackCtx.state === 'suspended') grokPlaybackCtx.resume();
+          var buffer = grokPlaybackCtx.createBuffer(1, float32.length, GROK_SAMPLE_RATE);
+          buffer.copyToChannel(float32, 0);
+          var src = grokPlaybackCtx.createBufferSource();
+          src.buffer = buffer;
+          src.connect(grokPlaybackCtx.destination);
+          var t = Math.max(grokPlaybackCtx.currentTime, grokNextPlayTime);
+          src.start(t);
+          grokNextPlayTime = t + buffer.duration;
+        } catch (_) {}
+      }
+      function grokSend(obj){
+        if (grokWs && grokWs.readyState === 1) grokWs.send(JSON.stringify(obj));
+      }
+      function grokStopMic(){
+        if (grokCaptureNode) { try { grokCaptureNode.disconnect(); } catch(_){} grokCaptureNode.onaudioprocess = null; grokCaptureNode = null; }
+        if (grokCaptureCtx) { try { grokCaptureCtx.close(); } catch(_){} grokCaptureCtx = null; }
+        if (grokMicStream) { grokMicStream.getTracks().forEach(function(t){ try { t.stop(); } catch(_){} }); grokMicStream = null; }
+      }
+      function grokStopWs(){
+        if (grokWs) { try { grokWs.close(); } catch(_){} grokWs = null; }
+      }
+      window.g1GrokVoiceStop = function(){
+        var wasActive = grokActive;
+        grokActive = false;
+        grokSessionReady = false;
+        grokNextPlayTime = 0;
+        grokUserText = '';
+        grokAssistantText = '';
+        grokStopMic();
+        grokStopWs();
+        var wt = grokEl('wakeListenToggle');
+        if (wt) wt.disabled = false;
+        var tg = grokEl('grokVoiceToggle');
+        if (tg) tg.checked = false;
+        var tl = grokEl('grokVoiceToggleLabel');
+        if (tl) tl.textContent = 'OFF';
+        if (wasActive) grokSetStatus('Disattivato');
+        grokUpdateTranscript();
+      };
+      function grokConfigureSession(){
+        grokSend({
+          type: 'session.update',
+          session: {
+            turn_detection: { type: 'server_vad' },
+            audio: {
+              input: { format: { type: 'audio/pcm', rate: GROK_SAMPLE_RATE } },
+              output: { format: { type: 'audio/pcm', rate: GROK_SAMPLE_RATE } }
+            }
+          }
+        });
+      }
+      async function grokStartMic(){
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          grokSetStatus('Microfono browser non disponibile');
+          window.g1GrokVoiceStop();
+          return;
+        }
+        var micSel = grokEl('mic');
+        var constraints = { audio: true };
+        if (micSel && micSel.value && micSel.value.indexOf('browser_') === 0) {
+          var devId = micSel.value.replace('browser_', '');
+          if (devId) constraints = { audio: { deviceId: { exact: devId } } };
+        }
+        try {
+          grokMicStream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (e) {
+          grokSetStatus('Permesso microfono negato');
+          window.g1GrokVoiceStop();
+          return;
+        }
+        grokCaptureCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (grokCaptureCtx.state === 'suspended') await grokCaptureCtx.resume();
+        var source = grokCaptureCtx.createMediaStreamSource(grokMicStream);
+        grokCaptureNode = grokCaptureCtx.createScriptProcessor(4096, 1, 1);
+        grokCaptureNode.onaudioprocess = function(ev){
+          if (!grokActive || !grokSessionReady || !grokWs || grokWs.readyState !== 1) return;
+          var input = ev.inputBuffer.getChannelData(0);
+          var pcm = grokDownsample(input, grokCaptureCtx.sampleRate, GROK_SAMPLE_RATE);
+          var buf = grokFloatToPcm16(pcm);
+          grokSend({ type: 'input_audio_buffer.append', audio: arrayBufferToBase64(buf) });
+        };
+        source.connect(grokCaptureNode);
+        grokCaptureNode.connect(grokCaptureCtx.destination);
+        grokSetStatus('In ascolto — parla con Grok');
+      }
+      function grokHandleEvent(ev){
+        if (!ev || !ev.type) return;
+        if (ev.type === 'proxy.ready') {
+          grokSessionReady = false;
+          grokConfigureSession();
+          return;
+        }
+        if (ev.type === 'session.updated' || ev.type === 'session.created') {
+          grokSessionReady = true;
+          grokSetStatus('Agente attivo — parla');
+          return;
+        }
+        if (ev.type === 'response.output_audio.delta' && ev.delta) {
+          grokPlayPcmDelta(ev.delta);
+          grokSetStatus('Grok sta parlando…');
+          return;
+        }
+        if (ev.type === 'response.output_audio_transcript.delta' && ev.delta) {
+          grokAssistantText += ev.delta;
+          grokUpdateTranscript();
+          return;
+        }
+        if (ev.type === 'conversation.item.input_audio_transcription.completed' && ev.transcript) {
+          grokUserText = ev.transcript;
+          grokAssistantText = '';
+          grokUpdateTranscript();
+          return;
+        }
+        if (ev.type === 'response.created') grokAssistantText = '';
+        if (ev.type === 'input_audio_buffer.speech_started') grokSetStatus('Ti sto ascoltando…');
+        if (ev.type === 'response.done') grokSetStatus('In ascolto — parla con Grok');
+        if (ev.type === 'error') {
+          grokSetStatus('Errore: ' + (ev.error && ev.error.message ? ev.error.message : (ev.error || 'sconosciuto')));
+        }
+      }
+      window.g1GrokVoiceStart = async function(){
+        if (grokActive) return;
+        if (typeof stopWakeRecorder === 'function') stopWakeRecorder();
+        var wt = grokEl('wakeListenToggle');
+        if (wt) { wt.checked = false; wt.disabled = true; }
+        grokActive = true;
+        grokSetStatus('Connessione a Grok…');
+        grokUserText = '';
+        grokAssistantText = '';
+        grokUpdateTranscript();
+        grokWs = new WebSocket(wsGrokVoiceUrl);
+        grokWs.onopen = function(){ grokSetStatus('Connesso — configurazione sessione…'); };
+        grokWs.onmessage = function(msg){
+          try { grokHandleEvent(JSON.parse(msg.data)); } catch (_) {}
+        };
+        grokWs.onerror = function(){ grokSetStatus('Errore WebSocket'); };
+        grokWs.onclose = function(){
+          grokWs = null;
+          if (grokActive) {
+            grokActive = false;
+            grokStopMic();
+            grokSetStatus('Connessione chiusa');
+            var tg = grokEl('grokVoiceToggle');
+            if (tg) tg.checked = false;
+            var wt = grokEl('wakeListenToggle');
+            if (wt) wt.disabled = false;
+          }
+        };
+        await grokStartMic();
+      };
+      function grokRefreshPanel(){
+        fetch('/api/grok-voice/status').then(function(r){ return r.json(); }).then(function(d){
+          var panel = grokEl('grokVoicePanel');
+          var hint = grokEl('grokVoiceConfigHint');
+          var tg = grokEl('grokVoiceToggle');
+          if (!panel) return;
+          if (!d.configured) {
+            if (hint) hint.style.display = 'block';
+            if (tg) tg.disabled = true;
+            grokSetStatus('Non configurato sul server');
+          } else {
+            if (hint) hint.style.display = 'none';
+            if (tg) tg.disabled = false;
+            grokSetStatus('Disattivato' + (d.agent_id ? ' (agent ' + d.agent_id + ')' : ''));
+          }
+        }).catch(function(){});
+      }
+      var grokToggle = grokEl('grokVoiceToggle');
+      if (grokToggle) {
+        grokToggle.onchange = function(){
+          var lbl = grokEl('grokVoiceToggleLabel');
+          if (lbl) lbl.textContent = grokToggle.checked ? 'ON' : 'OFF';
+          if (grokToggle.checked) window.g1GrokVoiceStart();
+          else window.g1GrokVoiceStop();
+        };
+      }
+      grokRefreshPanel();
+    })();
     var btn = null;
     let _loadDevicesSeq = 0;
     let _micPermissionGranted = false;
@@ -4744,6 +5008,7 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
     if (wakeListenToggleEl) {
       wakeListenToggleEl.onchange = function(){
         if (wakeListenToggleEl.checked) {
+          if (typeof window.g1GrokVoiceStop === 'function') window.g1GrokVoiceStop();
           const st = document.getElementById('wakeListenStatus');
           if (st) st.textContent = 'Avvio ascolto…';
           startWakeRecorder();

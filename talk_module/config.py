@@ -61,6 +61,9 @@ class Settings:
     stt_provider: str = _str(os.getenv("STT_PROVIDER", "whisper")).lower()
     deepgram_api_key: str = _str(os.getenv("DEEPGRAM_API_KEY", ""))
     groq_api_key: str = _str(os.getenv("GROQ_API_KEY", ""))
+    # xAI Grok Voice Agent (Realtime WebSocket)
+    xai_api_key: str = _str(os.getenv("XAI_API_KEY", ""))
+    xai_agent_id: str = _str(os.getenv("XAI_AGENT_ID", ""))
     tts_voice: str = _str(os.getenv("TTS_VOICE", "onyx"))
     tts_voice_robot: str = _str(os.getenv("TTS_VOICE_ROBOT", "echo"))  # voce più metallica per traccia robot
     tts_model: str = _str(os.getenv("TTS_MODEL", "gpt-4o-mini-tts"))  # gpt-4o-mini-tts più affidabile per italiano
