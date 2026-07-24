@@ -1,0 +1,110 @@
+# Knowledge base per Grok Voice Agent (xAI)
+#
+# Carica questo file nella Console xAI → Voice Agent → Knowledge / Collections.
+# Formato pensato per retrieval RAG: sezioni chiare, nomi ripetuti, risposte in prosa.
+#
+# Nome corretto ristorante: Guaiane (G-U-A-I-A-N-E). Non Guagliani, non Guagliano.
+================================================================================
+G1 — HOST ROBOTICO
+================================================================================
+
+Chi sono
+  Sono G1, robot umanoide Unitree. Accompagno gli ospiti come host digitale: saluto,
+  rispondo a domande brevi e oriento durante l'evento.
+
+Cosa so fare
+  Rispondo a domande su ospiti, aziende e luoghi descritti in questa knowledge base.
+  Per messaggi ufficiali pre-registrati dell'evento, gli ospiti possono usare la
+  Soundboard nell'app G1 Talk: un tap e il robot riproduce il messaggio in voce.
+
+Unitree G1
+  Il G1 è un umanoide bimanuale Unitree: cammina, gesticola e interagisce con il
+  pubblico in modo naturale.
+
+DGS
+  DGS è il partner tecnologico che supporta la robotica e l'automazione di questa
+  esperienza con G1.
+
+Soundboard
+  La Soundboard nell'app contiene i messaggi ufficiali della serata. Per orari,
+  programma e annunci formali, invita gli ospiti a usare i pulsanti Soundboard
+  oppure a chiedere in accoglienza.
+
+
+================================================================================
+Guaiane — RISTORANTE / TRATTORIA (Noventa di Piave)
+================================================================================
+
+Nome e pronuncia
+  Il nome corretto è Guaiane (G-U-A-I-A-N-E).
+  Il ristorante si chiama Guaiane, non Guagliani, non Guagliano, non Guajane.
+  Se l'utente pronuncia un nome simile, intende sempre Guaiane.
+
+Origine del nome
+  Il nome viene dalla via su cui è situato il ristorante. Anticamente la zona era
+  ricca di boschi di rovere; in latino volgare si chiamavano "gajum". Da lì deriva
+  il nome Guaiane, legato alla storia del territorio di Noventa di Piave.
+
+Storia
+  La trattoria fu fondata da Antonio De Nardi, che negli anni Cinquanta trasformò
+  una vecchia osteria con negozio di alimentari in un ristorante. All'inizio
+  serviva soprattutto carne e piatti di campagna; col tempo è diventata un punto
+  di riferimento anche per il pesce. Oggi la gestiscono Lucio e Alessandro Marangoni.
+
+Cosa si mangia — Trattoria Guaiane
+  Si possono gustare crudi di mare, ostriche, scampi, grigliate di pesce e primi
+  piatti veneti come i bigoli lagunari. Ci sono anche ottime carni alla griglia,
+  come fiorentina e tagliata.
+
+Hostaria delle Guaiane
+  Nell'Hostaria delle Guaiane si trova la cucina tradizionale: pollo alla griglia
+  e bollito misto.
+
+Piatto simbolo
+  Il piatto simbolo delle Guaiane sono i Bigoli Lagunari: pasta fresca con seppie,
+  piselli e acciuga. È il piatto del Buon Ricordo, uno dei piatti distintivi che
+  rappresentano il ristorante in tutta Italia.
+
+Champagne in carta — Ayala Brut Majeur
+  Champagne Ayala Brut Majeur, la cuvée identitaria dal 1860: puro e bilanciato,
+  blend di 70 Cru con Chardonnay 55%, Pinot Noir 30% e Meunier 15%. Affinamento
+  3 anni, dosaggio 6 g/L; note di agrumi, fiori e frutti bianchi.
+
+Eventi e serate a tema
+  Oltre al menù alla carta si organizzano serate a tema durante l'anno, tra cui:
+  il Tutto Crudo di Mare, le Tre Esse, Funghi Tartufo e Baccalà, e il famoso
+  pranzo del Bollito. Sono occasioni per scoprire sapori speciali in un'atmosfera
+  unica.
+
+
+================================================================================
+ME.KO. SRL — ROBOTICA E AUTOMAZIONE (Noventa di Piave)
+================================================================================
+
+Chi è Me.ko
+  Me.ko. Srl è un'azienda di Noventa di Piave specializzata in robotica
+  collaborativa e automazione industriale: distributore Universal Robots e MiR nel
+  Triveneto, con consulenza, installazione e formazione.
+
+Sede
+  Me.ko. Srl ha sede a Noventa di Piave, in Via Ettore Majorana 32, 30020 Venezia.
+  Zona industriale del Triveneto, provincia di Venezia.
+
+Storia
+  Me.ko. Srl nasce a fine 2016 a Noventa di Piave, fondata da Davide Cal, ed è
+  cresciuta come distributore e centro assistenza Universal Robots e MiR per
+  Veneto, Friuli, Trentino e Alto Adige.
+
+Cosa fa Me.ko
+  Me.ko progetta e integra automazioni con cobot Universal Robots e flotte MiR:
+  studio di fattibilità, messa in servizio, formazione operatori e programmatori,
+  assistenza e ottimizzazione continua. Sito web: mekosrl.it.
+
+Universal Robots
+  Me.ko. Srl è distributore ufficiale Universal Robots nel Triveneto: installazione
+  cobot, corsi Polyscope e supporto per calzature, automotive, plastica,
+  metalmeccanica e alimentare.
+
+MiR — robot mobili
+  Me.ko. Srl distribuisce e integra robot mobili autonomi MiR nel Triveneto, con
+  consulenza logistica e flotte per fabbrica e magazzino.

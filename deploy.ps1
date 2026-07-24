@@ -44,6 +44,16 @@ $sshCommon = $sshKeyArgs + @(
 # -n: stdin da /dev/null — ok con chiave SSH. Con password (G1_SSH_BATCH=0) NON usare -n altrimenti il prompt password non appare.
 $sshExec = if ($batchMode -eq "no") { $sshCommon } else { $sshCommon + @("-n") }
 
+function Invoke-RemoteSsh {
+    param([Parameter(Mandatory)][string]$Command)
+    ssh @sshExec $sshHost $Command
+}
+
+function Invoke-RemoteSshT {
+    param([Parameter(Mandatory)][string]$Command)
+    ssh @sshExec -T $sshHost $Command
+}
+
 Write-Host "Deploy G1 Talk Module su $sshHost" -ForegroundColor Cyan
 if ($env:G1_SSH_KEY) { Write-Host "  Chiave: $($env:G1_SSH_KEY)" -ForegroundColor Gray }
 if ($batchMode -eq "no") {
@@ -82,6 +92,13 @@ scp @sshCommon `
     "$root\talk_module\audio_robot_effect.py" `
     "$root\talk_module\quick_lookup.py" `
     "$root\talk_module\robot_actions.py" `
+    "$root\talk_module\speak_gestures.py" `
+    "$root\talk_module\grok_voice.py" `
+    "$root\talk_module\knowledge_store.py" `
+    "$root\talk_module\explore_teaching.py" `
+    "$root\talk_module\explore_teaching_api.py" `
+    "$root\talk_module\parla_teaching_config.py" `
+    "$root\talk_module\visitor_context.py" `
     "$root\talk_module\arm_sdk.py" `
     "$root\talk_module\teaching.py" `
     "$root\talk_module\teaching_store.py" `
@@ -109,6 +126,12 @@ scp @sshCommon `
     "$root\talk_module\stt\groq_client.py" `
     "${sshHost}:${remote}/talk_module/stt/"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1c] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
+scp @sshCommon `
+    "$root\talk_module\audio\g1_speaker.py" `
+    "$root\talk_module\audio\soundboard_convert.py" `
+    "$root\talk_module\audio\soundboard_pcm_cache.py" `
+    "${sshHost}:${remote}/talk_module/audio/"
+if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [1d] codice $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
 # Copia config (soundboard.json escluso: dati utente sul server, non sovrascrivere)
@@ -129,16 +152,17 @@ if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [2] codice $LA
 Write-Host " OK" -ForegroundColor Green
 
 Write-Host "  [2b] soundboard.json... PROTETTO (non viene MAI copiato dal deploy)" -ForegroundColor DarkGreen
+Write-Host "  [2c] parla_teaching_gestures.json... PROTETTO (configurato dalla UI Teaching sul Jetson)" -ForegroundColor DarkGreen
 
 # Installa dipendenze (duckduckgo-search per quick_lookup)
 Write-Host "  [3] Dipendenze (max 180s)..." -NoNewline
-ssh @sshExec $sshHost "cd $remote && timeout 180 .venv/bin/pip install -q ddgs imageio-ffmpeg hand-tracking-sdk"
+Invoke-RemoteSsh ('cd ' + $remote + '; timeout 180 .venv/bin/pip install -q ddgs imageio-ffmpeg hand-tracking-sdk')
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE pip $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
 
 # Scripts e certificati SSL (3 sotto-passi: puo richiedere 15-40 s su rete lenta / Jetson)
 Write-Host "  [3b] Scripts + SSL" -ForegroundColor Cyan
-Write-Host "       scp (restart, generate_ssl_cert, http_redirect)..." -NoNewline
+Write-Host '       scp restart_server, generate_ssl_cert, http_redirect...' -NoNewline
 scp @sshCommon "$root\scripts\restart_server.sh" "$root\scripts\generate_ssl_cert.sh" "$root\scripts\http_redirect.py" "${sshHost}:${remote}/scripts/"
 if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE scp [3b] $LASTEXITCODE" -ForegroundColor Red; exit $LASTEXITCODE }
 Write-Host " OK" -ForegroundColor Green
@@ -147,9 +171,17 @@ Write-Host "       sed CRLF su script..." -NoNewline
 if ($env:G1_SKIP_STRIP_CRLF -eq "1") {
     Write-Host " saltato (G1_SKIP_STRIP_CRLF=1)" -ForegroundColor Gray
 } else {
-    # Backtick per variabili bash remote. Un solo argomento remoto (niente bash -lc annidato).
-    $stripCrlfRemote = "cd `"$remote`" && for f in scripts/*.sh; do [ -f `"`$f`" ] && sed -i 's/\r`$//' `"`$f`"; done; exit 0"
-    ssh @sshExec -T $sshHost $stripCrlfRemote
+    $stripCrlfRemote = @'
+cd "__REMOTE__"
+for f in scripts/*.sh; do
+    if [ -f "$f" ]; then
+        sed -i 's/\r$//' "$f"
+    fi
+done
+exit 0
+'@
+    $stripCrlfRemote = $stripCrlfRemote.Replace("__REMOTE__", $remote)
+    Invoke-RemoteSshT $stripCrlfRemote
     if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host " ERRORE sed CRLF $LASTEXITCODE" -ForegroundColor Yellow }
     Write-Host " OK" -ForegroundColor Green
 }
@@ -158,12 +190,13 @@ if ($env:G1_SKIP_OPENSSL -eq "1") {
     Write-Host "       openssl: saltato (G1_SKIP_OPENSSL=1)" -ForegroundColor Gray
 } else {
     Write-Host "       openssl certificati..." -NoNewline
-    ssh @sshExec -T $sshHost "cd $remote && test -f config/certs/key.pem && test -f config/certs/cert.pem"
+    Invoke-RemoteSshT ('cd ' + $remote + '; test -f config/certs/key.pem -a -f config/certs/cert.pem')
     if ($LASTEXITCODE -eq 0) {
         Write-Host " OK (gia presenti, skip openssl)" -ForegroundColor Green
     } else {
         Write-Host " creazione (max 90s, niente output fino a fine)..." -ForegroundColor DarkGray
-        ssh @sshExec -T $sshHost "cd $remote && (command -v timeout >/dev/null 2>&1 && timeout 90 env TALK_PUBLIC_HOST=$publicIp bash scripts/generate_ssl_cert.sh || env TALK_PUBLIC_HOST=$publicIp bash scripts/generate_ssl_cert.sh)"
+        $genCertCmd = 'cd ' + $remote + '; if command -v timeout >/dev/null 2>&1; then timeout 90 env TALK_PUBLIC_HOST=' + $publicIp + ' bash scripts/generate_ssl_cert.sh; else env TALK_PUBLIC_HOST=' + $publicIp + ' bash scripts/generate_ssl_cert.sh; fi'
+        Invoke-RemoteSshT $genCertCmd
         $certCode = $LASTEXITCODE
         if ($certCode -eq 124) {
             Write-Host " TIMEOUT openssl dopo 90s. Usa certificati esistenti o: `$env:G1_SKIP_OPENSSL='1'" -ForegroundColor Yellow
@@ -177,11 +210,11 @@ if ($env:G1_SKIP_OPENSSL -eq "1") {
 }
 
 # Crea directory teachings sul server (per i movimenti registrati)
-ssh @sshExec $sshHost "mkdir -p $remote/config/teachings"
+Invoke-RemoteSsh ('mkdir -p ' + $remote + '/config/teachings')
 
 # Backup automatico soundboard.json sul Jetson (PRIMA del restart, per sicurezza)
-Write-Host "  [2c] Backup soundboard.json sul Jetson..." -NoNewline
-ssh @sshExec $sshHost "cd $remote && cp -f config/soundboard.json config/soundboard.json.bak 2>/dev/null; echo ok"
+Write-Host "  [2d] Backup soundboard.json sul Jetson..." -NoNewline
+Invoke-RemoteSsh ('cd ' + $remote + '; cp -f config/soundboard.json config/soundboard.json.bak 2>/dev/null; echo ok')
 Write-Host " OK" -ForegroundColor Green
 
 # Riavvia server (timeout 50s: script ~2+8+5*2=20s max)
@@ -197,11 +230,11 @@ $restartSshArgs = $sshKeyArgs + @(
 )
 if ($batchMode -eq "no") {
     # Foreground: permette password SSH (Start-Job non eredita la sessione interattiva)
-    $r = ssh @restartSshArgs $sshHost "cd $remote && timeout 45 bash scripts/restart_server.sh" 2>&1 | Out-String
+    $r = ssh @restartSshArgs $sshHost ('cd ' + $remote + '; timeout 45 bash scripts/restart_server.sh') 2>&1 | Out-String
 } else {
     $job = Start-Job -ScriptBlock {
         param($sshArgs, $h, $r)
-        & ssh @sshArgs $h "cd $r && timeout 45 bash scripts/restart_server.sh"
+        & ssh @sshArgs $h ('cd ' + $r + '; timeout 45 bash scripts/restart_server.sh')
     } -ArgumentList (,$restartSshArgs), $sshHost, $remote
     $null = Wait-Job $job -Timeout 50
     $r = Receive-Job $job
