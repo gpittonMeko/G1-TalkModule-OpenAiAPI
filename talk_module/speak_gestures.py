@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 import threading
 import time
 from typing import Optional
@@ -384,6 +385,34 @@ def is_talk_explanation(prompt: str, response: str = "") -> bool:
     return False
 
 
+def _parla_teaching_gestures() -> list[str]:
+    try:
+        from talk_module.parla_teaching_config import load_parla_teaching_gestures
+
+        return load_parla_teaching_gestures()
+    except Exception:
+        return []
+
+
+def _pick_parla_teaching_gesture() -> str:
+    gestures = _parla_teaching_gestures()
+    if not gestures:
+        return ""
+    return random.choice(gestures)
+
+
+def start_parla_teaching_gesture() -> bool:
+    """Play a random Explore teaching configured for Parla answers."""
+    name = _pick_parla_teaching_gesture()
+    if not name:
+        return False
+    from talk_module.explore_teaching import play_explore_teaching_async
+
+    play_explore_teaching_async(name)
+    print(f"[talk-gesture] parla teaching {name!r}", flush=True)
+    return True
+
+
 def _speak_gesture_actions() -> list[str]:
     """G1_SPEAK_GESTURE: face_wave (default) | nome gesto | off | lista comma-separated."""
     raw = (os.getenv("G1_SPEAK_GESTURE") or "face_wave").strip()
@@ -454,6 +483,9 @@ def start_talk_gesture(prompt: str, response: str = "", *, had_robot_match: bool
                 print(f"[talk-gesture] greeting error: {e}", flush=True)
 
         threading.Thread(target=_greet, daemon=True).start()
+        return
+
+    if start_parla_teaching_gesture():
         return
 
     if is_talk_explanation(prompt, response):

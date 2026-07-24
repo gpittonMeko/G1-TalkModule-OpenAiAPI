@@ -3729,6 +3729,15 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         <button type="button" class="secondary" onclick="window.g1PrepareExploreTeaching && window.g1PrepareExploreTeaching()">Prepara robot</button>
         <button type="button" class="secondary" onclick="window.g1StopExploreTeaching && window.g1StopExploreTeaching()">Rilascia braccia</button>
       </div>
+      <div class="explore-teach-parla" style="margin:0 0 16px;padding:12px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.02);">
+        <h3 style="margin:0 0 6px;font-size:13px;color:#e4e4e7;">Gesti Parla (max 3)</h3>
+        <p class="hint" style="margin:0 0 10px;font-size:11px;color:#71717a;">Durante le risposte in Parla (Talk classico e Grok Voice), G1 richiama a caso uno di questi teaching Explore.</p>
+        <div id="parlaTeachGesturesPickers" style="display:flex;flex-direction:column;gap:8px;"></div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <button type="button" id="parlaTeachGesturesSave" style="padding:8px 14px;background:rgba(20,184,166,0.15);color:#14b8a6;border:1px solid rgba(20,184,166,0.35);border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;">Salva gesti Parla</button>
+          <span id="parlaTeachGesturesStatus" class="hint" style="font-size:11px;color:#71717a;"></span>
+        </div>
+      </div>
       <p id="exploreTeachFsm" class="hint" style="margin:0 0 8px;font-size:11px;color:#71717a;">Stato robot: —</p>
       <p id="exploreTeachErr" class="hint" style="display:none;margin:0 0 8px;color:#f87171;"></p>
       <div id="exploreTeachList"><p class="hint" style="margin:0;font-size:12px;color:#52525b;">Caricamento…</p></div>
@@ -6451,6 +6460,70 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
         })
         .catch(function(){});
     };
+    window._parlaTeachingNamesCache = [];
+    window.g1PopulateParlaTeachingPickers = function(selectedGestures, teachingNames){
+      var wrap = document.getElementById('parlaTeachGesturesPickers');
+      if (!wrap) return;
+      var names = teachingNames || window._parlaTeachingNamesCache || [];
+      var picked = Array.isArray(selectedGestures) ? selectedGestures : [];
+      wrap.innerHTML = [0, 1, 2].map(function(i){
+        var val = String(picked[i] || '').trim();
+        var opts = '<option value="">— nessuno —</option>' + names.map(function(nm){
+          var esc = String(nm || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+          var sel = (val && nm === val) ? ' selected' : '';
+          return '<option value="' + esc + '"' + sel + '>' + esc + '</option>';
+        }).join('');
+        return '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#d4d4d8;">'
+          + '<span style="min-width:58px;color:#71717a;">Gesto ' + (i + 1) + '</span>'
+          + '<select class="parla-teach-gesture-select" data-slot="' + i + '" style="flex:1;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:#27272a;color:#fff;font-size:12px;">'
+          + opts + '</select></label>';
+      }).join('');
+    };
+    window.g1LoadParlaTeachingGestures = function(){
+      return fetch('/api/explore-teachings/parla-gestures')
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          window.g1PopulateParlaTeachingPickers(d.gestures || [], window._parlaTeachingNamesCache || []);
+          return d;
+        })
+        .catch(function(){ return null; });
+    };
+    window.g1SaveParlaTeachingGestures = function(){
+      var selects = document.querySelectorAll('.parla-teach-gesture-select');
+      var gestures = [];
+      selects.forEach(function(sel){
+        var v = String(sel.value || '').trim();
+        if (v) gestures.push(v);
+      });
+      var status = document.getElementById('parlaTeachGesturesStatus');
+      var btn = document.getElementById('parlaTeachGesturesSave');
+      if (btn) btn.disabled = true;
+      return fetch('/api/explore-teachings/parla-gestures', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gestures: gestures })
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (status) status.textContent = d.ok ? 'Salvato' : (d.message || 'Errore');
+        if (d.ok) window.g1PopulateParlaTeachingPickers(d.gestures || [], window._parlaTeachingNamesCache || []);
+        setTimeout(function(){ if (status) status.textContent = ''; }, 2500);
+        return d;
+      }).catch(function(e){
+        if (status) status.textContent = e.message || 'Errore';
+        return null;
+      }).finally(function(){ if (btn) btn.disabled = false; });
+    };
+    (function(){
+      function bindParlaTeachGesturesSave(){
+        var btn = document.getElementById('parlaTeachGesturesSave');
+        if (!btn || btn._parlaSaveBound) return;
+        btn._parlaSaveBound = true;
+        btn.addEventListener('click', function(){
+          if (typeof window.g1SaveParlaTeachingGestures === 'function') window.g1SaveParlaTeachingGestures();
+        });
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindParlaTeachGesturesSave);
+      else bindParlaTeachGesturesSave();
+    })();
     (function(){
       function bindExploreTeachListClicks(){
         var list = document.getElementById('exploreTeachList');
@@ -6483,7 +6556,9 @@ CLIENT_TEMPLATE = """<!DOCTYPE html>
             return;
           }
           var items = d.teachings || [];
+          window._parlaTeachingNamesCache = items.map(function(t){ return String(t.name || '').trim(); }).filter(Boolean);
           window.g1PopulateExploreTeachingSelect(document.getElementById('sbModalExploreTeaching'));
+          if (typeof window.g1LoadParlaTeachingGestures === 'function') window.g1LoadParlaTeachingGestures();
           if (!items.length) {
             list.innerHTML = '<p class="hint" style="margin:0;font-size:12px;color:#52525b;">Nessun movimento nell&#39;app Explore sul robot. Registra prima dal telefono, poi Aggiorna.</p>';
             return;

@@ -28,6 +28,10 @@ class StopBody(BaseModel):
     robot_ip: str | None = None
 
 
+class ParlaGesturesBody(BaseModel):
+    gestures: list[str] = []
+
+
 @router.get("")
 @router.get("/")
 def explore_teachings_list():
@@ -55,3 +59,27 @@ def explore_teachings_stop(body: StopBody = Body(default=StopBody())):
     robot_ip = body.robot_ip or os.getenv("UNITREE_ROBOT_IP", "192.168.123.161")
     result = stop_explore_teaching(robot_ip=robot_ip)
     return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+
+@router.get("/parla-gestures")
+def explore_parla_gestures_get():
+    from talk_module.parla_teaching_config import (
+        MAX_PARLA_TEACHING_GESTURES,
+        load_parla_teaching_gestures,
+        parla_teaching_path,
+    )
+
+    return {
+        "ok": True,
+        "gestures": load_parla_teaching_gestures(),
+        "max": MAX_PARLA_TEACHING_GESTURES,
+        "path": str(parla_teaching_path()),
+    }
+
+
+@router.post("/parla-gestures")
+def explore_parla_gestures_save(body: ParlaGesturesBody):
+    from talk_module.parla_teaching_config import save_parla_teaching_gestures
+
+    saved = save_parla_teaching_gestures(body.gestures or [])
+    return {"ok": True, "gestures": saved}

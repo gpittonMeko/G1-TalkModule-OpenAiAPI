@@ -15,6 +15,53 @@ from talk_module.config import settings
 log = logging.getLogger(__name__)
 
 
+class _GrokGestureState:
+    """Track Grok turns and fire Parla gestures once per assistant response."""
+
+    def __init__(self) -> None:
+        self.last_user_prompt = ""
+        self._fired_response_ids: set[str] = set()
+
+    @staticmethod
+    def _response_id_from_event(event: dict) -> str:
+        rid = str(event.get("response_id") or "").strip()
+        if rid:
+            return rid
+        response = event.get("response")
+        if isinstance(response, dict):
+            return str(response.get("id") or "").strip()
+        return ""
+
+    def observe_event(self, event: dict) -> None:
+        etype = str(event.get("type") or "").strip()
+        if etype == "conversation.item.input_audio_transcription.completed":
+            self.last_user_prompt = str(event.get("transcript") or "").strip()
+            return
+        if etype not in ("response.created", "response.output_audio.delta"):
+            return
+        response_id = self._response_id_from_event(event)
+        if not response_id:
+            if etype != "response.created":
+                return
+            response_id = "__anonymous__"
+        if response_id in self._fired_response_ids:
+            return
+        self._fired_response_ids.add(response_id)
+        self._fire_gesture()
+
+    def _fire_gesture(self) -> None:
+        try:
+            from talk_module.speak_gestures import start_talk_gesture
+
+            start_talk_gesture(self.last_user_prompt, had_robot_match=False)
+            log.info(
+                "[grok-voice] gesto Parla avviato (prompt=%r)",
+                (self.last_user_prompt[:80] + "…") if len(self.last_user_prompt) > 80 else self.last_user_prompt,
+            )
+        except Exception:
+            log.exception("[grok-voice] errore avvio gesto Parla")
+
+
 def grok_realtime_url() -> str:
     agent = (settings.xai_agent_id or "").strip()
     base = "wss://api.x.ai/v1/realtime"
@@ -102,6 +149,8 @@ async def proxy_grok_voice(
                 except WebSocketDisconnect:
                     pass
 
+            gesture_state = _GrokGestureState()
+
             async def forward_xai() -> None:
                 try:
                     async for message in xai_ws:
@@ -109,6 +158,8 @@ async def proxy_grok_voice(
                             event = json.loads(message)
                             if event.get("type") == "session.updated":
                                 session_ready.set()
+                            else:
+                                await asyncio.to_thread(gesture_state.observe_event, event)
                         except (json.JSONDecodeError, AttributeError):
                             pass
                         await send_client(message)
